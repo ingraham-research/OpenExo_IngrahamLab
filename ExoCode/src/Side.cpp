@@ -243,7 +243,8 @@ bool Side::_check_ground_strike()
     _side_data->prev_heel_stance = _prev_heel_contact_state;  
     _side_data->prev_toe_stance = _prev_toe_contact_state;
 
-    bool heel_contact_state = _heel_fsr.get_ground_contact();
+    //bool heel_contact_state = _heel_fsr.get_ground_contact();
+    bool heel_contact_state = false;
     bool toe_contact_state = _toe_fsr.get_ground_contact();
 
     _side_data->heel_stance = heel_contact_state;
