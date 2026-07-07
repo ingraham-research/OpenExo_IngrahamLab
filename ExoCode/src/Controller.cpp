@@ -850,6 +850,9 @@ float Spline::calc_motor_cmd()
         _controller_data->parameters[controller_defs::spline::node3_x_idx],
         _controller_data->parameters[controller_defs::spline::node4_x_idx],
         _controller_data->parameters[controller_defs::spline::node5_x_idx],
+		_controller_data->parameters[controller_defs::spline::node6_x_idx],
+        _controller_data->parameters[controller_defs::spline::node7_x_idx],
+        _controller_data->parameters[controller_defs::spline::node8_x_idx],
     };
 
     float y[5] =
@@ -859,6 +862,9 @@ float Spline::calc_motor_cmd()
         _controller_data->parameters[controller_defs::spline::node3_y_idx],
         _controller_data->parameters[controller_defs::spline::node4_y_idx],
         _controller_data->parameters[controller_defs::spline::node5_y_idx],
+		_controller_data->parameters[controller_defs::spline::node6_y_idx],
+        _controller_data->parameters[controller_defs::spline::node7_y_idx],
+        _controller_data->parameters[controller_defs::spline::node8_y_idx],
     };
 
     float torque_cmd = _spline_interpolate(x, y, percent_gait);
@@ -896,7 +902,7 @@ float Spline::calc_motor_cmd()
 
 float Spline::_spline_interpolate(const float* x, const float* y, float percent_gait)
 {
-    const int n = 5;
+    const int n = 8;
     float y2[n];
     float u[n - 1];
 
