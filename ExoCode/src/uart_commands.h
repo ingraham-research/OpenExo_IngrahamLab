@@ -424,7 +424,12 @@ namespace UART_command_handlers
             rx_msg.data[6] = exo_data->right_side.toe_fsr;
 			rx_msg.data[7] = exo_data->right_side.toe_stance;
 			// rx_msg.data[7] = exo_data->right_side.heel_fsr;
-			rx_msg.data[8] = 8;
+			//HIJACK: Channel 8 was an unused constant placeholder (was = 8). Repurposed to stream
+			//the exo status so the GUI/CSV can see the trial/calibration state (status_defs::messages:
+			//2=trial_on, 4=torque_calibration, 5=fsr_calibration, 6=fsr_refinement, 7=motor_start_up).
+			//Watching it settle at 2 (trial_on) marks FSR refinement finished (set in
+			//Side::check_calibration). Revert to "= 8;" if a real Channel 8 signal is ever needed.
+			rx_msg.data[8] = (float)exo_data->get_status();
 			rx_msg.data[9] = (float)millis()/1000;
 			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
 			break;
@@ -545,7 +550,12 @@ namespace UART_command_handlers
             rx_msg.data[6] = exo_data->right_side.toe_fsr;
 			rx_msg.data[7] = exo_data->right_side.toe_stance;
 			// rx_msg.data[7] = exo_data->right_side.heel_fsr;
-			rx_msg.data[8] = 8;
+			//HIJACK: Channel 8 was an unused constant placeholder (was = 8). Repurposed to stream
+			//the exo status so the GUI/CSV can see the trial/calibration state (status_defs::messages:
+			//2=trial_on, 4=torque_calibration, 5=fsr_calibration, 6=fsr_refinement, 7=motor_start_up).
+			//Watching it settle at 2 (trial_on) marks FSR refinement finished (set in
+			//Side::check_calibration). Revert to "= 8;" if a real Channel 8 signal is ever needed.
+			rx_msg.data[8] = (float)exo_data->get_status();
 			rx_msg.data[9] = (float)millis()/1000;
 			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
 			break;

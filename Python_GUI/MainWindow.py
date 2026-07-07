@@ -233,6 +233,14 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 self.logger.error(f"Failed to update battery level: {e}")
                 self.logger.debug(traceback.format_exc())
+
+            # Update exo status readout from the hijacked RT Channel 8 (firmware status word).
+            try:
+                if len(values) > 8:
+                    self.trial_page.update_exo_status(values[8])
+            except Exception as e:
+                self.logger.error(f"Failed to update exo status: {e}")
+                self.logger.debug(traceback.format_exc())
         except Exception as e:
             self.logger.error(f"Failed to process RT update: {e}")
             self.logger.debug(traceback.format_exc())

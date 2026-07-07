@@ -198,7 +198,19 @@ void Side::check_calibration()
         else if (_side_data->do_calibration_refinement_toe_fsr) 
         {
             _side_data->do_calibration_refinement_toe_fsr = _toe_fsr.refine_calibration(_side_data->do_calibration_refinement_toe_fsr);
-            _data->set_status(status_defs::messages::fsr_refinement);
+            if (_side_data->do_calibration_refinement_toe_fsr)
+            {
+                _data->set_status(status_defs::messages::fsr_refinement);   //toe still refining
+            }
+            else
+            {
+                //Toe refinement just completed on this side. Move to trial_on to mark "ready".
+                //Once BOTH sides finish, no toe/heel branch re-stamps fsr_refinement, so the
+                //status settles at trial_on -> a clean "refinement done" transition, which the
+                //GUI/CSV can see via the hijacked Channel 8 (uart_commands.h bilateral_ankle
+                //data[8]). Before this, the status stayed stuck at fsr_refinement forever.
+                _data->set_status(status_defs::messages::trial_on);
+            }
         }
         
         if (heel_fsr_present())
