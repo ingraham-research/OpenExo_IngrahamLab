@@ -10,6 +10,7 @@
 #include "JointData.h"
 #include "ParamsFromSD.h"
 #include "ParamUpdateValidation.h"
+#include "HeelFsrConfig.h"
 #include "Logger.h"
 #include "RealTimeI2C.h"
 #include "SystemReset.h"
@@ -337,10 +338,13 @@ namespace UART_command_handlers
         // logger::println("UART_command_handlers::update_cal_fsr->Got msg");
         exo_data->right_side.reset_fsr_calibration = true;
         exo_data->right_side.do_calibration_toe_fsr = 1;
-        exo_data->right_side.do_calibration_heel_fsr = 1;
         exo_data->left_side.reset_fsr_calibration = true;
         exo_data->left_side.do_calibration_toe_fsr = 1;
-        exo_data->left_side.do_calibration_heel_fsr = 1;
+        if (heel_fsr_present())
+        {
+            exo_data->right_side.do_calibration_heel_fsr = 1;
+            exo_data->left_side.do_calibration_heel_fsr = 1;
+        }
     }
 
     inline static void get_refine_fsr(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
@@ -350,9 +354,12 @@ namespace UART_command_handlers
     {
         // logger::println("UART_command_handlers::update_refine_fsr->Got msg");
         exo_data->right_side.do_calibration_refinement_toe_fsr = 1;
-        exo_data->right_side.do_calibration_refinement_heel_fsr = 1;
         exo_data->left_side.do_calibration_refinement_toe_fsr = 1;
-        exo_data->left_side.do_calibration_refinement_heel_fsr = 1;
+        if (heel_fsr_present())
+        {
+            exo_data->right_side.do_calibration_refinement_heel_fsr = 1;
+            exo_data->left_side.do_calibration_refinement_heel_fsr = 1;
+        }
     }
 
     inline static void get_motor_enable_disable(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
