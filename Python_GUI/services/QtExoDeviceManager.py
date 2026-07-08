@@ -592,6 +592,48 @@ class QtExoDeviceManager(QtCore.QObject):
 
         asyncio.run_coroutine_threadsafe(_run_write(), self._loop)
 
+    def send_end_trial_sequence(self):
+        """Send the end-trial commands, prioritizing reliable delivery of the reset ('Z').
+
+        Under worn-trial load, plain fire-and-forget writes drop the last command ('Z') so the
+        exo never resets. A 3x write-with-response burst is worse: the 2nd consecutive Write
+        Request wedges on WinRT, so 'Z' is never even sent. So:
+          1. 'Z' (reset) FIRST as a SINGLE write-with-response (ACK'd/retried by the stack),
+             bounded by a timeout so a stuck ATT transaction can't hang us, with a
+             fire-and-forget fallback. Its handler already disables motors + stops the trial +
+             closes logs before rebooting, so it's a complete shutdown on its own.
+          2. 'G' (stop) + 'w' (motor off) after, best-effort backups.
+        The RX characteristic (6E400002) advertises BLEWrite, so write-with-response is valid.
+        """
+        if not self._client or not self._loop:
+            self.logger.debug("send_end_trial_sequence aborted - no client or loop")
+            return
+
+        async def _run():
+            try:
+                if not self._client:
+                    return
+                # 1) Reset first, reliably, but never hang (2s cap) -> fire-and-forget fallback.
+                try:
+                    await asyncio.wait_for(
+                        self._client.write_gatt_char(UART_TX_UUID, b'Z', response=True),
+                        timeout=2.0)
+                    self.logger.info("End-trial reset 'Z' delivered (write-with-response)")
+                except asyncio.TimeoutError:
+                    self.logger.warning("Reset 'Z' ack timed out; sending fire-and-forget fallback")
+                    if self._client:
+                        await self._client.write_gatt_char(UART_TX_UUID, b'Z', response=False)
+                # 2) Best-effort explicit stop + motor-off (the reset handler also does these).
+                if self._client:
+                    await self._client.write_gatt_char(UART_TX_UUID, b'G', response=False)
+                    await self._client.write_gatt_char(UART_TX_UUID, b'w', response=False)
+            except Exception as ex:
+                self.logger.exception(f"send_end_trial_sequence failed: {ex}")
+                if self._is_connected:
+                    self.error.emit(str(ex))
+
+        asyncio.run_coroutine_threadsafe(_run(), self._loop)
+
     # ----- Command helpers and API parity with legacy ExoDeviceManager -----
     def _ensure_connected(self) -> bool:
         self.logger.debug(f"Checking connection: client={self._client is not None}, loop={self._loop is not None}, connected={self._is_connected}")

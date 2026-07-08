@@ -52,6 +52,7 @@ namespace UART_command_names
     static const uint8_t get_system_reset = 0x19;
     static const uint8_t update_system_reset = 0x1A;
     static const uint8_t update_controller_param_ack = 0x1B;
+    static const uint8_t reset_ack = 0x1C;   // Teensy -> Nano: "got the reset, closing logs"
 };
 
 /**
@@ -750,8 +751,15 @@ namespace UART_command_handlers
     // Request a system reset on the receiving MCU (used to reboot Teensy from Nano)
     inline static void get_system_reset(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
     {
-        (void)handler;
         (void)msg;
+
+        // Tell the Nano we received the reset FIRST, so the ack is on the wire before we die.
+        // (The Nano relays this to the GUI as the ACKED shutdown step.)
+        UART_msg_t ack;
+        ack.command = UART_command_names::reset_ack;
+        ack.joint_id = 0;
+        ack.len = 0;
+        handler->UART_msg(ack);
 
         // Put system in a safe state before rebooting
         exo_data->for_each_joint([](JointData* j_data, float* args)
