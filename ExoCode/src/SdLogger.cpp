@@ -4,6 +4,8 @@
 
 #if defined(ARDUINO_TEENSY36) || defined(ARDUINO_TEENSY41)
 
+SdLogger* SdLogger::_instance = nullptr;
+
 SdLogger::SdLogger(ExoData* data)
 : _data(data), _available(false), _logging(false), _prev_active(false),
   _session_index(1), _decim(0), _last_flush_ms(0), _flush_turn(0),
@@ -11,7 +13,20 @@ SdLogger::SdLogger(ExoData* data)
   _decimation(SD_LOG_DEFAULT_DECIMATION),
   _flush_tick_ms(SD_LOG_DEFAULT_FLUSH_MS),
   _dbg_ran(0), _dbg_bytes(0), _dbg_last_ms(0)
-{}
+{
+    _instance = this;
+}
+
+void SdLogger::close_active()
+{
+    // Flush + close any open session right now, independent of the trial_off/status path.
+    // Called from the system-reset handler so a reboot never leaves the three log files
+    // open (which corrupts the FAT / cross-links clusters). No-op if nothing is logging.
+    if (_instance != nullptr && _instance->_logging)
+    {
+        _instance->_close_session();
+    }
+}
 
 void SdLogger::update(bool ran)
 {

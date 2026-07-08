@@ -14,6 +14,7 @@
 #include "Logger.h"
 #include "RealTimeI2C.h"
 #include "SystemReset.h"
+#include "SdLogger.h"     // for SdLogger::close_active() in the reset path (Teensy-only inside)
 
 /**
  * @brief Type to associate a command with an ammount of data
@@ -761,6 +762,13 @@ namespace UART_command_handlers
         });
         exo_data->set_status(status_defs::messages::trial_off);
         delay(10);
+#if defined(ARDUINO_TEENSY36) || defined(ARDUINO_TEENSY41)
+        // Flush + close the SD log BEFORE rebooting. The trial_off set above can't do this:
+        // the logger closes in sd_logger.update() (in loop()), and exo_system_reset() reboots
+        // before control returns there. Closing here makes it race-free regardless of whether
+        // the stop/trial_off ever arrived over the (unreliable) Nano<->Teensy UART.
+        SdLogger::close_active();
+#endif
         exo_system_reset();
     }
 

@@ -55,7 +55,13 @@ class SdLogger
         // SD_LOG_SELFTEST==1. Writes /EXOLOG/SELFTEST/ and reads it back for verification.
         static void self_test();
 
+        // Flush + close any open session immediately, from anywhere (e.g. the reset handler,
+        // which runs inside exo.run() and would otherwise reboot before update() gets to
+        // close the files -> abandoned/corrupted logs). Safe to call even if no session is open.
+        static void close_active();
+
     private:
+        static SdLogger* _instance;   // the (single) live logger, for close_active()
         ExoData* _data;
         bool     _available;      // SD mounted & usable
         bool     _logging;        // a session file set is open
