@@ -83,6 +83,7 @@ class ComsMCU
         void _send_param_update_ack(UART_msg_t msg);
         void _schedule_system_reset();
         void _maybe_system_reset();
+        void _send_shutdown_progress(uint8_t step);
 
         //Reference to ExoBLE object, this is the next step down the composition heirarchy
         ExoBLE* _exo_ble;
@@ -97,9 +98,15 @@ class ComsMCU
         // _Battery* _battery;
 
         const int _mark_index = 1;
-        bool _reset_pending = false;
-        uint32_t _reset_start_ms = 0;
-        const uint32_t _reset_delay_ms = 5000;
+
+        // End-trial reset handshake state machine: drives Nano->GUI shutdown progress and waits
+        // for the Teensy reset_ack before rebooting. See _maybe_system_reset().
+        enum class ResetState : uint8_t { IDLE, PENDING, SENT, WAIT_ACK, SEND_REBOOT, REBOOTING };
+        ResetState _reset_state = ResetState::IDLE;
+        bool _reset_ack_received = false;
+        uint32_t _reset_step_ms = 0;
+        const uint32_t _reset_ack_timeout_ms = 3000;   // wait up to 3s for the Teensy ack
+        const uint32_t _reset_flush_ms = 300;          // let the final BLE notification go out
 
         //Alpha value for the exponentially weighted moving average on the battery data
         // const float k_battery_ewma_alpha = 0.1;

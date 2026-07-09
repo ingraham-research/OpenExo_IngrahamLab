@@ -592,6 +592,55 @@ class QtExoDeviceManager(QtCore.QObject):
 
         asyncio.run_coroutine_threadsafe(_run_write(), self._loop)
 
+    def send_end_trial_sequence(self):
+        """Send the end-trial commands: the reliable reset ('Z') FIRST, then 'G'/'w' best-effort.
+
+        The order is FORCED BY BLE CONGESTION, not preference (we tried the other way and it hung).
+        During an active trial the link is saturated with real-time-data notifications. Under that
+        load, a plain write-WITHOUT-response ('G'/'w') as the FIRST command HANGS on WinRT --
+        bleak's write_gatt_char never returns, and the whole sequence stalls before 'Z' is ever
+        sent (observed: 'G'->'w'->'Z' produced no reset at all). Only a Write REQUEST
+        (write-WITH-response) punches through the congestion, so 'Z' must go first:
+          1. 'Z' (reset) as a SINGLE write-with-response (ACK'd/retried, 2 s timeout + fire-and-
+             forget fallback). Its handler is a complete shutdown on its own -- disables motors +
+             stops the trial + closes logs before rebooting.
+          2. 'G' (stop) + 'w' (motor off) after, best-effort backups. By now 'Z' has stopped the
+             trial -> stopped RT streaming -> relieved the congestion, so these can get through.
+        Only 'Z' uses write-with-response (a 3x with-response burst wedged the 2nd write on WinRT).
+        RX char 6E400002 advertises BLEWrite.
+        """
+        if not self._client or not self._loop:
+            self.logger.debug("send_end_trial_sequence aborted - no client or loop")
+            return
+
+        async def _run():
+            try:
+                if not self._client:
+                    return
+                # 1) Reset FIRST, reliably, but never hang (2 s cap) -> fire-and-forget fallback.
+                #    Must be write-with-response: it's the only thing that gets through the RT
+                #    congestion of an active trial. (A fire-and-forget write here hangs on WinRT.)
+                try:
+                    await asyncio.wait_for(
+                        self._client.write_gatt_char(UART_TX_UUID, b'Z', response=True),
+                        timeout=2.0)
+                    self.logger.info("End-trial reset 'Z' delivered (write-with-response)")
+                except asyncio.TimeoutError:
+                    self.logger.warning("Reset 'Z' ack timed out; sending fire-and-forget fallback")
+                    if self._client:
+                        await self._client.write_gatt_char(UART_TX_UUID, b'Z', response=False)
+                # 2) Best-effort stop + motor-off backups (the reset handler also does these). The
+                #    trial has stopped by now, so the link is no longer saturated and these send.
+                if self._client:
+                    await self._client.write_gatt_char(UART_TX_UUID, b'G', response=False)
+                    await self._client.write_gatt_char(UART_TX_UUID, b'w', response=False)
+            except Exception as ex:
+                self.logger.exception(f"send_end_trial_sequence failed: {ex}")
+                if self._is_connected:
+                    self.error.emit(str(ex))
+
+        asyncio.run_coroutine_threadsafe(_run(), self._loop)
+
     # ----- Command helpers and API parity with legacy ExoDeviceManager -----
     def _ensure_connected(self) -> bool:
         self.logger.debug(f"Checking connection: client={self._client is not None}, loop={self._loop is not None}, connected={self._is_connected}")
