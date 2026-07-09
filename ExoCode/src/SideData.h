@@ -48,6 +48,7 @@ class SideData {
         
         float percent_gait;             /**< Estimate of the percent gait based on heel strike */
         float expected_step_duration;   /**< Estimate of how long the next step will take based on the most recent step times */
+        float last_step_duration;       /**< Duration (ms) of the most recent completed step, for stride logging */
 
         float percent_stance;           /**< Estimate of the percent stance based on heel strike and toe off */
         float expected_stance_duration; /**< Estimate of how long the next stance will take based on the most recent stance times */

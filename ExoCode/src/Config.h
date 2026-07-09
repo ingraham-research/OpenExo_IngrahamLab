@@ -33,6 +33,7 @@
     
     #define USE_SPEED_CHECK 0
 	#define USE_ANGLE_SENSORS 1
+	//Heel FSR presence is a RUNTIME setting: [Sensors] heelFsrPresent in config.ini (see HeelFsrConfig.h / heel_fsr_present()).
 
     //MACRO magic to convert a define to a string
     #define VAL(str) #str

@@ -20,6 +20,7 @@ from pages import (
 )
 from services import QtExoDeviceManager, RtBridge
 from utils import SettingsManager
+from Widgets.ShutdownDialog import ShutdownDialog
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -232,6 +233,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.trial_page.update_battery_level(battery_voltage)
             except Exception as e:
                 self.logger.error(f"Failed to update battery level: {e}")
+                self.logger.debug(traceback.format_exc())
+
+            # Update exo status readout from the hijacked RT Channel 8 (firmware status word).
+            try:
+                if len(values) > 8:
+                    self.trial_page.update_exo_status(values[8])
+            except Exception as e:
+                self.logger.error(f"Failed to update exo status: {e}")
                 self.logger.debug(traceback.format_exc())
         except Exception as e:
             self.logger.error(f"Failed to process RT update: {e}")
@@ -599,13 +608,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.logger.error(f"Failed to print trial summary: {e}")
                 self.logger.debug(traceback.format_exc())
             
-            # Send stop trial and motor off commands immediately
+            # Send stop trial, motor off, and reset RELIABLY (write-with-response, in order).
+            # Fire-and-forget writes were being dropped under worn-trial load, losing the 'Z'
+            # reset so the exo never rebooted. send_end_trial_sequence() ACKs + retries each.
             try:
-                self.qt_dev.write(b'G')  # Stop trial
-                self.qt_dev.write(b'w')  # Motor off - CRITICAL SAFETY COMMAND
-                # Reset Nano/Teensy so next reconnect starts from clean firmware state.
-                self.qt_dev.write(b'Z')  # Firmware system reset command
-                self.logger.info("Sent stop trial, motor off, and reset commands")
+                self.qt_dev.send_end_trial_sequence()  # G (stop), w (motor off), Z (reset)
+                self.logger.info("Sent stop trial, motor off, and reset commands (reliable)")
             except Exception as e:
                 self.logger.error(f"CRITICAL: Failed to send stop/motor off commands: {e}")
                 self.logger.debug(traceback.format_exc())
@@ -622,12 +630,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.logger.error(f"Failed to clear trial page plots: {e}")
                 self.logger.debug(traceback.format_exc())
             
-            # Navigate to scan page immediately
-            self.stack.setCurrentWidget(self.scan_page)
-            
-            # Wait 200ms to ensure motor off command is sent before disconnecting
-            QtCore.QTimer.singleShot(200, self.qt_dev.disconnect)
-            
+            # Open the shutdown-progress dialog; DO NOT auto-disconnect or navigate away yet.
+            # The Nano's reboot ends the BLE link, and the dialog shows the handshake + a reboot
+            # countdown, then returns to scan when it closes (_on_shutdown_dialog_finished).
+            self._shutting_down = True   # tells _on_dev_disconnected the coming drop is expected
+            self._shutdown_dialog = ShutdownDialog(self)
+            self.rt_bridge.shutdownProgressReceived.connect(self._shutdown_dialog.set_step)
+            self.qt_dev.disconnected.connect(self._shutdown_dialog.on_disconnected)
+            self._shutdown_dialog.forceDisconnectRequested.connect(self.qt_dev.disconnect)
+            self._shutdown_dialog.retryRequested.connect(self._on_retry_end_trial)
+            self._shutdown_dialog.finished.connect(self._on_shutdown_dialog_finished)
+            self._shutdown_dialog.show()
+
             # Stop CSV if running
             if self._csv_file is not None:
                 try:
@@ -654,6 +668,50 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.logger.debug(traceback.format_exc())
         except Exception as e:
             self.logger.error(f"Failed to end trial: {e}")
+            self.logger.debug(traceback.format_exc())
+
+    @QtCore.Slot()
+    def _on_retry_end_trial(self):
+        # Re-send the end sequence (same commands as End Trial) from the shutdown dialog's Retry.
+        try:
+            self.qt_dev.send_end_trial_sequence()   # reliable G/w/Z
+            self.logger.info("Re-sent stop/motor-off/reset (retry)")
+        except Exception as e:
+            self.logger.error(f"Retry end-trial failed: {e}")
+            self.logger.debug(traceback.format_exc())
+
+    @QtCore.Slot(int)
+    def _on_shutdown_dialog_finished(self, _result):
+        # Countdown done: the exo has rebooted. Unwire the dialog, then proactively tear down our
+        # (now-dead) BLE link. The PC's BLE supervision timeout takes ~10s to notice the reboot,
+        # which is longer than the countdown -> if we just wait, that late drop is flagged as an
+        # "unexpected disconnect" (popup) and the scan buttons stay greyed. Disconnecting here is
+        # intentional (no popup) and preempts that wait, landing on a clean, ready scan screen.
+        try:
+            self.rt_bridge.shutdownProgressReceived.disconnect(self._shutdown_dialog.set_step)
+        except Exception:
+            pass
+        try:
+            self.qt_dev.disconnected.disconnect(self._shutdown_dialog.on_disconnected)
+        except Exception:
+            pass
+        try:
+            self.qt_dev.disconnect()   # intentional cleanup of the dead link -> no unexpected popup
+        except Exception:
+            pass
+        self._shutting_down = False
+        self.stack.setCurrentWidget(self.scan_page)
+        try:
+            self.scan_page.btn_save_connect.setEnabled(True)     # ready to reconnect
+            self.scan_page.btn_start_trial.setEnabled(False)     # needs a live connection first
+            self.scan_page.btn_calibrate_torque.setEnabled(False)
+            self.scan_page.status.setText("Exo rebooted - reconnect when it reappears.")
+        except Exception:
+            pass
+        try:
+            self.trial_page.clear_plots()
+        except Exception as e:
+            self.logger.error(f"Failed to clear trial page plots: {e}")
             self.logger.debug(traceback.format_exc())
 
     @QtCore.Slot()
@@ -940,6 +998,11 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot()
     def _on_dev_disconnected(self):
         """Handle unexpected disconnects (intentional disconnects don't trigger this)."""
+        if getattr(self, '_shutting_down', False):
+            # Expected: the Nano rebooted as part of End Trial. The ShutdownDialog owns the UX
+            # (countdown -> return to scan); don't show the "unexpected disconnect" warning.
+            self.logger.info("Disconnect during shutdown handshake (expected) - deferring to ShutdownDialog")
+            return
         self.logger.warning("Device disconnected unexpectedly")
         try:
             self._destroy_controller_db()

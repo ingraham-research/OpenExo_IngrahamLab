@@ -20,7 +20,8 @@ SideData::SideData(bool is_left, uint8_t* config_to_send)
     this->percent_gait = -1; 
     this->percent_stance = -1;
     this->percent_swing = -1;
-    this->expected_step_duration = -1; 
+    this->expected_step_duration = -1;
+    this->last_step_duration = 0;
     this->expected_swing_duration = -1;
     this->expected_stance_duration = -1;
     this->heel_fsr = -1; 

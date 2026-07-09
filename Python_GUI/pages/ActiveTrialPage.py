@@ -129,6 +129,14 @@ class ActiveTrialPage(QtWidgets.QWidget):
         self.lbl_battery.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         controls.addWidget(self.lbl_battery)
 
+        # Exo status readout, driven by the HIJACKED RT Channel 8 (firmware exo status word).
+        # Shows the live calibration/refinement/trial state; flips to "Trial On / Ready" the
+        # moment FSR refinement finishes. See update_exo_status().
+        self.lbl_exo_status = QtWidgets.QLabel("Exo: --")
+        self.lbl_exo_status.setStyleSheet(f"font-size: {UIConfig.FONT_SMALL}pt; font-weight: bold;")
+        self.lbl_exo_status.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        controls.addWidget(self.lbl_exo_status)
+
         self.lbl_param_update_status = QtWidgets.QLabel("")
         self.lbl_param_update_status.setWordWrap(True)
         self.lbl_param_update_status.setStyleSheet(
@@ -346,6 +354,43 @@ class ActiveTrialPage(QtWidgets.QWidget):
         """Update the Mark Trial button to show current count."""
         try:
             self.btn_mark.setText(f"Mark Trial ({count})")
+        except Exception:
+            pass
+
+    def update_exo_status(self, status_value: float):
+        """Show the exo state, driven by the hijacked RT Channel 8 (firmware status word,
+        status_defs::messages). Flips to 'Trial On / Ready' when FSR refinement finishes.
+        See uart_commands.h bilateral_ankle data[8] on the Teensy for the transport."""
+        try:
+            code = int(round(float(status_value)))
+        except (ValueError, TypeError):
+            return
+        names = {
+            0: "Off", 1: "Trial Off", 2: "Trial On / Ready", 3: "Test",
+            4: "Torque Calibration", 5: "FSR Calibration",
+            6: "FSR Refinement", 7: "Motor Startup",
+        }
+        if code in names:
+            name = names[code]
+        elif code >= 8:                       # error bit (8) or higher error/warning codes
+            name = f"Error / Warning ({code})"
+        else:
+            name = f"Status {code}"
+        # Colour cue: green = ready, orange = calibrating/refining/startup, red = error.
+        if code == 2:
+            color = UIConfig.COLOR_SUCCESS
+        elif code in (4, 5, 6, 7):
+            color = UIConfig.COLOR_PARAM_REJECT
+        elif code >= 8:
+            color = UIConfig.COLOR_WARNING
+        else:
+            color = None                      # off / trial_off -> default theme colour
+        style = f"font-size: {UIConfig.FONT_SMALL}pt; font-weight: bold;"
+        if color:
+            style += f" color: {color};"
+        try:
+            self.lbl_exo_status.setText(f"Exo: {name}")
+            self.lbl_exo_status.setStyleSheet(style)
         except Exception:
             pass
 
