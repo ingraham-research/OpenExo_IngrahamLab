@@ -843,7 +843,7 @@ float Spline::calc_motor_cmd()
         percent_gait = use_percent_gait ? _side_data->percent_gait : _side_data->percent_stance;
     }
 
-    float x[5] =
+    float x[8] =
     {
         _controller_data->parameters[controller_defs::spline::node1_x_idx],
         _controller_data->parameters[controller_defs::spline::node2_x_idx],
@@ -855,7 +855,7 @@ float Spline::calc_motor_cmd()
         _controller_data->parameters[controller_defs::spline::node8_x_idx],
     };
 
-    float y[5] =
+    float y[8] =
     {
         _controller_data->parameters[controller_defs::spline::node1_y_idx],
         _controller_data->parameters[controller_defs::spline::node2_y_idx],
