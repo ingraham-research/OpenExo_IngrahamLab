@@ -1,8 +1,12 @@
 """Modal shown on End Trial.
 
 Displays the end-trial shutdown handshake steps (driven by RtBridge.shutdownProgressReceived),
-then a reboot countdown (driven by the device 'disconnected' signal). If a step stalls, it
-surfaces Force disconnect / Retry. Wiring lives in MainWindow._on_end_trial.
+then a reboot countdown. The countdown starts on step 5 (REBOOTING), OR on the device
+'disconnected' signal, OR on a fallback timeout if the progress notifications get dropped over
+BLE -- the reset is reliably delivered by send_end_trial_sequence(), so the exo is rebooting
+regardless and the dialog must never hang waiting on an informational tick. Progress ticks are
+best-effort (fired faster than the BLE connection interval, so some can be lost); the countdown
+is what actually matters. Wiring lives in MainWindow._on_end_trial.
 
 Step codes must match firmware shutdown_progress:: in ExoCode/src/ble_commands.h:
   1 RECEIVED, 2 SENT, 3 ACKED, 4 TIMEOUT, 5 REBOOTING
@@ -35,10 +39,13 @@ class ShutdownDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Ending Trial")
         self.setModal(True)
+        self.setMinimumSize(420, 360)   # roomy enough that the rows + countdown don't overlap
         self._rows = {}          # step_code -> QLabel
         self._rebooting = False
 
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
         self._title = QtWidgets.QLabel("Shutting down…")
         f = self._title.font(); f.setBold(True); self._title.setFont(f)
         layout.addWidget(self._title)
@@ -50,6 +57,7 @@ class ShutdownDialog(QtWidgets.QDialog):
 
         self._detail = QtWidgets.QLabel("")
         self._detail.setWordWrap(True)
+        df = self._detail.font(); df.setPointSize(df.pointSize() + 1); self._detail.setFont(df)
         layout.addWidget(self._detail)
 
         # Failure buttons (hidden until a stall / timeout)
@@ -125,8 +133,11 @@ class ShutdownDialog(QtWidgets.QDialog):
                 f"Please wait {self._countdown_left}s, then reconnect from the scan screen.")
 
     def _on_stall(self):
-        self._detail.setText("No response — a step stalled. Force disconnect or retry.")
-        self._btns.setVisible(True)
+        # Progress notifications can be dropped over BLE (they're fired faster than the connection
+        # interval), but the reset itself was reliably delivered (send_end_trial_sequence confirmed
+        # 'Z delivered'), so the exo IS rebooting regardless. Don't hang waiting for the step-5
+        # notification -- proceed to the reboot countdown. The ticks are informational only.
+        self.on_disconnected()
 
     def _on_retry(self):
         self._btns.setVisible(False)

@@ -593,17 +593,21 @@ class QtExoDeviceManager(QtCore.QObject):
         asyncio.run_coroutine_threadsafe(_run_write(), self._loop)
 
     def send_end_trial_sequence(self):
-        """Send the end-trial commands, prioritizing reliable delivery of the reset ('Z').
+        """Send the end-trial commands: the reliable reset ('Z') FIRST, then 'G'/'w' best-effort.
 
-        Under worn-trial load, plain fire-and-forget writes drop the last command ('Z') so the
-        exo never resets. A 3x write-with-response burst is worse: the 2nd consecutive Write
-        Request wedges on WinRT, so 'Z' is never even sent. So:
-          1. 'Z' (reset) FIRST as a SINGLE write-with-response (ACK'd/retried by the stack),
-             bounded by a timeout so a stuck ATT transaction can't hang us, with a
-             fire-and-forget fallback. Its handler already disables motors + stops the trial +
-             closes logs before rebooting, so it's a complete shutdown on its own.
-          2. 'G' (stop) + 'w' (motor off) after, best-effort backups.
-        The RX characteristic (6E400002) advertises BLEWrite, so write-with-response is valid.
+        The order is FORCED BY BLE CONGESTION, not preference (we tried the other way and it hung).
+        During an active trial the link is saturated with real-time-data notifications. Under that
+        load, a plain write-WITHOUT-response ('G'/'w') as the FIRST command HANGS on WinRT --
+        bleak's write_gatt_char never returns, and the whole sequence stalls before 'Z' is ever
+        sent (observed: 'G'->'w'->'Z' produced no reset at all). Only a Write REQUEST
+        (write-WITH-response) punches through the congestion, so 'Z' must go first:
+          1. 'Z' (reset) as a SINGLE write-with-response (ACK'd/retried, 2 s timeout + fire-and-
+             forget fallback). Its handler is a complete shutdown on its own -- disables motors +
+             stops the trial + closes logs before rebooting.
+          2. 'G' (stop) + 'w' (motor off) after, best-effort backups. By now 'Z' has stopped the
+             trial -> stopped RT streaming -> relieved the congestion, so these can get through.
+        Only 'Z' uses write-with-response (a 3x with-response burst wedged the 2nd write on WinRT).
+        RX char 6E400002 advertises BLEWrite.
         """
         if not self._client or not self._loop:
             self.logger.debug("send_end_trial_sequence aborted - no client or loop")
@@ -613,7 +617,9 @@ class QtExoDeviceManager(QtCore.QObject):
             try:
                 if not self._client:
                     return
-                # 1) Reset first, reliably, but never hang (2s cap) -> fire-and-forget fallback.
+                # 1) Reset FIRST, reliably, but never hang (2 s cap) -> fire-and-forget fallback.
+                #    Must be write-with-response: it's the only thing that gets through the RT
+                #    congestion of an active trial. (A fire-and-forget write here hangs on WinRT.)
                 try:
                     await asyncio.wait_for(
                         self._client.write_gatt_char(UART_TX_UUID, b'Z', response=True),
@@ -623,7 +629,8 @@ class QtExoDeviceManager(QtCore.QObject):
                     self.logger.warning("Reset 'Z' ack timed out; sending fire-and-forget fallback")
                     if self._client:
                         await self._client.write_gatt_char(UART_TX_UUID, b'Z', response=False)
-                # 2) Best-effort explicit stop + motor-off (the reset handler also does these).
+                # 2) Best-effort stop + motor-off backups (the reset handler also does these). The
+                #    trial has stopped by now, so the link is no longer saturated and these send.
                 if self._client:
                     await self._client.write_gatt_char(UART_TX_UUID, b'G', response=False)
                     await self._client.write_gatt_char(UART_TX_UUID, b'w', response=False)

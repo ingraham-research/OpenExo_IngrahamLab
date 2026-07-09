@@ -106,12 +106,30 @@ benchtop.
   independent of whether the `trial_off` message ever arrived. Race eliminated.
 
 **2. Reliable reset delivery — `send_end_trial_sequence()`** (`Python_GUI/services/QtExoDeviceManager.py`)
-- End Trial now calls `send_end_trial_sequence()` instead of three bare `write()`s. It sends the
-  **reset `Z` first, as a single BLE write-*with*-response** (ACK'd + retried by the stack), bounded
-  by a 2 s timeout with a fire-and-forget fallback; then `G`/`w` best-effort.
-- Why `Z` first & alone-with-response: the reset handler *itself* disables motors + sets `trial_off`
-  + closes logs, so `Z` alone is a full shutdown. A 3× with-response burst wedged on the 2nd write
-  (WinRT quirk with consecutive Write Requests), so only `Z` uses with-response.
+- End Trial calls `send_end_trial_sequence()` instead of three bare `write()`s. Order: **`Z` (reset)
+  first, as a single BLE write-*with*-response** (ACK'd + retried, 2 s timeout + fire-and-forget
+  fallback), then `G` (stop) / `w` (motor off) best-effort after.
+- **Why `Z` must go first — this ordering is forced, not a preference (verified the hard way):**
+  during an active trial the link is saturated with real-time-data notifications. Under that load a
+  plain write-*without*-response (`G`/`w`) as the **first** command **hangs on WinRT** (bleak's
+  `write_gatt_char` never returns) — we tried `G→w→Z` and the whole sequence stalled before `Z` was
+  ever sent (no reset at all). Only a Write *Request* (write-with-response) punches through the
+  congestion. `Z`'s handler is a complete shutdown on its own (disables motors + `trial_off` + closes
+  logs before rebooting), and processing it stops the trial → stops RT streaming → relieves the
+  congestion, so the trailing best-effort `G`/`w` backups can then get through. Only `Z` uses
+  write-with-response (a 3× with-response burst wedged the 2nd write — a WinRT quirk with consecutive
+  Write Requests).
+- **Dead end to not re-try (and why the *original* `G→w→Z` "sometimes" worked but ours never did):**
+  intuitively the `G`/`w` backups "should" precede the reset. We tried `G→w→Z` in
+  `send_end_trial_sequence()` and it **never** worked — the lead `await` (fire-and-forget `G`) hangs
+  under trial congestion and stalls the whole coroutine before `Z` is sent. The original code got
+  away with `G→w→Z` only because it sent each via a **separate** `self.qt_dev.write()` call = a
+  separate `run_coroutine_threadsafe` coroutine, so a blocked `G` didn't stop the *independent* `Z`
+  coroutine (best-effort, three independent shots — `Z` still dropped under load, which is what
+  caused the original corruption). Our `send_end_trial_sequence()` deliberately **awaits the three
+  serially in one coroutine** so `Z` can be a reliable Write Request — the trade-off is that a
+  blocked lead write kills everything behind it, so the reliable `Z` must lead. Serial + reliable
+  `Z`-first was chosen over concurrent-but-unreliable.
 - `MainWindow._on_end_trial` and `_on_retry_end_trial` both call it.
 
 **3. Nano reset state machine + GUI progress dialog** (the "shutdown progress" feature)
@@ -128,7 +146,11 @@ benchtop.
   delimited — same framing as every command payload) → emits `shutdownProgressReceived(int step)`.
 - **GUI dialog** (`Python_GUI/Widgets/ShutdownDialog.py`, new): modal step checklist
   (Received / Sent / Teensy acknowledged / Rebooting) → 6 s "Exo rebooting…" countdown → returns to
-  scan. `Force disconnect` / `Retry` appear if a step stalls.
+  scan. The countdown starts on **step 5, OR** the device `disconnected` signal, **OR a ~5 s fallback
+  timeout** — because progress notifications get dropped over BLE (fired faster than the connection
+  interval, sometimes several lost), the dialog must **never depend on a tick to advance**. The reset
+  is reliably delivered, so it proceeds regardless and never hangs. The progress ticks are purely
+  informational.
 - **Diagnostic value:** `ACKED` (step 3) vs `TIMEOUT` (step 4) tells you whether the reset actually
   reached the Teensy and it answered — the direct test of the flaky-UART theory.
 
@@ -150,11 +172,13 @@ benchtop.
 - **Command channel still best-effort for non-critical commands.** Only the reset path is hardened
   (with-response). Param updates, etc. are still fire-and-forget and can drop under load. The real
   cure is ACK/retry on BLE writes **and** on the Nano↔Teensy UART. Larger, separate work.
-- **Cosmetic:** one progress tick (`SENT` or `ACKED` depending on timing) occasionally doesn't render
-  because notifications are fired faster than the BLE connection interval and one gets overwritten.
-  The functional path is unaffected; the important diagnostic tick (`ACKED`) is reliable. A clean fix
-  would gate each progress step by ~one connection interval (~40 ms) — not worth the added shutdown
-  latency for a visual-only gain.
+- **Cosmetic (progress ticks):** the shutdown progress notifications are best-effort — fired faster
+  than the BLE connection interval, so a *variable* number get dropped (seen anywhere from 0 to 3 of
+  the 4 lost, worse under worn-trial congestion). The dialog is **robust** to this (it advances via
+  the step-5 / disconnect / ~5 s fallback-timeout paths and never hangs — see `ShutdownDialog._on_stall`),
+  and the functional shutdown is unaffected. A clean fix for *reliable* ticks would gate each progress
+  step by ~one connection interval (~40 ms) in the Nano state machine (`_maybe_system_reset`) — a
+  firmware change, not worth the added shutdown latency for a visual-only gain.
 - **Motor CAN reliability (separate, unfixed):** during worn trials the right motor can drop out /
   return garbage feedback (encoding-max values like ±319 A). `Motor.cpp::read_data()` only updates
   `motor.p/v/i` on a valid matching CAN frame (else stale), and the timeout counter is **disabled**
