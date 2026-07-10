@@ -1,5 +1,6 @@
 #include "Side.h"
 #include "Logger.h"
+#include "HeelFsrConfig.h"
 //#define SIDE_DEBUG 1
 
 //Arduino compiles everything in the src folder even if not included so it causes and error for the nano if this is not included.
@@ -52,7 +53,7 @@ Side::Side(bool is_left, ExoData* exo_data)
         logger::println("Side :: Constructor : Exit");
     #endif
 
-    _heel_fsr.get_contact_thresholds(_side_data->heel_fsr_lower_threshold, _side_data->heel_fsr_upper_threshold);
+    if (heel_fsr_present()) _heel_fsr.get_contact_thresholds(_side_data->heel_fsr_lower_threshold, _side_data->heel_fsr_upper_threshold);
     _toe_fsr.get_contact_thresholds(_side_data->toe_fsr_lower_threshold, _side_data->toe_fsr_upper_threshold);
 
     inclination_detector = new InclinationDetector();
@@ -103,7 +104,7 @@ void Side::run_side()
 void Side::read_data()
 {
     //Check the FSRs
-    _side_data->heel_fsr = _heel_fsr.read();
+    if (heel_fsr_present()) _side_data->heel_fsr = _heel_fsr.read();
     _side_data->toe_fsr = _toe_fsr.read();
 
     //Check if a ground strike is detected
@@ -137,7 +138,7 @@ void Side::read_data()
     _side_data->percent_swing = _calc_percent_swing();
 
     //Get the contact thesholds for the Heel and Toe FSRs
-    _heel_fsr.get_contact_thresholds(_side_data->heel_fsr_lower_threshold, _side_data->heel_fsr_upper_threshold);
+    if (heel_fsr_present()) _heel_fsr.get_contact_thresholds(_side_data->heel_fsr_lower_threshold, _side_data->heel_fsr_upper_threshold);
     _toe_fsr.get_contact_thresholds(_side_data->toe_fsr_lower_threshold, _side_data->toe_fsr_upper_threshold);
 
     //Check the inclination
@@ -178,7 +179,7 @@ void Side::check_calibration()
         if (_side_data->reset_fsr_calibration)
         {
             _toe_fsr.reset_calibration();
-            _heel_fsr.reset_calibration();
+            if (heel_fsr_present()) _heel_fsr.reset_calibration();
             _side_data->toe_fsr = -1;
             _side_data->heel_fsr = -1;
             _side_data->toe_stance = false;
@@ -197,18 +198,33 @@ void Side::check_calibration()
         else if (_side_data->do_calibration_refinement_toe_fsr) 
         {
             _side_data->do_calibration_refinement_toe_fsr = _toe_fsr.refine_calibration(_side_data->do_calibration_refinement_toe_fsr);
-            _data->set_status(status_defs::messages::fsr_refinement);
+            if (_side_data->do_calibration_refinement_toe_fsr)
+            {
+                _data->set_status(status_defs::messages::fsr_refinement);   //toe still refining
+            }
+            else
+            {
+                //Toe refinement just completed on this side. Move to trial_on to mark "ready".
+                //Once BOTH sides finish, no toe/heel branch re-stamps fsr_refinement, so the
+                //status settles at trial_on -> a clean "refinement done" transition, which the
+                //GUI/CSV can see via the hijacked Channel 8 (uart_commands.h bilateral_ankle
+                //data[8]). Before this, the status stayed stuck at fsr_refinement forever.
+                _data->set_status(status_defs::messages::trial_on);
+            }
         }
         
-        if (_side_data->do_calibration_heel_fsr)
+        if (heel_fsr_present())
         {
-            _side_data->do_calibration_heel_fsr = _heel_fsr.calibrate(_side_data->do_calibration_heel_fsr);
-            _data->set_status(status_defs::messages::fsr_calibration);
-        }
-        else if (_side_data->do_calibration_refinement_heel_fsr) 
-        {
-            _side_data->do_calibration_refinement_heel_fsr = _heel_fsr.refine_calibration(_side_data->do_calibration_refinement_heel_fsr);
-            _data->set_status(status_defs::messages::fsr_refinement);
+            if (_side_data->do_calibration_heel_fsr)
+            {
+                _side_data->do_calibration_heel_fsr = _heel_fsr.calibrate(_side_data->do_calibration_heel_fsr);
+                _data->set_status(status_defs::messages::fsr_calibration);
+            }
+            else if (_side_data->do_calibration_refinement_heel_fsr)
+            {
+                _side_data->do_calibration_refinement_heel_fsr = _heel_fsr.refine_calibration(_side_data->do_calibration_refinement_heel_fsr);
+                _data->set_status(status_defs::messages::fsr_refinement);
+            }
         }
      
         //Check the joint sensors if the joint is used.
@@ -235,7 +251,7 @@ void Side::check_calibration()
 void Side::_check_thresholds()
 {
     _toe_fsr.set_contact_thresholds(_side_data->toe_fsr_lower_threshold, _side_data->toe_fsr_upper_threshold);
-    _heel_fsr.set_contact_thresholds(_side_data->heel_fsr_lower_threshold, _side_data->heel_fsr_upper_threshold);
+    if (heel_fsr_present()) _heel_fsr.set_contact_thresholds(_side_data->heel_fsr_lower_threshold, _side_data->heel_fsr_upper_threshold);
 }
 
 bool Side::_check_ground_strike()
@@ -243,8 +259,8 @@ bool Side::_check_ground_strike()
     _side_data->prev_heel_stance = _prev_heel_contact_state;  
     _side_data->prev_toe_stance = _prev_toe_contact_state;
 
-    //bool heel_contact_state = _heel_fsr.get_ground_contact();
-    bool heel_contact_state = false;
+    //No heel FSR when heel_fsr_present() is false (see [Sensors] heelFsrPresent in config.ini)
+    bool heel_contact_state = heel_fsr_present() ? _heel_fsr.get_ground_contact() : false;
     bool toe_contact_state = _toe_fsr.get_ground_contact();
 
     _side_data->heel_stance = heel_contact_state;
@@ -371,6 +387,7 @@ float Side::_calc_percent_swing()
 float Side::_update_expected_duration()
 {
     unsigned int step_time = _ground_strike_timestamp - _prev_ground_strike_timestamp;
+    _side_data->last_step_duration = (float)step_time;
     float expected_step_duration = _side_data->expected_step_duration;
 		
     if (0 == _prev_ground_strike_timestamp) //If the prev time isn't set just return.

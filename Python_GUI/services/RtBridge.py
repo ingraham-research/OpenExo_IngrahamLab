@@ -26,6 +26,7 @@ class RtBridge(QtCore.QObject):
     controllerValuesReceived = QtCore.Signal(list)
     paramUpdateAckReceived = QtCore.Signal(dict)
     rtDataUpdated = QtCore.Signal(list)
+    shutdownProgressReceived = QtCore.Signal(int)   # end-trial shutdown step code (see ble_commands.h shutdown_progress::)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -298,6 +299,8 @@ class RtBridge(QtCore.QObject):
             event_info = parts[0]
             event_data = parts[1]
             command = event_info[1] if len(event_info) > 1 else ""
+            if command and command != '?':   # '?' = real-time data (noisy); log the rest
+                self.logger.info(f"[shutdown-debug] cmd={command!r} event_info={event_info!r} event_data={event_data!r}")
             # Extract count from event_info using regex
             m = self._event_count_regex.match(event_info)
             if not m.hasMatch():
@@ -311,6 +314,18 @@ class RtBridge(QtCore.QObject):
 
             if command == 'a':
                 self._handle_param_update_ack(event_data, self._data_length)
+                return
+
+            if command == 'P':
+                # send_shutdown_progress: event_data carries one value = step code, encoded
+                # like every other command payload here (int(value*100), 'n'-terminated).
+                try:
+                    tokens = [t for t in event_data.split('n') if t]
+                    step = int(round(float(tokens[0]) / 100.0)) if tokens else 0
+                except Exception:
+                    step = 0
+                self.logger.warning(f"[shutdown-debug] parsed step={step} from {event_data!r}")
+                self.shutdownProgressReceived.emit(step)
                 return
 
             event_without_count = f"{event_info[0]}{event_info[1]}{event_data}"

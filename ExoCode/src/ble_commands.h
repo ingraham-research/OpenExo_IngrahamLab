@@ -62,8 +62,18 @@ namespace ble_names
     static const char send_step_count     = 's';
     static const char cal_fsr_finished    = 'n';
     static const char param_update_ack    = 'a';
+    static const char send_shutdown_progress = 'P';   // Nano -> GUI: end-trial shutdown step
 
 };
+
+namespace shutdown_progress   // step codes carried in send_shutdown_progress data[0]
+{
+    static const uint8_t RECEIVED  = 1;   // Nano got the end/reset request
+    static const uint8_t SENT      = 2;   // Nano forwarded reset to the Teensy
+    static const uint8_t ACKED     = 3;   // Teensy acknowledged (reset_ack received)
+    static const uint8_t TIMEOUT   = 4;   // Teensy did not ack within the window
+    static const uint8_t REBOOTING = 5;   // Nano about to reboot
+}
 
 /**
  * @brief Associates the command and ammount of data that it expects to be sent/received
@@ -97,6 +107,7 @@ namespace ble
         {ble_names::send_step_count,        2},
         {ble_names::cal_fsr_finished,       0},
         {ble_names::param_update_ack,       5},
+        {ble_names::send_shutdown_progress, 1},   // 1 data byte = step code
     };
 };
 

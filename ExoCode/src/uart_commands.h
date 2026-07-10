@@ -10,9 +10,11 @@
 #include "JointData.h"
 #include "ParamsFromSD.h"
 #include "ParamUpdateValidation.h"
+#include "HeelFsrConfig.h"
 #include "Logger.h"
 #include "RealTimeI2C.h"
 #include "SystemReset.h"
+#include "SdLogger.h"     // for SdLogger::close_active() in the reset path (Teensy-only inside)
 
 /**
  * @brief Type to associate a command with an ammount of data
@@ -50,6 +52,7 @@ namespace UART_command_names
     static const uint8_t get_system_reset = 0x19;
     static const uint8_t update_system_reset = 0x1A;
     static const uint8_t update_controller_param_ack = 0x1B;
+    static const uint8_t reset_ack = 0x1C;   // Teensy -> Nano: "got the reset, closing logs"
 };
 
 /**
@@ -337,10 +340,13 @@ namespace UART_command_handlers
         // logger::println("UART_command_handlers::update_cal_fsr->Got msg");
         exo_data->right_side.reset_fsr_calibration = true;
         exo_data->right_side.do_calibration_toe_fsr = 1;
-        exo_data->right_side.do_calibration_heel_fsr = 1;
         exo_data->left_side.reset_fsr_calibration = true;
         exo_data->left_side.do_calibration_toe_fsr = 1;
-        exo_data->left_side.do_calibration_heel_fsr = 1;
+        if (heel_fsr_present())
+        {
+            exo_data->right_side.do_calibration_heel_fsr = 1;
+            exo_data->left_side.do_calibration_heel_fsr = 1;
+        }
     }
 
     inline static void get_refine_fsr(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
@@ -350,9 +356,12 @@ namespace UART_command_handlers
     {
         // logger::println("UART_command_handlers::update_refine_fsr->Got msg");
         exo_data->right_side.do_calibration_refinement_toe_fsr = 1;
-        exo_data->right_side.do_calibration_refinement_heel_fsr = 1;
         exo_data->left_side.do_calibration_refinement_toe_fsr = 1;
-        exo_data->left_side.do_calibration_refinement_heel_fsr = 1;
+        if (heel_fsr_present())
+        {
+            exo_data->right_side.do_calibration_refinement_heel_fsr = 1;
+            exo_data->left_side.do_calibration_refinement_heel_fsr = 1;
+        }
     }
 
     inline static void get_motor_enable_disable(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
@@ -417,7 +426,12 @@ namespace UART_command_handlers
             rx_msg.data[6] = exo_data->right_side.toe_fsr;
 			rx_msg.data[7] = exo_data->right_side.toe_stance;
 			// rx_msg.data[7] = exo_data->right_side.heel_fsr;
-			rx_msg.data[8] = 8;
+			//HIJACK: Channel 8 was an unused constant placeholder (was = 8). Repurposed to stream
+			//the exo status so the GUI/CSV can see the trial/calibration state (status_defs::messages:
+			//2=trial_on, 4=torque_calibration, 5=fsr_calibration, 6=fsr_refinement, 7=motor_start_up).
+			//Watching it settle at 2 (trial_on) marks FSR refinement finished (set in
+			//Side::check_calibration). Revert to "= 8;" if a real Channel 8 signal is ever needed.
+			rx_msg.data[8] = (float)exo_data->get_status();
 			rx_msg.data[9] = (float)millis()/1000;
 			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
 			break;
@@ -538,7 +552,12 @@ namespace UART_command_handlers
             rx_msg.data[6] = exo_data->right_side.toe_fsr;
 			rx_msg.data[7] = exo_data->right_side.toe_stance;
 			// rx_msg.data[7] = exo_data->right_side.heel_fsr;
-			rx_msg.data[8] = 8;
+			//HIJACK: Channel 8 was an unused constant placeholder (was = 8). Repurposed to stream
+			//the exo status so the GUI/CSV can see the trial/calibration state (status_defs::messages:
+			//2=trial_on, 4=torque_calibration, 5=fsr_calibration, 6=fsr_refinement, 7=motor_start_up).
+			//Watching it settle at 2 (trial_on) marks FSR refinement finished (set in
+			//Side::check_calibration). Revert to "= 8;" if a real Channel 8 signal is ever needed.
+			rx_msg.data[8] = (float)exo_data->get_status();
 			rx_msg.data[9] = (float)millis()/1000;
 			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
 			break;
@@ -732,8 +751,15 @@ namespace UART_command_handlers
     // Request a system reset on the receiving MCU (used to reboot Teensy from Nano)
     inline static void get_system_reset(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
     {
-        (void)handler;
         (void)msg;
+
+        // Tell the Nano we received the reset FIRST, so the ack is on the wire before we die.
+        // (The Nano relays this to the GUI as the ACKED shutdown step.)
+        UART_msg_t ack;
+        ack.command = UART_command_names::reset_ack;
+        ack.joint_id = 0;
+        ack.len = 0;
+        handler->UART_msg(ack);
 
         // Put system in a safe state before rebooting
         exo_data->for_each_joint([](JointData* j_data, float* args)
@@ -744,6 +770,13 @@ namespace UART_command_handlers
         });
         exo_data->set_status(status_defs::messages::trial_off);
         delay(10);
+#if defined(ARDUINO_TEENSY36) || defined(ARDUINO_TEENSY41)
+        // Flush + close the SD log BEFORE rebooting. The trial_off set above can't do this:
+        // the logger closes in sd_logger.update() (in loop()), and exo_system_reset() reboots
+        // before control returns there. Closing here makes it race-free regardless of whether
+        // the stop/trial_off ever arrived over the (unreliable) Nano<->Teensy UART.
+        SdLogger::close_active();
+#endif
         exo_system_reset();
     }
 
