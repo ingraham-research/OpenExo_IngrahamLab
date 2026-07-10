@@ -76,13 +76,19 @@ namespace controller_defs                   /**< Stores the parameter indexes fo
         const uint8_t node4_y_idx = 7;                          //Torque for node 4 in Nm
         const uint8_t node5_x_idx = 8;                          //Percent gait for node 5
         const uint8_t node5_y_idx = 9;                          //Torque for node 5 in Nm
-        const uint8_t sim_gait_idx = 10;                        //Flag to simulate percent gait
-        const uint8_t use_percent_gait_idx = 11;                //0 = use percent stance (legacy), 1 = use percent gait
-        const uint8_t use_pid_idx = 12;                         //Flag to use PID control
-        const uint8_t p_gain_idx = 13;                          //Value of P Gain for PID control
-        const uint8_t i_gain_idx = 14;                          //Value of I Gain for PID control
-        const uint8_t d_gain_idx = 15;                          //Value of D Gain for PID control
-        const uint8_t num_parameter = 16;
+	    const uint8_t node6_x_idx = 10;   // NEW
+	    const uint8_t node6_y_idx = 11;   // NEW
+	    const uint8_t node7_x_idx = 12;   // NEW
+	    const uint8_t node7_y_idx = 13;   // NEW
+	    const uint8_t node8_x_idx = 12;   // NEW
+	    const uint8_t node8_y_idx = 13;   // NEW
+        const uint8_t sim_gait_idx = 16;                        //Flag to simulate percent gait
+        const uint8_t use_percent_gait_idx = 17;                //0 = use percent stance (legacy), 1 = use percent gait
+        const uint8_t use_pid_idx = 18;                         //Flag to use PID control
+        const uint8_t p_gain_idx = 19;                          //Value of P Gain for PID control
+        const uint8_t i_gain_idx = 20;                          //Value of I Gain for PID control
+        const uint8_t d_gain_idx = 21;                          //Value of D Gain for PID control
+        const uint8_t num_parameter = 22;
     }
 
     namespace franks_collins_hip
