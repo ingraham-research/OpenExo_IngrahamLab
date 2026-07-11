@@ -292,6 +292,28 @@ void SdLogger::self_test()
     SD.mkdir(SD_LOG_BASE_PATH);
     SD.mkdir(SD_LOG_BASE_PATH "/SELFTEST");
 
+    // === TEMP API PROBE for the non-blocking logger (remove after confirming) ===
+    // Confirms the SdFat file API the rewrite depends on: preAllocate / truncate / sync on the
+    // File returned by SD.open, and SD.card()->isBusy(). Report these lines back.
+    {
+        SD.remove(SD_LOG_BASE_PATH "/SELFTEST/probe.bin");
+        File pf = SD.open(SD_LOG_BASE_PATH "/SELFTEST/probe.bin", O_WRONLY | O_CREAT | O_TRUNC);
+        Serial.print("PROBE open ok=");            Serial.println((bool)pf);
+        if (pf)
+        {
+            bool pa = pf.preAllocate((uint64_t)1 << 20);
+            Serial.print("PROBE preAllocate(1MB) ok="); Serial.println(pa);
+            size_t w = pf.write((const uint8_t*)"hello\n", 6);
+            Serial.print("PROBE write bytes=");     Serial.println((unsigned)w);
+            bool tr = pf.truncate(6);
+            Serial.print("PROBE truncate(6) ok=");  Serial.println(tr);
+            pf.sync();
+            pf.close();
+        }
+        Serial.print("PROBE SD.card()->isBusy()="); Serial.println(SD.card()->isBusy());
+    }
+    // === END TEMP API PROBE ===
+
     // Clear prior results so line counts are clean (FILE_WRITE appends).
     SD.remove(SD_LOG_BASE_PATH "/SELFTEST/single.txt");
     SD.remove(SD_LOG_BASE_PATH "/SELFTEST/multi_A.txt");

@@ -1,0 +1,10 @@
+# OpenExo ground-strike log (toe-FSR strike onset; heel unused)
+Leg,Teensy_time_s,Prev_step_ms,Expected_step_ms
+R,44.2884,44288.0,-1.0
+R,45.3563,1062.0,-1.0
+R,48.6605,3310.0,-1.0
+R,50.0545,1394.0,-1.0
+R,53.9042,3841.0,2848.0
+R,55.1232,1223.0,2152.0
+R,56.5192,1389.0,2151.0
+R,57.8712,1361.0,1324.0
