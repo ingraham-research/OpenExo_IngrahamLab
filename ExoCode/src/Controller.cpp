@@ -330,6 +330,11 @@ float ZeroTorque::calc_motor_cmd()
     //Set the desired torque for plotting
     _controller_data->desired_torque = cmd_ff;
 
+    //Report the measured torque for GUI streaming and SD logging. No filtering here: this mirrors
+    //PJMC-0's low-gain regime (raw torque), which is the behavior being reproduced.
+    //See docs/superpowers/specs/2026-07-10-zerotorque-transparency-design.md
+    _controller_data->filtered_torque_reading = _joint_data->torque_reading;
+
     //Send the motor command
     return cmd;
 
