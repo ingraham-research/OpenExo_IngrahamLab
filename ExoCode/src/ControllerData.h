@@ -80,8 +80,8 @@ namespace controller_defs                   /**< Stores the parameter indexes fo
 	    const uint8_t node6_y_idx = 11;   // NEW
 	    const uint8_t node7_x_idx = 12;   // NEW
 	    const uint8_t node7_y_idx = 13;   // NEW
-	    const uint8_t node8_x_idx = 12;   // NEW
-	    const uint8_t node8_y_idx = 13;   // NEW
+	    const uint8_t node8_x_idx = 14;   // NEW
+	    const uint8_t node8_y_idx = 15;   // NEW
         const uint8_t sim_gait_idx = 16;                        //Flag to simulate percent gait
         const uint8_t use_percent_gait_idx = 17;                //0 = use percent stance (legacy), 1 = use percent gait
         const uint8_t use_pid_idx = 18;                         //Flag to use PID control
