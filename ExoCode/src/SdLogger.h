@@ -18,6 +18,7 @@
 
 #include <Arduino.h>
 #include <SD.h>
+#include "SdRingBuffer.h"
 #include "ExoData.h"
 #include "SideData.h"
 #include "JointData.h"
@@ -81,9 +82,10 @@ class SdLogger
         uint32_t _dbg_bytes;    // motor-row bytes written, per interval
         uint32_t _dbg_last_ms;
 
-        File _f_motor_l;
-        File _f_motor_r;
-        File _f_gs;
+        FsFile   _file[3];             // 0=Motor_L, 1=Motor_R, 2=Ground_strike
+        SdRingBuffer _rb[3];           // one ring buffer per file (DMAMEM-backed storage)
+        uint64_t _bytes_written[3];    // logical bytes written per file, for truncate() at close
+        uint8_t  _drain_turn;          // round-robins the single-sector drain across the 3 files
 
         void       _begin_if_needed();
         void       _load_config();
@@ -92,9 +94,11 @@ class SdLogger
         void       _open_session();
         void       _close_session();
         JointData* _used_joint(SideData& side);
-        int        _write_motor_row(File& f, SideData& side, const char* label);  // returns bytes written
+        void       _write_motor_row(int idx, SideData& side, const char* label);  // push a row into ring buffer idx
         void       _check_ground_strike_events();
-        void       _maybe_flush();
+        void       _service_writes();                    // isBusy()-gated single-sector drain
+        uint64_t   _prealloc_bytes(bool motor) const;    // adaptive contiguous pre-allocation size
+        void       _maybe_flush();                       // durability sync, gated on !isBusy()
 };
 
 #endif

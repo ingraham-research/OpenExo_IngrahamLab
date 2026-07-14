@@ -6,6 +6,12 @@
 
 SdLogger* SdLogger::_instance = nullptr;
 
+// Per-file ring-buffer storage in OCRAM (DMAMEM). Sized to ride out a multi-hundred-ms card stall
+// at the log data rate (see design doc). ~18 KB total.
+DMAMEM static uint8_t s_sdlog_buf_l[8192];
+DMAMEM static uint8_t s_sdlog_buf_r[8192];
+DMAMEM static uint8_t s_sdlog_buf_gs[2048];
+
 SdLogger::SdLogger(ExoData* data)
 : _data(data), _available(false), _logging(false), _prev_active(false),
   _session_index(1), _decim(0), _last_flush_ms(0), _flush_turn(0),
@@ -15,6 +21,8 @@ SdLogger::SdLogger(ExoData* data)
   _dbg_ran(0), _dbg_bytes(0), _dbg_last_ms(0)
 {
     _instance = this;
+    _drain_turn = 0;
+    _bytes_written[0] = _bytes_written[1] = _bytes_written[2] = 0;
 }
 
 void SdLogger::close_active()
@@ -50,7 +58,7 @@ void SdLogger::update(bool ran)
             "t=%lums status=%u logging=%d ran/s=%lu bytes/s=%lu L.used=%d fL=%d\n",
             (unsigned long)millis(), (unsigned)_data->get_status(), (int)_logging,
             (unsigned long)_dbg_ran, (unsigned long)_dbg_bytes,
-            (int)_data->left_side.ankle.is_used, (int)(bool)_f_motor_l);
+            (int)_data->left_side.ankle.is_used, (int)(bool)_file[0]);
         Serial.print("SdLog: "); Serial.print(line);
         // Persist to the card (open/append/close) so it's readable offline after a trial.
         File dbg = SD.open(SD_LOG_BASE_PATH "/debug_log.txt", FILE_WRITE);
@@ -59,17 +67,21 @@ void SdLogger::update(bool ran)
     }
 #endif
 
-    if (!_logging || !ran) return;
-
-    _check_ground_strike_events();   // every control cycle so strikes aren't missed
-
-    if (++_decim >= _decimation)
+    // Producer: format rows into the RAM ring buffers only on a real control cycle. Never touches SD.
+    if (_logging && ran)
     {
-        _decim = 0;
-        _dbg_bytes += (uint32_t)_write_motor_row(_f_motor_l, _data->left_side,  "L");
-        _dbg_bytes += (uint32_t)_write_motor_row(_f_motor_r, _data->right_side, "R");
+        _check_ground_strike_events();   // every control cycle so strikes aren't missed
+        if (++_decim >= _decimation)
+        {
+            _decim = 0;
+            _write_motor_row(0, _data->left_side,  "L");
+            _write_motor_row(1, _data->right_side, "R");
+        }
     }
 
+    // Drainer + durability sync: run every loop iteration, gated on the card being free, so the ring
+    // buffers empty whenever the card is idle and no control cycle ever waits on SD.
+    _service_writes();
     _maybe_flush();
 #else
     (void)ran;
@@ -159,34 +171,42 @@ void SdLogger::_open_session()
     snprintf(dir, sizeof(dir), "%s/%04u", SD_LOG_BASE_PATH, _session_index);
     SD.mkdir(dir);
 
-    char path[48];
-    snprintf(path, sizeof(path), "%s/Motor_L_log.txt", dir);
-    _f_motor_l = SD.open(path, FILE_WRITE);
-    snprintf(path, sizeof(path), "%s/Motor_R_log.txt", dir);
-    _f_motor_r = SD.open(path, FILE_WRITE);
-    snprintf(path, sizeof(path), "%s/Ground_strike_log.txt", dir);
-    _f_gs = SD.open(path, FILE_WRITE);
+    const char* names[3] = { "Motor_L_log.txt", "Motor_R_log.txt", "Ground_strike_log.txt" };
+    uint8_t* stores[3]   = { s_sdlog_buf_l, s_sdlog_buf_r, s_sdlog_buf_gs };
+    size_t   caps[3]     = { sizeof(s_sdlog_buf_l), sizeof(s_sdlog_buf_r), sizeof(s_sdlog_buf_gs) };
 
-    if (!_f_motor_l || !_f_motor_r || !_f_gs) { _close_session(); return; }
+    char path[64];
+    for (int i = 0; i < 3; ++i)
+    {
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        _file[i] = SD.sdfs.open(path, O_WRONLY | O_CREAT | O_TRUNC);
+        if (!_file[i]) { _close_session(); return; }
+        _file[i].preAllocate(_prealloc_bytes(i < 2));   // false return is fine: falls back to on-demand growth
+        _rb[i].init(stores[i], caps[i]);
+        _bytes_written[i] = 0;
+    }
 
+    // Queue headers into the ring buffers (drained as normal data). Same format/columns as before.
     const char* motor_hdr =
         "Motor,Teensy_time_s,Status,Gait_phase,Position_rad,Velocity_rad_s,Torque_Nm,"
         "Commanded_Torque_Nm,Current_A,Filtered_Torque_Nm,Desired_Torque_Nm,"
-        "Toe_FSR,Stance,Enabled,Timeout_ct,Error";
-
-    _f_motor_l.print("# OpenExo SD log rate~"); _f_motor_l.print(500 / _decimation);
-    _f_motor_l.print("Hz t0_us=");              _f_motor_l.println(micros());
-    _f_motor_l.println(motor_hdr);
-
-    _f_motor_r.print("# OpenExo SD log rate~"); _f_motor_r.print(500 / _decimation);
-    _f_motor_r.print("Hz t0_us=");              _f_motor_r.println(micros());
-    _f_motor_r.println(motor_hdr);
-
-    _f_gs.println("# OpenExo ground-strike log (toe-FSR strike onset; heel unused)");
-    _f_gs.println("Leg,Teensy_time_s,Prev_step_ms,Expected_step_ms");
+        "Toe_FSR,Stance,Enabled,Timeout_ct,Error\n";
+    char hbuf[128];
+    for (int i = 0; i < 2; ++i)
+    {
+        int n = snprintf(hbuf, sizeof(hbuf), "# OpenExo SD log rate~%dHz t0_us=%lu\n",
+                         500 / _decimation, (unsigned long)micros());
+        if (n > 0) _rb[i].push((const uint8_t*)hbuf, (size_t)n);
+        _rb[i].push((const uint8_t*)motor_hdr, strlen(motor_hdr));
+    }
+    const char* gs_hdr =
+        "# OpenExo ground-strike log (toe-FSR strike onset; heel unused)\n"
+        "Leg,Teensy_time_s,Prev_step_ms,Expected_step_ms\n";
+    _rb[2].push((const uint8_t*)gs_hdr, strlen(gs_hdr));
 
     _decim = 0;
     _flush_turn = 0;
+    _drain_turn = 0;
     _last_flush_ms = millis();
     _logging = true;
     _session_index++;   // next trial -> fresh folder
@@ -198,9 +218,22 @@ void SdLogger::_open_session()
 
 void SdLogger::_close_session()
 {
-    if (_f_motor_l) { _f_motor_l.flush(); _f_motor_l.close(); }
-    if (_f_motor_r) { _f_motor_r.flush(); _f_motor_r.close(); }
-    if (_f_gs)      { _f_gs.flush();      _f_gs.close(); }
+    for (int i = 0; i < 3; ++i)
+    {
+        if (!_file[i]) continue;
+        // Flush whatever remains in the ring buffer (blocking is fine here: the trial is ending).
+        const uint8_t* p; size_t n;
+        while ((n = _rb[i].peek(&p)) > 0)
+        {
+            size_t w = _file[i].write(p, n);
+            _bytes_written[i] += w;
+            _rb[i].consume(w);
+            if (w < n) break;   // write error; stop rather than spin
+        }
+        _file[i].truncate(_bytes_written[i]);   // discard the unused pre-allocated tail
+        _file[i].sync();
+        _file[i].close();
+    }
     _logging = false;
 #if SD_LOG_DEBUG
     Serial.println("SdLogger: closed session");
@@ -216,10 +249,10 @@ JointData* SdLogger::_used_joint(SideData& side)
     return nullptr;
 }
 
-int SdLogger::_write_motor_row(File& f, SideData& side, const char* label)
+void SdLogger::_write_motor_row(int idx, SideData& side, const char* label)
 {
     JointData* j = _used_joint(side);
-    if (j == nullptr || !f) return 0;
+    if (j == nullptr) return;
 
     char buf[192];
     int n = snprintf(buf, sizeof(buf),
@@ -235,42 +268,87 @@ int SdLogger::_write_motor_row(File& f, SideData& side, const char* label)
         (int)j->motor.enabled, j->motor.timeout_count,
         _data->error_code);
 
-    if (n <= 0) return 0;
+    if (n <= 0) return;
     if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
-    return (int)f.write((const uint8_t*)buf, (size_t)n);
+    _rb[idx].push((const uint8_t*)buf, (size_t)n);
 }
 
 void SdLogger::_check_ground_strike_events()
 {
-    if (!_f_gs) return;
+    if (!_logging) return;
     const float t = micros() / 1.0e6;
+    char buf[64];
 
     if (_data->left_side.ground_strike)
     {
-        _f_gs.print("L,");  _f_gs.print(t, 4); _f_gs.print(",");
-        _f_gs.print(_data->left_side.last_step_duration, 1); _f_gs.print(",");
-        _f_gs.println(_data->left_side.expected_step_duration, 1);
+        int n = snprintf(buf, sizeof(buf), "L,%.4f,%.1f,%.1f\n", t,
+                         _data->left_side.last_step_duration, _data->left_side.expected_step_duration);
+        if (n > 0) _rb[2].push((const uint8_t*)buf, (size_t)n);
     }
     if (_data->right_side.ground_strike)
     {
-        _f_gs.print("R,");  _f_gs.print(t, 4); _f_gs.print(",");
-        _f_gs.print(_data->right_side.last_step_duration, 1); _f_gs.print(",");
-        _f_gs.println(_data->right_side.expected_step_duration, 1);
+        int n = snprintf(buf, sizeof(buf), "R,%.4f,%.1f,%.1f\n", t,
+                         _data->right_side.last_step_duration, _data->right_side.expected_step_duration);
+        if (n > 0) _rb[2].push((const uint8_t*)buf, (size_t)n);
+    }
+}
+
+uint64_t SdLogger::_prealloc_bytes(bool motor) const
+{
+    if (!motor) return (uint64_t)1 << 20;   // ground-strike: fixed 1 MB (event-driven, low volume)
+    const uint32_t ROW_BYTES_EST = 72;
+    uint32_t rows_per_s = 500u / (_decimation ? _decimation : 1);
+    uint64_t want = (uint64_t)rows_per_s * ROW_BYTES_EST * 5400ull;   // ~90 min at the actual rate
+    const uint64_t MINB = (uint64_t)1 << 20;
+    const uint64_t MAXB = (uint64_t)128 << 20;
+    if (want < MINB) want = MINB;
+    if (want > MAXB) want = MAXB;
+    return want;
+}
+
+void SdLogger::_service_writes()
+{
+    if (!_logging || !_available) return;
+    if (SD.sdfs.card()->isBusy()) return;    // never wait on the card
+
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        _drain_turn = (uint8_t)((_drain_turn + 1) % 3);
+        int i = _drain_turn;
+        if (!_file[i]) continue;
+
+        // If bytes were dropped on overflow, record a visible gap marker (direct write, still gated).
+        if (_rb[i].dropped() > 0)
+        {
+            char g[48];
+            int gn = snprintf(g, sizeof(g), "\n# GAP %lu bytes\n", (unsigned long)_rb[i].dropped());
+            if (gn > 0) { _bytes_written[i] += _file[i].write((const uint8_t*)g, (size_t)gn); }
+            _rb[i].clear_dropped();
+        }
+
+        if (_rb[i].size() >= 512)
+        {
+            const uint8_t* p;
+            size_t avail = _rb[i].peek(&p);            // largest contiguous run at the tail
+            size_t w = (avail >= 512) ? 512 : avail;   // one sector; wrap remainder drains next turn
+            size_t wrote = _file[i].write(p, w);
+            _rb[i].consume(wrote);
+            _bytes_written[i] += wrote;
+            _dbg_bytes += (uint32_t)wrote;
+            return;                                    // at most one sector write per call
+        }
     }
 }
 
 void SdLogger::_maybe_flush()
 {
+    if (!_logging) return;
     const uint32_t now = millis();
     if (now - _last_flush_ms < _flush_tick_ms) return;
+    if (SD.sdfs.card()->isBusy()) return;    // defer; don't stall control on a sync
     _last_flush_ms = now;
 
-    switch (_flush_turn)   // one sync per tick, rotating across files
-    {
-        case 0: if (_f_motor_l) _f_motor_l.flush(); break;
-        case 1: if (_f_motor_r) _f_motor_r.flush(); break;
-        case 2: if (_f_gs)      _f_gs.flush();      break;
-    }
+    if (_file[_flush_turn]) _file[_flush_turn].sync();   // one file's directory sync per tick
     _flush_turn = (uint8_t)((_flush_turn + 1) % 3);
 }
 
@@ -291,28 +369,6 @@ void SdLogger::self_test()
     if (!SD.begin(BUILTIN_SDCARD)) { Serial.println("SD.begin FAILED"); return; }
     SD.mkdir(SD_LOG_BASE_PATH);
     SD.mkdir(SD_LOG_BASE_PATH "/SELFTEST");
-
-    // === TEMP API PROBE for the non-blocking logger (remove after confirming) ===
-    // Confirms the SdFat file API the rewrite depends on: preAllocate / truncate / sync on the
-    // File returned by SD.open, and SD.card()->isBusy(). Report these lines back.
-    {
-        SD.remove(SD_LOG_BASE_PATH "/SELFTEST/probe.bin");
-        File pf = SD.open(SD_LOG_BASE_PATH "/SELFTEST/probe.bin", O_WRONLY | O_CREAT | O_TRUNC);
-        Serial.print("PROBE open ok=");            Serial.println((bool)pf);
-        if (pf)
-        {
-            bool pa = pf.preAllocate((uint64_t)1 << 20);
-            Serial.print("PROBE preAllocate(1MB) ok="); Serial.println(pa);
-            size_t w = pf.write((const uint8_t*)"hello\n", 6);
-            Serial.print("PROBE write bytes=");     Serial.println((unsigned)w);
-            bool tr = pf.truncate(6);
-            Serial.print("PROBE truncate(6) ok=");  Serial.println(tr);
-            pf.sync();
-            pf.close();
-        }
-        Serial.print("PROBE SD.card()->isBusy()="); Serial.println(SD.card()->isBusy());
-    }
-    // === END TEMP API PROBE ===
 
     // Clear prior results so line counts are clean (FILE_WRITE appends).
     SD.remove(SD_LOG_BASE_PATH "/SELFTEST/single.txt");
