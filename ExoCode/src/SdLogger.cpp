@@ -11,6 +11,7 @@ SdLogger* SdLogger::_instance = nullptr;
 DMAMEM static uint8_t s_sdlog_buf_l[8192];
 DMAMEM static uint8_t s_sdlog_buf_r[8192];
 DMAMEM static uint8_t s_sdlog_buf_gs[2048];
+DMAMEM static uint8_t s_sdlog_buf_dbg[2048];   // control-loop debug stream (index 3)
 
 SdLogger::SdLogger(ExoData* data)
 : _data(data), _available(false), _logging(false), _prev_active(false),
@@ -22,7 +23,10 @@ SdLogger::SdLogger(ExoData* data)
 {
     _instance = this;
     _drain_turn = 0;
-    _bytes_written[0] = _bytes_written[1] = _bytes_written[2] = 0;
+    _dbg_max_loop_us = 0;
+    _dbg_max_sd_us = 0;
+    _dbg_last_loop_us = 0;
+    _bytes_written[0] = _bytes_written[1] = _bytes_written[2] = _bytes_written[3] = 0;
 }
 
 void SdLogger::close_active()
@@ -45,25 +49,37 @@ void SdLogger::update(bool ran)
     _handle_session();
 
 #if SD_LOG_DEBUG
-    // Count and print EVERY second for the whole run (not just while logging), so we can
-    // see the true loop rate and whether the trial state (status) is stable over time.
-    // status: 2 == trial_on (see status_defs::messages). Window is a full ~1s except the
-    // very first line, so ran/s is a real rate.
+    // Worst-case full loop-iteration time = interval between update() calls (= one .ino loop pass:
+    // exo.run() + this update()). This is the stall detector.
+    {
+        const uint32_t now_us = micros();
+        const uint32_t loop_us = now_us - _dbg_last_loop_us;
+        _dbg_last_loop_us = now_us;
+        if (loop_us < 1000000UL && loop_us > _dbg_max_loop_us) _dbg_max_loop_us = loop_us;
+    }
     if (ran) _dbg_ran++;
     if (millis() - _dbg_last_ms > 1000)
     {
         _dbg_last_ms = millis();
-        char line[176];
+        char line[200];
         snprintf(line, sizeof(line),
-            "t=%lums status=%u logging=%d ran/s=%lu bytes/s=%lu L.used=%d fL=%d\n",
+            "t=%lums status=%u logging=%d ran/s=%lu bytes/s=%lu maxLoop=%luus maxSD=%luus L.used=%d\n",
             (unsigned long)millis(), (unsigned)_data->get_status(), (int)_logging,
             (unsigned long)_dbg_ran, (unsigned long)_dbg_bytes,
-            (int)_data->left_side.ankle.is_used, (int)(bool)_file[0]);
+            (unsigned long)_dbg_max_loop_us, (unsigned long)_dbg_max_sd_us,
+            (int)_data->left_side.ankle.is_used);
         Serial.print("SdLog: "); Serial.print(line);
-        // Persist to the card (open/append/close) so it's readable offline after a trial.
-        File dbg = SD.open(SD_LOG_BASE_PATH "/debug_log.txt", FILE_WRITE);
-        if (dbg) { dbg.print(line); dbg.flush(); dbg.close(); }
-        _dbg_ran = 0; _dbg_bytes = 0;
+        // Route the debug line into its own non-blocking stream (index 3 -> debug_log.txt in the
+        // session folder, separate from the motor logs so downstream parsers are untouched). push()
+        // is a safe no-op when no session is open, so idle-boot debug is serial-only. No blocking
+        // SD.open on the control path.
+        _rb[3].push((const uint8_t*)line, strlen(line));
+        // Read the two maxes together: maxLoop ~= maxSD => the SD ops ARE the stall; maxLoop >> maxSD
+        // => the stall is in exo.run() (control/CAN/UART), not the logger.
+        _dbg_ran = 0; _dbg_bytes = 0; _dbg_max_loop_us = 0; _dbg_max_sd_us = 0;
+        // Exclude this once/1s print (+ once/10s blocking file write) from the next loop-time sample,
+        // so maxLoop reflects only real control-loop stalls, not our own diagnostic overhead.
+        _dbg_last_loop_us = micros();
     }
 #endif
 
@@ -81,8 +97,15 @@ void SdLogger::update(bool ran)
 
     // Drainer + durability sync: run every loop iteration, gated on the card being free, so the ring
     // buffers empty whenever the card is idle and no control cycle ever waits on SD.
+#if SD_LOG_DEBUG
+    const uint32_t sd_t0 = micros();
+#endif
     _service_writes();
     _maybe_flush();
+#if SD_LOG_DEBUG
+    const uint32_t sd_dt = micros() - sd_t0;
+    if (sd_dt > _dbg_max_sd_us) _dbg_max_sd_us = sd_dt;
+#endif
 #else
     (void)ran;
 #endif
@@ -171,12 +194,12 @@ void SdLogger::_open_session()
     snprintf(dir, sizeof(dir), "%s/%04u", SD_LOG_BASE_PATH, _session_index);
     SD.mkdir(dir);
 
-    const char* names[3] = { "Motor_L_log.txt", "Motor_R_log.txt", "Ground_strike_log.txt" };
-    uint8_t* stores[3]   = { s_sdlog_buf_l, s_sdlog_buf_r, s_sdlog_buf_gs };
-    size_t   caps[3]     = { sizeof(s_sdlog_buf_l), sizeof(s_sdlog_buf_r), sizeof(s_sdlog_buf_gs) };
+    const char* names[4] = { "Motor_L_log.txt", "Motor_R_log.txt", "Ground_strike_log.txt", "debug_log.txt" };
+    uint8_t* stores[4]   = { s_sdlog_buf_l, s_sdlog_buf_r, s_sdlog_buf_gs, s_sdlog_buf_dbg };
+    size_t   caps[4]     = { sizeof(s_sdlog_buf_l), sizeof(s_sdlog_buf_r), sizeof(s_sdlog_buf_gs), sizeof(s_sdlog_buf_dbg) };
 
     char path[64];
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 4; ++i)
     {
         snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
         _file[i] = SD.sdfs.open(path, O_WRONLY | O_CREAT | O_TRUNC);
@@ -204,6 +227,9 @@ void SdLogger::_open_session()
         "Leg,Teensy_time_s,Prev_step_ms,Expected_step_ms\n";
     _rb[2].push((const uint8_t*)gs_hdr, strlen(gs_hdr));
 
+    const char* dbg_hdr = "# OpenExo control-loop debug (SD_LOG_DEBUG): ran/s, maxLoop us, maxSD us\n";
+    _rb[3].push((const uint8_t*)dbg_hdr, strlen(dbg_hdr));
+
     _decim = 0;
     _flush_turn = 0;
     _drain_turn = 0;
@@ -218,7 +244,7 @@ void SdLogger::_open_session()
 
 void SdLogger::_close_session()
 {
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 4; ++i)
     {
         if (!_file[i]) continue;
         // Flush whatever remains in the ring buffer (blocking is fine here: the trial is ending).
@@ -311,9 +337,9 @@ void SdLogger::_service_writes()
     if (!_logging || !_available) return;
     if (SD.sdfs.card()->isBusy()) return;    // never wait on the card
 
-    for (int attempt = 0; attempt < 3; ++attempt)
+    for (int attempt = 0; attempt < 4; ++attempt)
     {
-        _drain_turn = (uint8_t)((_drain_turn + 1) % 3);
+        _drain_turn = (uint8_t)((_drain_turn + 1) % 4);
         int i = _drain_turn;
         if (!_file[i]) continue;
 
@@ -349,7 +375,7 @@ void SdLogger::_maybe_flush()
     _last_flush_ms = now;
 
     if (_file[_flush_turn]) _file[_flush_turn].sync();   // one file's directory sync per tick
-    _flush_turn = (uint8_t)((_flush_turn + 1) % 3);
+    _flush_turn = (uint8_t)((_flush_turn + 1) % 4);
 }
 
 // ---------------------------------------------------------------------------

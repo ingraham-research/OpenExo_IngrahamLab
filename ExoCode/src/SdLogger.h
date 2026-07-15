@@ -27,7 +27,7 @@
 // ---- Compile-time config ----
 #define ENABLE_SD_LOGGING     1      // 0 compiles the logger out entirely
 #define SD_LOG_BASE_PATH      "/EXOLOG"
-#define SD_LOG_DEBUG          1      // 1 -> once/sec, log ran/bytes/used to Serial AND /EXOLOG/debug_log.txt
+#define SD_LOG_DEBUG          1      // 1 -> ran/s + maxLoop/maxSD timing to Serial (1s) + /EXOLOG/debug_log.txt (10s). For diagnosing loop stalls.
 #define SD_LOG_SELFTEST       0      // 1 -> at boot, run a SAFE raw-SD write test (no motors, no trial) then HALT.
                                      //      Writes results to /EXOLOG/SELFTEST/. Set back to 0 for normal operation.
 #define SD_LOG_SELFTEST_TRIAL 0      // 1 -> at boot, drive the REAL logger update() path with a FAKE trial (no
@@ -81,11 +81,14 @@ class SdLogger
         uint32_t _dbg_ran;      // ran==true update calls during logging, per interval
         uint32_t _dbg_bytes;    // motor-row bytes written, per interval
         uint32_t _dbg_last_ms;
+        uint32_t _dbg_max_loop_us;  // worst full loop-iteration time, per debug interval
+        uint32_t _dbg_max_sd_us;    // worst time spent in the SD ops (drain+sync), per debug interval
+        uint32_t _dbg_last_loop_us; // timestamp of the previous update() call, for the loop-time delta
 
-        FsFile   _file[3];             // 0=Motor_L, 1=Motor_R, 2=Ground_strike
-        SdRingBuffer _rb[3];           // one ring buffer per file (DMAMEM-backed storage)
-        uint64_t _bytes_written[3];    // logical bytes written per file, for truncate() at close
-        uint8_t  _drain_turn;          // round-robins the single-sector drain across the 3 files
+        FsFile   _file[4];             // 0=Motor_L, 1=Motor_R, 2=Ground_strike, 3=debug_log
+        SdRingBuffer _rb[4];           // one ring buffer per file (DMAMEM-backed storage)
+        uint64_t _bytes_written[4];    // logical bytes written per file, for truncate() at close
+        uint8_t  _drain_turn;          // round-robins the single-sector drain across the files
 
         void       _begin_if_needed();
         void       _load_config();
