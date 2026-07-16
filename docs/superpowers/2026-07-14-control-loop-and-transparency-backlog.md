@@ -33,9 +33,42 @@ Measured with `maxLoop`/`maxSD` instrumentation: `maxLoop` ~12 ms, `maxSD` ~2-4 
 - Note: even fully fixed, the trial loop baseline is ~control-cost-limited (~315-550 Hz); no-trial is
   ~550 Hz, so control/CAN work per cycle is the ceiling, not logging.
 
-### 2. AK60v3 CAN velocity/current feedback decode is ~40% garbage
-`motor.v` / `motor.i` decode to recurring impossible values (~1488 rad/s, ~319 A). Blocks any
-velocity-based feedforward and may be tangled with the control-path stalls. **Next major task.**
+### 2. AK60v3 CAN velocity/current feedback decode is wrong — FIXED (applied 2026-07-15, unflashed; pending bench validation)
+`Motor.cpp` `read_data()` AK60v3 branch decodes pos/vel/cur with `_uint_to_float()`
+(unsigned-with-offset, 12-bit for v/i). That's wrong on every field: the AK60-6 V3.0 CAN status
+upload is **signed int16 with fixed scales**, not MIT unsigned-offset. Symptom: `motor.v`/`motor.i`
+hit impossible values (~1488 rad/s, ~319 A) ~40% of samples.
+
+**Byte layout the firmware already reads is correct** (`p=[0-1], v=[2-3], i=[4-5]`, 16-bit); only
+the decode math is wrong. Triple-confirmed:
+- CubeMars *AK Series Module Product Manual V3.0.0* §4.3.1 "CAN Upload Message Protocol": position
+  int16 ×0.1 (deg), speed int16 ×10 (ERPM, electrical), current int16 ×0.01 (A), temp int8 [6],
+  error uint8 [7]. Includes reference decode code that matches below exactly.
+- The lab's working V3 Python driver (`TMotorV3._read_cubemars_message`) — identical: signed int16,
+  ×0.1 / ×10 / ×0.01.
+- The logs (signed decode corr +0.78 vs unsigned −0.35; `0xFFFF`≈0 at rest).
+
+**AK60-6 V3.0 KV80 constants** (official product page, verified): **pole pairs = 14**, internal
+reduction **6:1**, peak current 10.3 A (== firmware `_I_MAX`). So ERPM→output-shaft rad/s divides by
+`14 * 6`.
+
+**The fix** (replace the three `_uint_to_float` lines in the AK60v3 read branch, `Motor.cpp:172-177`):
+```cpp
+int16_t pos_int = (int16_t)((msg.buf[0] << 8) | msg.buf[1]);
+int16_t vel_int = (int16_t)((msg.buf[2] << 8) | msg.buf[3]);
+int16_t cur_int = (int16_t)((msg.buf[4] << 8) | msg.buf[5]);
+_motor_data->p = direction_modifier * (pos_int * 0.1f) * (float)DEG_TO_RAD;                 // rad (output)
+_motor_data->v = direction_modifier * (vel_int * 10.0f) / (14.0f * 6.0f) * (2.0f*PI/60.0f);  // rad/s (output)
+_motor_data->i = direction_modifier * (cur_int * 0.01f);                                     // A
+```
+Notes:
+- Position/current need no pole-pair count and are fixable immediately; velocity uses the confirmed
+  14*6. Recommend one known-speed spin to confirm the velocity magnitude before trusting it downstream.
+- **Safety-relevant:** `error_types.h:66` computes `motor_torque = motor.i * motor.kt`; the garbage
+  current feeds a ~350 Nm phantom torque into that guard. Fixing current matters regardless of velocity.
+- SEND path is fine (byte-packing matches the Python driver; the analog-torque feedback loop absorbs the
+  minor torque-FF-via-current and `_V_MAX=48` vs manual ±60 scaling differences). Not the bug.
+- Blocks velocity-based friction feedforward (transparency residual, item #3).
 
 ### 3. Zero-torque residual jitter = delay-limited P-feedback limit cycle
 Confirmed: higher kp -> more oscillation (kp 2 -> 3 raised amplitude), `corr(tau,cmd) ~ -0.8`. It's a

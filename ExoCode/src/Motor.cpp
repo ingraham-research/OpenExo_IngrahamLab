@@ -169,12 +169,20 @@ void _CANMotor::read_data()
             // AK60v3: NEW message format
             if ((msg.id & 0xFF) == uint8_t(_motor_data->id))
             {
-                uint32_t p_int = (msg.buf[0] << 8) | msg.buf[1];
-                uint32_t v_int = (msg.buf[2] << 8) | msg.buf[3];
-                uint32_t i_int = (msg.buf[4] << 8) | msg.buf[5];
-                _motor_data->p = direction_modifier * _uint_to_float(p_int, -_P_MAX, _P_MAX, 16);
-                _motor_data->v = direction_modifier * _uint_to_float(v_int, -_V_MAX, _V_MAX, 12);
-                _motor_data->i = direction_modifier * _uint_to_float(i_int, -_I_MAX, _I_MAX, 12);
+                // AK60v3 (AK60-6 V3.0) sends the CubeMars CAN status-upload frame (AK Series Manual
+                // V3.0.0 sec 4.3.1), NOT the MIT unsigned-with-offset encoding: signed int16 fields with
+                // fixed scales -- [0..1]=position (0.1 deg/count), [2..3]=speed (10 ERPM/count, electrical),
+                // [4..5]=current (0.01 A/count), [6]=temp (int8), [7]=error. Verified against the manual's
+                // reference decode, the lab's working V3 Python driver, and log correlation.
+                // motor.p/v/i are expressed at the actuator output shaft: the internal 6:1 is folded into
+                // Kt and the external 4.5:1 joint gearing is applied in Joint.cpp. Speed is ELECTRICAL, so
+                // ERPM -> output rad/s divides by pole_pairs(14) * internal_reduction(6).
+                int16_t p_raw = (int16_t)((msg.buf[0] << 8) | msg.buf[1]);
+                int16_t v_raw = (int16_t)((msg.buf[2] << 8) | msg.buf[3]);
+                int16_t i_raw = (int16_t)((msg.buf[4] << 8) | msg.buf[5]);
+                _motor_data->p = direction_modifier * (p_raw * 0.1f) * PI / 180.0f;
+                _motor_data->v = direction_modifier * (v_raw * 10.0f) / (14.0f * 6.0f) * (2.0f * PI / 60.0f);
+                _motor_data->i = direction_modifier * (i_raw * 0.01f);
                 #ifdef MOTOR_DEBUG
                     logger::print("_CANMotor::read_data():Got data-");
                     logger::print("ID:" + String(uint32_t(_motor_data->id)) + ",");
