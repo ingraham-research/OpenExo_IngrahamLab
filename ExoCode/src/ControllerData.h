@@ -255,7 +255,7 @@ namespace controller_defs                   /**< Stores the parameter indexes fo
         const uint8_t num_parameter = 17;
     }
 
-    const uint8_t max_parameters = spv2::num_parameter;         //This should be the largest of all the num_parameters
+    const uint8_t max_parameters = spline::num_parameter;         //This should be the largest of all the num_parameters
 }
 
 /**
