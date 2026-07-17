@@ -35,7 +35,7 @@
 #endif
 
 	// Define the size of the array and the max length for each string
-	const int MAX_COLUMNS = 30;
+	const int MAX_COLUMNS = 34;
 	const int MAX_STRING_LENGTH = 10;
 	// Two rows are emitted per controller:
 	// 1) names row from CSV line 5
