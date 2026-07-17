@@ -163,7 +163,8 @@ namespace ble_handlers
 {
     inline static void start(ExoData* data, BleMessage* msg)
     {
-        //Start the trial (ie Enable motors and begin streaming data). If the joint is used; enable the motor, and set the controller to zero torque
+        //Start the trial (ie Enable motors and begin streaming data). If the joint is used, enable the motor.
+        //Controller selection is governed by the config.ini default / the last GUI selection; this handler does not change the controller.
         data->for_each_joint(
             
             // This is a lamda or anonymous function, see https://www.learncpp.com/cpp-tutorial/introduction-to-lambdas-anonymous-functions/

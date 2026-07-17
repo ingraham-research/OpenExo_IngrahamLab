@@ -178,6 +178,12 @@ class BioFeedbackPage(QtWidgets.QWidget):
         except Exception:
             return
 
+        # KNOWN JERKINESS (intentionally not fixed here): this uses wall-clock arrival
+        # time for the x-axis. BLE delivers samples in bursts (~8 at once, then a gap),
+        # so points clump on the time axis and the trace looks jerky even though the data
+        # is a steady ~100Hz. ActiveTrialPage solves this by plotting against the exo's
+        # own "Exoskeleton time (seconds)" channel instead (see ActiveTrialPage._x_for_sample).
+        # If this bio-feedback plot ever looks jerky, that's why -- port _x_for_sample here.
         t_next = time.time() - self._t0
         self._t_vals.append(t_next)
         self._fsr_vals.append(fsr_val)

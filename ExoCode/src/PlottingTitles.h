@@ -38,9 +38,9 @@ inline const char* getColumnHeader(uint8_t column_index, uint8_t* config_to_send
                 case 2:  return "Desired Torque (R)";
                 case 3:  return "Measured Torque (R)";
                 case 4:  return "Toe FSR (L)";
-                case 5:  return "Stance Phase (L)";
+                case 5:  return "In Stance (L)";
                 case 6:  return "Toe FSR (R)";
-                case 7:  return "Stance Phase (R)";
+                case 7:  return "In Stance (R)";
                 case 8:  return "Status";   //HIJACK: was "Channel 8" (unused). Now carries exo status (see uart_commands.h bilateral_ankle data[8]).
                 case 9:  return "Exoskeleton time (seconds)";
                 case 10: return "Battery Level (Volts)";
