@@ -343,6 +343,11 @@ class ActiveTrialPage(QtWidgets.QWidget):
         self._param_names = []
         # Track real data start time
         self._real_data_t0 = None
+        # Plot x-axis uses the exo's own timestamp (smooth ~100Hz) instead of bursty BLE
+        # wall-clock arrival. Index is resolved from the channel labels (None -> fall back
+        # to wall-clock); _exo_t0 anchors the axis to start near 0. See _x_for_sample.
+        self._exo_time_idx = None
+        self._exo_t0 = None
 
     def set_update_controller_enabled(self, enabled: bool):
         try:
@@ -450,6 +455,7 @@ class ActiveTrialPage(QtWidgets.QWidget):
         self.bot_b_vals.clear()
 
         self._real_data_t0 = None
+        self._exo_t0 = None
         self.t0 = time.time()
 
         self.curve_top_cmd.setData([], [])
@@ -461,6 +467,11 @@ class ActiveTrialPage(QtWidgets.QWidget):
         """Update plot labels with dynamic parameter names from device handshake."""
         try:
             self._param_names = list(param_names) if param_names else []
+            # Resolve the exo-time channel used for the plot x-axis (see _x_for_sample).
+            try:
+                self._exo_time_idx = self._param_names.index("Exoskeleton time (seconds)")
+            except ValueError:
+                self._exo_time_idx = None
             # Update labels for current block
             self._update_labels()
         except Exception:
@@ -558,6 +569,34 @@ class ActiveTrialPage(QtWidgets.QWidget):
         # Update labels for the new block
         self._update_labels()
 
+    def _x_for_sample(self, values: list) -> float:
+        """X-axis value (seconds) for an incoming real-time sample.
+
+        Prefer the exo's own timestamp channel ("Exoskeleton time (seconds)"), which is
+        evenly spaced at the control cadence, over wall-clock arrival time. BLE hands the
+        GUI samples in bursts separated by gaps, so a wall-clock x-axis clumps points and
+        makes the trace look jerky even though the underlying data is a steady ~100Hz.
+        Falls back to wall-clock when no exo-time channel is present (e.g. hip/arm configs).
+
+        NOTE: BioFeedbackPage.apply_values still uses raw wall-clock time and was left that
+        way on purpose (out of scope when this was fixed). If that plot ever looks jerky,
+        this method is the fix to port over.
+        """
+        idx = self._exo_time_idx
+        if idx is not None and idx < len(values):
+            t_exo = values[idx]
+            if self._exo_t0 is None:
+                self._exo_t0 = t_exo
+            t = t_exo - self._exo_t0
+            if t < 0:  # exo clock reset (reboot) -> re-anchor
+                self._exo_t0 = t_exo
+                t = 0.0
+            return t
+        # Fallback: wall-clock arrival time
+        if self._real_data_t0 is None:
+            self._real_data_t0 = time.time()
+        return time.time() - self._real_data_t0
+
     def apply_values(self, values: list):
         """Update plots from incoming rtDataUpdated(values).
         Uses indices 0..3 or 4..7 depending on toggle state.
@@ -568,10 +607,8 @@ class ActiveTrialPage(QtWidgets.QWidget):
         # Ensure we have enough values for selected block
         if len(values) < base + 4:
             return
-        # Use actual wall-clock time instead of synthetic increments
-        if self._real_data_t0 is None:
-            self._real_data_t0 = time.time()
-        t_next = time.time() - self._real_data_t0
+        # X-axis from the exo timestamp (steady cadence) rather than bursty BLE arrival.
+        t_next = self._x_for_sample(values)
         self.t_vals.append(t_next)
         # Map to curves
         self.top_cmd_vals.append(values[base + 0])
