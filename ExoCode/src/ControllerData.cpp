@@ -113,12 +113,26 @@ namespace
         param_bound(false, -100.0f, 100.0f, false), // 7 node4_y
         param_bound(false, 0.0f, 100.0f, false),    // 8 node5_x
         param_bound(false, -100.0f, 100.0f, false), // 9 node5_y
-        param_bound(false, 0.0f, 1.0f, true),       // 10 sim_gait
-        param_bound(false, 0.0f, 1.0f, true),       // 11 use_percent_gait
-        param_bound(false, 0.0f, 1.0f, true),       // 12 use_pid
-        param_bound(false, 0.0f, 10000.0f, false),  // 13 p_gain
-        param_bound(false, 0.0f, 10000.0f, false),  // 14 i_gain
-        param_bound(false, 0.0f, 10000.0f, false),  // 15 d_gain
+        param_bound(false, 0.0f, 100.0f, false),    // 10 node6_x
+        param_bound(false, -100.0f, 100.0f, false), // 11 node6_y
+        param_bound(false, 0.0f, 100.0f, false),    // 12 node7_x
+        param_bound(false, -100.0f, 100.0f, false), // 13 node7_y
+        param_bound(false, 0.0f, 100.0f, false),    // 14 node8_x
+        param_bound(false, -100.0f, 100.0f, false), // 15 node8_y
+        param_bound(false, 0.0f, 100.0f, false),    // 16 node9_x
+        param_bound(false, -100.0f, 100.0f, false), // 17 node9_y
+        param_bound(false, 0.0f, 100.0f, false),    // 18 node10_x
+        param_bound(false, -100.0f, 100.0f, false), // 19 node10_y
+        param_bound(false, 0.0f, 100.0f, false),    // 20 node11_x
+        param_bound(false, -100.0f, 100.0f, false), // 21 node11_y
+        param_bound(false, 0.0f, 100.0f, false),    // 22 node12_x
+        param_bound(false, -100.0f, 100.0f, false), // 23 node12_y
+        param_bound(false, 0.0f, 1.0f, true),       // 24 sim_gait
+        param_bound(false, 0.0f, 1.0f, true),       // 25 use_percent_gait
+        param_bound(false, 0.0f, 1.0f, true),       // 26 use_pid
+        param_bound(false, 0.0f, 10000.0f, false),  // 27 p_gain
+        param_bound(false, 0.0f, 10000.0f, false),  // 28 i_gain
+        param_bound(false, 0.0f, 10000.0f, false),  // 29 d_gain
     };
 
     const ParameterBoundConfig franks_collins_hip_bounds[controller_defs::franks_collins_hip::num_parameter] =
