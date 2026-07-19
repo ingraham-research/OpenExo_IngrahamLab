@@ -79,8 +79,59 @@ loop-delay limit cycle, near its ceiling; no kp is both transparent and quiet.
   ~inversely with loop period -> got worse when the faster loop halved dt). Mainly helps D-heavy
   controllers; zero-torque's d=0.001 is tiny so limited benefit there.
 
+## Planned
+
+### Global torque scale factor (`torque_scale`) — investigated 2026-07-17, not yet specced
+Goal: one knob that scales **all** torque a controller emits, so torque magnitude can be swept
+programmatically without editing per-controller params (spline: every y node; PJMC: peak stance torque).
+Sequenced **after** the UDP remote control (`specs/2026-07-17-udp-remote-control-design.md`), which will
+be able to drive it for free once it exists.
+
+**Do NOT scale at the `Joint.cpp` choke point** (`_joint_data->controller.setpoint`, ankle:1108, hip:652,
+knee:878, elbow:1344). It looks perfect — 4 lines, catches every controller — but it scales
+`torque_cmd + pid_correction`, and `_pid` is a closed loop servoing *measured* torque to `torque_cmd`.
+Scaling the sum makes the loop fight the scale: output drops -> measured torque drops -> error grows ->
+PID pushes back, and with i_gain it winds up and cancels the scale entirely. It would look correct at
+`use_pid=0` and silently misbehave at `use_pid=1` — i.e. in **our** config (zeroTorque `use_pid=1`;
+spline needs PID on for adequate torque).
+
+**Correct injection point:** scale `torque_cmd` *before* the PID sees it, so the loop servos to the
+scaled target. One line per controller, right after generation and before `ff_setpoint` / `_pid` /
+`desired_torque` / any clamp:
+```cpp
+torque_cmd *= scale;
+```
+Every controller already shares this shape (`Controller.cpp` — Spline:837, ZeroTorque:313,
+ZhangCollins:760, FranksCollins:1080, ConstantTorque:1227):
+```cpp
+float torque_cmd = <controller-specific generation>;
+if (use_pid) cmd = torque_cmd + _pid(torque_cmd, measured, p, i, d);
+else         cmd = torque_cmd;
+```
+
+**Spline equivalence (why no per-node code is needed):** `_spline_interpolate(x, y, t)` is a linear
+combination of the y values (weights depend only on x and t), so `scale * interpolate(x, y, t)` ==
+`interpolate(x, scale*y, t)`. Scaling the output *is* scaling every y node with x timing untouched.
+Caveat: the ±15 Nm clamp at Controller.cpp:870 runs after interpolation, so the scale must be applied
+**before** the clamp for the equivalence to hold under saturation.
+
+**Where the value lives — recommend a regular controller parameter** (`torque_scale`, default 1.0). It
+then inherits the whole existing stack: BLE param path, `ParamUpdateValidation.h` bounds checks,
+accept/reject acks, GUI handshake matrix, and the UDP remote — no new BLE command. `bilateral=true`
+mirrors it across both sides in one write. Cost: per-controller `controller_defs` edits + param-count
+bumps (and matching CSVs on the card — see the 8-vs-5-node footgun above; the count guard below would
+cover this). Alternative (single global float in `ExoData`) is semantically cleaner but needs a new BLE
+command + GUI plumbing and can't reuse validation/acks.
+Note: `ControllerData.h:292` already has `float kf = 1; /**< Gain for the controller */`, honored only by
+PJMC as a toe_stance-conditional factor. Precedent for the concept, but add a new field — don't overload it.
+
 ## Nice-to-haves
 
 - Firmware guard: warn/reject when a controller CSV's parameter count != the controller's expected
   count (the spline 8-vs-5-node footgun would have been caught instantly).
 - One consistent logging path (the debug log is being moved to its own non-blocking stream).
+- **Delete (or fix) `Python_GUI/utils/config.py: JointConfig.ID_TO_NUM`** — all 8 entries have their
+  left/right labels inverted vs the firmware bitfield (`ParseIni.h:125-137`: `left=0b01000000`,
+  `right=0b00100000`, so `left_ankle = 68`, `right_ankle = 36`; the table claims 36=Left, 68=Right).
+  Currently dead code (nothing imports it), but it's the table you'd reach for when mapping joint names
+  to IDs — and it would silently command the wrong leg. The handshake matrix is the real source of truth.
