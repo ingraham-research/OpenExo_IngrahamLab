@@ -19,6 +19,14 @@ from utils import (
     apply_button_style_batch, set_size_policy_fixed_height
 )
 
+# The exo clock ("Exoskeleton time (seconds)") reaches the GUI as a signed 16-bit
+# fixed-point value: RealTimeI2C packs every RT channel as short(value * 100) across
+# the Teensy->coms-MCU I2C hop (FIXED_POINT_FACTOR = 100). Uptime seconds * 100
+# overflows int16 at 327.68s, so the raw value jumps +327.67 -> -327.68 (a full
+# int16 span) and repeats every 655.36s. _x_for_sample undoes that wrap.
+_EXO_TIME_WRAP_SPAN = 65536 / 100.0   # 655.36 s: one full int16 range of the *100 clock
+_EXO_TIME_WRAP_HALF = _EXO_TIME_WRAP_SPAN / 2.0  # 327.68 s: wrap-detection threshold
+
 
 class ActiveTrialPage(QtWidgets.QWidget):
     """Active Trial page with two stacked real-time plots (simulated data)."""
@@ -348,6 +356,9 @@ class ActiveTrialPage(QtWidgets.QWidget):
         # to wall-clock); _exo_t0 anchors the axis to start near 0. See _x_for_sample.
         self._exo_time_idx = None
         self._exo_t0 = None
+        # int16 wrap tracking for the exo clock (see _EXO_TIME_WRAP_SPAN, _x_for_sample)
+        self._exo_prev_raw = None
+        self._exo_wrap_offset = 0.0
 
     def set_update_controller_enabled(self, enabled: bool):
         try:
@@ -456,6 +467,8 @@ class ActiveTrialPage(QtWidgets.QWidget):
 
         self._real_data_t0 = None
         self._exo_t0 = None
+        self._exo_prev_raw = None
+        self._exo_wrap_offset = 0.0
         self.t0 = time.time()
 
         self.curve_top_cmd.setData([], [])
@@ -585,11 +598,21 @@ class ActiveTrialPage(QtWidgets.QWidget):
         idx = self._exo_time_idx
         if idx is not None and idx < len(values):
             t_exo = values[idx]
+            # Undo the signed-16-bit fixed-point wrap of the exo clock. Every ~655.36s
+            # the raw value drops by a full int16 span (e.g. +327.67 -> -327.68); left
+            # alone this made the x-axis snap back to 0 for a few seconds while the stale
+            # window flushed. A drop larger than half the span is a wrap, not real time
+            # moving backward, so bump a cumulative offset to keep the clock monotonic.
+            if self._exo_prev_raw is not None and (t_exo - self._exo_prev_raw) < -_EXO_TIME_WRAP_HALF:
+                self._exo_wrap_offset += _EXO_TIME_WRAP_SPAN
+            self._exo_prev_raw = t_exo
+            t_exo_unwrapped = t_exo + self._exo_wrap_offset
+
             if self._exo_t0 is None:
-                self._exo_t0 = t_exo
-            t = t_exo - self._exo_t0
-            if t < 0:  # exo clock reset (reboot) -> re-anchor
-                self._exo_t0 = t_exo
+                self._exo_t0 = t_exo_unwrapped
+            t = t_exo_unwrapped - self._exo_t0
+            if t < 0:  # genuine exo clock reset (reboot) -> re-anchor
+                self._exo_t0 = t_exo_unwrapped
                 t = 0.0
             return t
         # Fallback: wall-clock arrival time
