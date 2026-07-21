@@ -116,7 +116,11 @@ class ExoRemote:
         })
 
     def get_matrix(self):
-        self._command({"cmd": "get_matrix"})
+        reply = self._command({"cmd": "get_matrix"})
+        if "matrix" in reply:
+            self._matrix = reply["matrix"]
+        if "names" in reply:
+            self._names = reply["names"]
         return self._matrix
 
     def wait_for_matrix(self, timeout=5.0):

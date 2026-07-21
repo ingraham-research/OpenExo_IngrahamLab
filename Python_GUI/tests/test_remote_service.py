@@ -86,16 +86,15 @@ def test_unsubscribe_removes_sender(svc, sent):
     assert ("127.0.0.1", 44444) not in svc._subscribers
 
 
-def test_get_matrix_replies_with_cached_matrix(svc, sent):
+def test_get_matrix_returns_matrix_in_reply(svc, sent):
     svc._matrix = [["Ankle(L) (68)", "68", "spline", "1", "node1_y"]]
     svc._param_names = ["percent_gait", "torque_l"]
     svc.handle_datagram(encode({"cmd": "get_matrix", "id": 3}), "127.0.0.1", 44444)
-    # ok reply, then a matrix stream frame.
-    assert sent[0][0] == {"ok": True, "id": 3}
-    frame = sent[1][0]
-    assert frame["stream"] == "matrix"
-    assert frame["matrix"] == [["Ankle(L) (68)", "68", "spline", "1", "node1_y"]]
-    assert frame["names"] == ["percent_gait", "torque_l"]
+    # Matrix travels in the single ok reply (order-independent), not a separate frame.
+    reply = sent[-1][0]
+    assert reply["ok"] is True and reply["id"] == 3
+    assert reply["matrix"] == [["Ankle(L) (68)", "68", "spline", "1", "node1_y"]]
+    assert reply["names"] == ["percent_gait", "torque_l"]
 
 
 def test_unknown_cmd_rejected(svc, sent):

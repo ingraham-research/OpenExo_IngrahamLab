@@ -241,9 +241,10 @@ class RemoteControlService(QtCore.QObject):
                 self._subscribers.pop((host, port), None)
                 self._reply_ok(mid, host, port)
             elif cmd == "get_matrix":
-                self._reply_ok(mid, host, port)
-                self._send({"stream": "matrix", "matrix": self._matrix,
-                            "names": self._param_names}, host, port)
+                # Matrix travels IN the reply (not a separate stream frame) so the
+                # client gets it atomically, independent of datagram ordering.
+                self._reply_ok(mid, host, port,
+                               matrix=self._matrix, names=self._param_names)
             elif cmd == "ping":
                 self._reply_ok(mid, host, port, pong=True)
             else:

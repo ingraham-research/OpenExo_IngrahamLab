@@ -61,7 +61,8 @@ never navigates the GUI (unlike the Apply button).
 | `Python_GUI/remote/client.py` | Standalone `ExoRemote` reference client. Stdlib only; carries its own copy of the wire format (no shared protocol module — see below). |
 | `Python_GUI/MainWindow.py` | Wires the service to existing `RtBridge`/device-manager signals; splits `_on_apply_settings` into `_apply_param_update` (no navigation, used by remote) + the GUI wrapper; prints the startup banner. |
 | `Python_GUI/utils/config.py` | `RemoteConfig` (ENABLED, HOST, PORT, MAX_SEND_FAILURES). |
-| `Python_GUI/examples/sweep_example.py` | Worked example using `client.py`. |
+| `Python_GUI/examples/sweep_example.py` | Worked (scripted) example using `client.py`. |
+| `Python_GUI/examples/remote_console.py` | Interactive REPL for manual testing — type `set`/`watch`/`matrix`/... and it sends the JSON. Stands in for your own control program. |
 | `Python_GUI/tests/test_remote_*.py` | Headless tests (protocol, service, MainWindow wiring, loopback + no-BLE end-to-end). |
 
 No changes to `ExoCode/`, `services/RtBridge.py`, or `services/QtExoDeviceManager.py`.
@@ -80,6 +81,9 @@ No changes to `ExoCode/`, `services/RtBridge.py`, or `services/QtExoDeviceManage
    ```
    `client.py` imports nothing but the standard library, so it can be copied next to any script or a
    different tool (e.g. MATLAB) can speak the same JSON protocol directly.
+3. To poke at it by hand, run the interactive console (a second process, safe to run alongside the
+   GUI): `python examples/remote_console.py`, then type e.g. `matrix`, `set Ankle(L) spline node1_y 3`,
+   `watch ack 5`. Type `help` for the full command list.
 
 ## How to modify
 
