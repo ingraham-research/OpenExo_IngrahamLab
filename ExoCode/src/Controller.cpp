@@ -882,11 +882,48 @@ float Spline::calc_motor_cmd()
     float cmd = 0.0f;
     if (_controller_data->parameters[controller_defs::spline::use_pid_idx] > 0.0f)
     {
+        // --------------------------- Gain scheduling (near-zero torque) ------------------------------
+        // Mirrors the PJMC gain scheduler (see ProportionalJointMoment::calc_motor_cmd) so the spline
+        // behaves like the tuned transparency controller whenever it is commanding ~zero torque. Without
+        // this the spline runs the full nominal gains through swing and the flat regions of the profile,
+        // where the high d gain turns torque-sensor noise into visible shaking.
+        //
+        // !! These near-zero gains are HARD CODED and CANNOT be modified from the GUI or the SD card. !!
+        // Only the nominal p/i/d below are read from the controller parameters. The values here match
+        // SDCard/ankleControllers/zeroTorque.csv (3 / 0 / 0.001) and PJMC's kp_zero/ki_zero/kd_zero.
+        // TODO: make these configurable by reading the ZeroTorque controller's parameters instead of
+        // hard-coding them, so the transparency gains are tuned in exactly one place.
+        const float KP_ZERO = 3.0f;
+        const float KI_ZERO = 0.0f;
+        const float KD_ZERO = 0.001f;
+
+        // Nominal gains. These DO come from the parameters, so the GUI can still change them.
+        float kp_use = _controller_data->parameters[controller_defs::spline::p_gain_idx];
+        float ki_use = _controller_data->parameters[controller_defs::spline::i_gain_idx];
+        float kd_use = _controller_data->parameters[controller_defs::spline::d_gain_idx];
+
+        // Conditions for "near zero", same bands as PJMC:
+        // - the spline is commanding close to zero torque
+        // - the measured torque is not far from that zero-torque target
+        const float ZERO_SETPOINT_BAND_NM = 0.5f;
+        const float ZERO_ERROR_BAND_NM = 3.5f;
+        const float torque_error = torque_cmd - _controller_data->filtered_torque_reading;
+        const bool near_zero_setpoint = (fabsf(torque_cmd) <= ZERO_SETPOINT_BAND_NM);
+        const bool near_zero_error = (fabsf(torque_error) <= ZERO_ERROR_BAND_NM);
+
+        if (near_zero_setpoint && near_zero_error)
+        {
+            kp_use = KP_ZERO;
+            ki_use = KI_ZERO;
+            kd_use = KD_ZERO;
+        }
+        // End of gain scheduling
+
         cmd = torque_cmd + _pid(torque_cmd,
                                 _controller_data->filtered_torque_reading,
-                                _controller_data->parameters[controller_defs::spline::p_gain_idx],
-                                _controller_data->parameters[controller_defs::spline::i_gain_idx],
-                                _controller_data->parameters[controller_defs::spline::d_gain_idx]);
+                                kp_use,
+                                ki_use,
+                                kd_use);
     }
     else
     {
