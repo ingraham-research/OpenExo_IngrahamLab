@@ -761,7 +761,15 @@ namespace UART_command_handlers
         ack.len = 0;
         handler->UART_msg(ack);
 
-        // Put system in a safe state before rebooting
+        // Put the system in a safe state, then DEFER the reboot by a few control cycles instead
+        // of restarting the CPU here. Rebooting inline (the old behavior) short-circuited the
+        // control loop: setting motor.enabled = 0 only flips a data flag, and the AK60v3's final
+        // zero-torque CAN frame is emitted by run_side() -> _Motor::send_data() on the NEXT control
+        // cycle. Restarting before that cycle ran left the (still-powered) AK60v3 holding its last
+        // non-zero command through the reboot ("frozen" ankle). Arming reset_pending lets the
+        // superloop (ExoCode.ino) run run_side() so the zero frame goes out, then it closes the SD
+        // log and calls exo_system_reset(). The reset_ack above already went to the Nano, so the
+        // ~few-ms slip is invisible to the Nano/GUI shutdown handshake.
         exo_data->for_each_joint([](JointData* j_data, float* args)
         {
             (void)args;
@@ -769,15 +777,8 @@ namespace UART_command_handlers
             return;
         });
         exo_data->set_status(status_defs::messages::trial_off);
-        delay(10);
-#if defined(ARDUINO_TEENSY36) || defined(ARDUINO_TEENSY41)
-        // Flush + close the SD log BEFORE rebooting. The trial_off set above can't do this:
-        // the logger closes in sd_logger.update() (in loop()), and exo_system_reset() reboots
-        // before control returns there. Closing here makes it race-free regardless of whether
-        // the stop/trial_off ever arrived over the (unreliable) Nano<->Teensy UART.
-        SdLogger::close_active();
-#endif
-        exo_system_reset();
+        exo_data->reset_ticks = 0;
+        exo_data->reset_pending = true;
     }
 
 };
