@@ -19,7 +19,8 @@ from pages import (
     BioFeedbackPage,
 )
 from services import QtExoDeviceManager, RtBridge
-from utils import SettingsManager
+from utils import SettingsManager, RemoteConfig
+from remote.service import RemoteControlService
 from Widgets.ShutdownDialog import ShutdownDialog
 
 
@@ -147,6 +148,51 @@ class MainWindow(QtWidgets.QMainWindow):
         log_path = self.qt_dev.get_log_file_path()
         if log_path and log_path != "Log file not available":
             self.logger.info("Device manager log file: %s", log_path)
+
+        # ----- UDP remote control (localhost only; default on) -----
+        self.remote = None
+        if RemoteConfig.ENABLED:
+            try:
+                self.remote = RemoteControlService(parent=self)
+            except Exception as e:
+                self.logger.error(f"Failed to construct remote control service: {e}")
+                self.logger.debug(traceback.format_exc())
+                self.remote = None
+
+        if self.remote is not None and self.remote.is_bound():
+            host, port = self.remote.address()
+            # Inbound: remote commands drive the navigation-free apply path.
+            self.remote.setParamRequested.connect(self._apply_param_update)
+            # Outbound: fan existing BLE-derived signals to subscribers.
+            self.rt_bridge.rtDataUpdated.connect(self.remote.publish_rt)
+            self.rt_bridge.paramUpdateAckReceived.connect(self.remote.publish_ack)
+            self.rt_bridge.controllerMatrixReceived.connect(self.remote.set_controller_matrix)
+            self.rt_bridge.controllerValuesReceived.connect(self.remote.publish_values)
+            self.rt_bridge.parameterNamesReceived.connect(self.remote.set_param_names)
+            self.rt_bridge.shutdownProgressReceived.connect(
+                lambda step: self.remote.publish_status("shutdown_progress", step=int(step)))
+            self.qt_dev.connected.connect(
+                lambda name, addr: self.remote.publish_status("connected", name=name, address=addr))
+            self.qt_dev.disconnected.connect(
+                lambda: self.remote.publish_status("disconnected"))
+            self.qt_dev.deviceErrorReceived.connect(
+                lambda msg: self.remote.publish_status("device_error", message=msg))
+
+            banner = (
+                "\n" + "=" * 60 + "\n"
+                f" REMOTE CONTROL ACTIVE - listening on udp://{host}:{port}\n"
+                " External scripts can change controller parameters.\n"
+                " Localhost only. Disable: utils/config.py RemoteConfig.ENABLED\n"
+                + "=" * 60
+            )
+            print(banner)
+            self.logger.info("Remote control active on udp://%s:%s", host, port)
+        elif RemoteConfig.ENABLED:
+            print("\n" + "=" * 60 + "\n"
+                  " REMOTE CONTROL FAILED TO BIND - continuing without it.\n"
+                  " Another process may hold the port. See the log for details.\n"
+                  + "=" * 60)
+            self.logger.error("Remote control enabled but failed to bind; GUI continues without it.")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -847,10 +893,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # Placeholder hook
         pass
 
-    @QtCore.Slot(list)
-    def _on_apply_settings(self, payload):
-        # payload: [isBilateral, joint, controller, parameter, value]
-        self.logger.info(f"Applying settings: {payload}")
+    def _apply_param_update(self, payload) -> bool:
+        """Core parameter-update path shared by the GUI Apply button and the UDP
+        remote. Validates, queues the pending ack, and sends over BLE. Does NOT
+        navigate — callers that are GUI buttons handle navigation themselves."""
+        self.logger.info(f"Applying param update: {payload}")
         try:
             updates = QtExoDeviceManager.build_parameter_updates(payload)
             self._queue_pending_param_updates(updates)
@@ -859,14 +906,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.logger.error(f"Invalid parameter update request: {e}")
             self.logger.debug(traceback.format_exc())
             self._show_param_update_status(f"Controller update not sent: {e}", warning=True)
-            return
+            return False
 
         try:
             self.qt_dev.updateTorqueValues(payload)
         except Exception as e:
             self.logger.error(f"Failed to update torque values: {e}")
             self.logger.debug(traceback.format_exc())
-        # Return to trial page
+            return False
+        return True
+
+    @QtCore.Slot(list)
+    def _on_apply_settings(self, payload):
+        # payload: [isBilateral, joint, controller, parameter, value]
+        self._apply_param_update(payload)
+        # Return to trial page (GUI-button behavior only).
         try:
             self.stack.setCurrentWidget(self.trial_page)
         except Exception as e:

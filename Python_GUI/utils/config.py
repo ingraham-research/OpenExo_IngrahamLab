@@ -119,19 +119,28 @@ class JointConfig:
 
 class PlotConfig:
     """Plot configuration."""
-    
+
     # Update rate
     RATE_HZ = 30
     WINDOW_SECS = 10
-    
+
     # Curve colors (pyqtgraph format)
     COLOR_CONTROLLER = 'b'  # Blue
     COLOR_MEASUREMENT = 'r'  # Red
     COLOR_SIGNAL_A = 'g'     # Green
     COLOR_SIGNAL_B = 'm'     # Magenta
-    
+
     # Curve width
     CURVE_WIDTH = 2
-    
+
     # Grid alpha
     GRID_ALPHA = 0.3
+
+
+class RemoteConfig:
+    """UDP remote-control listener settings. Localhost only."""
+
+    ENABLED = True
+    HOST = "127.0.0.1"      # localhost only; widening this is a deliberate change
+    PORT = 9750
+    MAX_SEND_FAILURES = 5   # consecutive send failures before dropping a subscriber
