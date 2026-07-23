@@ -144,6 +144,7 @@ class RtBridge(QtCore.QObject):
                 value_rows = []
                 controller_values = {}
                 param_names = []
+                declared_rows = None  # set by the firmware's "n,<rows>" header, if it arrives
                 self._rows_68 = []
                 self._rows_36 = []
                 self._rows_38 = []
@@ -174,6 +175,12 @@ class RtBridge(QtCore.QObject):
                         continue
                     if prefix.startswith('?'):
                         # End-of-handshake sentinel
+                        continue
+                    if prefix == 'n' and len(parts) >= 2 and parts[1].isdigit():
+                        # Row-count header from ExoBLE::send_handshake_payload: the number of
+                        # rows the firmware sent, including this one. Lets us detect a chunk
+                        # lost in transit exactly, instead of inferring it.
+                        declared_rows = int(parts[1])
                         continue
                     
                     # Each row format: [JointName, JointID, ControllerName, ParamCount, ...params]
@@ -222,29 +229,37 @@ class RtBridge(QtCore.QObject):
                     self._controller_matrix = []
                     malformed_rows = 0
                     for row in controller_rows:
-                        if len(row) < 3:
-                            # Too short to be a controller row. Silently dropping these is how an
-                            # incomplete handshake used to go unnoticed - count them instead.
+                        # A valid row is [JointName, <numeric JointID>, ControllerName, ...].
+                        # When a chunk goes missing mid-row the surviving fields shift left, so a
+                        # parameter name can land in the joint-ID slot and invent a phantom joint
+                        # like "Ankle(L) (Dorsi Sca)" ("Dorsi Scaling [Nm]" truncated to 10 chars
+                        # by ListCtrlParams MAX_STRING_LENGTH). Requiring a numeric joint ID
+                        # rejects those rows instead of showing them in the dropdown, and counts
+                        # them as evidence the payload was damaged.
+                        if len(row) < 3 or not str(row[1]).strip().isdigit():
                             malformed_rows += 1
-                        if len(row) >= 3:
-                            # row[0] = joint name (e.g., "Ankle(L)")
-                            # row[1] = joint ID (e.g., "68")
-                            # row[2] = controller name (e.g., "pjmc_plus")
-                            # row[3] = controller ID (e.g., "11")
-                            # row[4:] = parameter names
-                            joint_name = row[0]
-                            joint_id = row[1]
-                            controller_name = row[2]
-                            controller_id = row[3] if len(row) > 3 else "0"
-                            params = row[4:] if len(row) > 4 else []
-                            
-                            # Create display row: [Joint(ID), JointID, ControllerName, ControllerID, Param1, Param2, ...]
-                            display_row = [f"{joint_name} ({joint_id})", joint_id, controller_name, controller_id] + params
-                            self._controller_matrix.append(display_row)
+                            continue
+
+                        # row[0] = joint name (e.g., "Ankle(L)")
+                        # row[1] = joint ID (e.g., "68")
+                        # row[2] = controller name (e.g., "pjmc_plus")
+                        # row[3] = controller ID (e.g., "11")
+                        # row[4:] = parameter names
+                        joint_name = row[0]
+                        joint_id = row[1]
+                        controller_name = row[2]
+                        controller_id = row[3] if len(row) > 3 else "0"
+                        params = row[4:] if len(row) > 4 else []
+
+                        # Create display row: [Joint(ID), JointID, ControllerName, ControllerID, Param1, Param2, ...]
+                        display_row = [f"{joint_name} ({joint_id})", joint_id, controller_name, controller_id] + params
+                        self._controller_matrix.append(display_row)
                     
                     if self._controller_matrix:
                         self.controllerMatrixReceived.emit(list(self._controller_matrix))
-                        self._emit_matrix_completeness(self._controller_matrix, malformed_rows)
+                        self._emit_matrix_completeness(
+                            self._controller_matrix, malformed_rows,
+                            declared_rows=declared_rows, actual_rows=len(rows))
 
                 # Always emit (possibly empty) so MainWindow can replace stale DB and pad from matrix.
                 flat_values: List[list] = []
@@ -449,7 +464,8 @@ class RtBridge(QtCore.QObject):
             self.logger.error(f"Failed to parse parameter update ack: {e}")
             self.logger.debug(traceback.format_exc())
 
-    def _emit_matrix_completeness(self, matrix, malformed_rows=0):
+    def _emit_matrix_completeness(self, matrix, malformed_rows=0,
+                                  declared_rows=None, actual_rows=None):
         """Warn when the handshake payload looks like it lost rows in transit.
 
         The controller list is delivered ONCE per connection, as one long string pushed in
@@ -460,6 +476,12 @@ class RtBridge(QtCore.QObject):
         """
         try:
             reasons = []
+
+            # 0) Exact check, when the firmware sent its row-count header. This is the only
+            #    check that catches a symmetric loss on the very first connection.
+            if declared_rows is not None and actual_rows is not None and actual_rows < declared_rows:
+                reasons.append(
+                    f"{declared_rows - actual_rows} of {declared_rows} rows lost in transit")
 
             # 1) Rows that arrived too short to parse - direct evidence of a mangled payload.
             if malformed_rows:
