@@ -877,7 +877,16 @@ float Spline::calc_motor_cmd()
     }
 
     _controller_data->ff_setpoint = torque_cmd;
-    _controller_data->filtered_torque_reading = utils::ewma(_joint_data->torque_reading, _controller_data->filtered_torque_reading, 0.5f);
+
+    // Torque-measurement filter. Was a hard-coded ewma alpha of 0.5f; PJMC reads its
+    // torque_alpha param, which is 1 in SDCard/ankleControllers/PJMC.csv - i.e. PJMC runs the RAW
+    // reading with no filtering. That was the only remaining difference between the two controllers
+    // in the swing/zero regime (identical setpoint 0, identical scheduled gains), and in trial 0009
+    // the spline showed 32-47% higher measured-torque RMS there. A low-pass inside the feedback
+    // loop adds phase lag, which erodes phase margin and lets the loop ring instead of damping.
+    // Set to 1.0f to match PJMC exactly. TODO: promote to a real parameter like PJMC's
+    // torque_alpha_idx (needs a 17th column in spline.csv) instead of another hard-coded constant.
+    _controller_data->filtered_torque_reading = utils::ewma(_joint_data->torque_reading, _controller_data->filtered_torque_reading, 1.0f);
 
     float cmd = 0.0f;
     if (_controller_data->parameters[controller_defs::spline::use_pid_idx] > 0.0f)
