@@ -97,6 +97,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rt_bridge.controllersReceived.connect(self._on_controllers)
         # Receive flattened 2D matrix of controllers and parameters
         self.rt_bridge.controllerMatrixReceived.connect(self._on_controller_matrix)
+        self.rt_bridge.controllerMatrixIncomplete.connect(self._on_controller_matrix_incomplete)
         self.rt_bridge.controllerValuesReceived.connect(self._on_controller_values)
         self.rt_bridge.paramUpdateAckReceived.connect(self._on_param_update_ack)
 
@@ -111,6 +112,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._csv_preamble = ""  # Preamble for CSV filename
         # Store controller -> params 2D matrix
         self._controller_matrix = []
+        # Warning text when the handshake delivered a short controller list ("" = looks fine).
+        self._controller_matrix_warning = ""
         # Store controller values by (joint_id, controller_id)
         self._controller_values = {}
         self._pending_param_updates = {}
@@ -345,6 +348,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.qt_dev.write(b'$')
         except Exception as e:
             self.logger.error(f"Failed to send ACK for controllers: {e}")
+            self.logger.debug(traceback.format_exc())
+
+    @QtCore.Slot(str)
+    def _on_controller_matrix_incomplete(self, message: str):
+        """Surface a short/garbled controller list instead of letting it fail silently.
+
+        The list is fetched once per BLE connection, so a controller missing here stays
+        missing for the whole session - reconnecting is the fix.
+        """
+        self._controller_matrix_warning = message or ""
+        if not self._controller_matrix_warning:
+            return
+        self.logger.warning(f"Controller list incomplete: {self._controller_matrix_warning}")
+        try:
+            self.settings_page.set_param_update_status(self._controller_matrix_warning, warning=True)
+        except Exception as e:
+            self.logger.error(f"Failed to show controller list warning: {e}")
             self.logger.debug(traceback.format_exc())
 
     @QtCore.Slot(list)
@@ -865,6 +885,15 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 self.logger.error(f"Failed to set controller matrix in settings: {e}")
                 self.logger.debug(traceback.format_exc())
+            # Re-show any incomplete-list warning: the one raised at connect has usually
+            # timed out by now, and this page is where a missing controller is noticed.
+            if self._controller_matrix_warning:
+                try:
+                    self.settings_page.set_param_update_status(
+                        self._controller_matrix_warning, warning=True)
+                except Exception as e:
+                    self.logger.error(f"Failed to re-show controller list warning: {e}")
+                    self.logger.debug(traceback.format_exc())
             self.stack.setCurrentWidget(self.settings_page)
         else:
             self.stack.setCurrentWidget(self.basic_settings_page)
