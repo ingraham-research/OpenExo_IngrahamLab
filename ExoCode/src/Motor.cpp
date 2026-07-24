@@ -350,7 +350,24 @@ void _CANMotor::check_response()
         if (pop_vals.second < _variance_threshold && !_motor_data->enabled)
         {
             _motor_data->enabled = true;
-            enable(true);
+
+            // NEVER send the enable frame to an AK60v3 - same guard as Joint.cpp::run_joint().
+            // The AK60v3 enables automatically and does not consume the MIT "enter motor mode"
+            // special frame. enable() transmits FF FF FF FF FF FF FF FC on ((8<<8)|id), which is
+            // the SAME CAN id send_data() uses for torque commands, so the motor unpacks those
+            // bytes with the normal MIT field layout: kp=500 (max), kd=5 (max), p_des=+12.5 rad
+            // (max), v_des=+48 rad/s (max), i_ff=+10.3 A (max). That is a full-current, max-gain
+            // position slam to an unreachable target, so the error never closes and the motor
+            // saturates and HOLDS (~51 Nm at the joint) until a new frame arrives. It also skips
+            // send_data()'s direction_modifier, so on the flipped side it drives the joint the
+            // wrong way. This destroyed the right ankle on 2026-07-23. This branch was the only
+            // path that could still reach enable() for an AK60v3, and it is reachable only at
+            // End Trial (it needs !enabled while the status is still an active trial).
+            // See Modification log with claude/End-Trial-Malformed-Enable-Frame-Right-Ankle-Damage.md
+            if (_motor_data->motor_type != (uint8_t)config_defs::motor::AK60v3)
+            {
+                enable(true);
+            }
         }
 
     }
