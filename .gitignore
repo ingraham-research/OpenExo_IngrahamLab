@@ -8,3 +8,4 @@ ExoCode/src/.vs
 ExoCode/.vscode
 */.vs
 Libraries/ArduinoBLE/extras/arduino-ble-parser.py
+saved_device.txt
