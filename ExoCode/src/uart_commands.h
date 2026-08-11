@@ -774,6 +774,17 @@ namespace UART_command_handlers
         {
             (void)args;
             j_data->motor.enabled = 0;
+        #if END_TRIAL_CUTS_MOTOR_POWER
+            // Also drop the physical motor-enable pin. `enabled = 0` only stops CAN frames; the
+            // motor stays electrically live, so a bad frame can still be held. is_on is consumed
+            // by _Motor::on_off() (called from run_joint every cycle), which drives the pin on the
+            // is_on edge -- so the pin goes low on the NEXT control cycle, well inside the
+            // reset_pending deferral and after send_data() has already emitted zero frames.
+            // Nothing sets is_on back to true except the first-run init block in ExoCode.ino, so
+            // this is only safe on a path that reboots. Do NOT copy it into motors_off ('w', the
+            // Pause button) -- the motors would stay dead until a power cycle.
+            j_data->motor.is_on = false;
+        #endif
             return;
         });
         exo_data->set_status(status_defs::messages::trial_off);

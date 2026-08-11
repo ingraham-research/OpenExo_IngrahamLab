@@ -1,5 +1,28 @@
 # End Trial sends a malformed "enable" CAN frame that slams the ankle (right ankle destroyed)
 
+> # ⛔ RETRACTED 2026-08-10 — THE ROOT CAUSE IN THIS DOCUMENT IS WRONG
+>
+> **The chain described here cannot occur.** `check_response()` early-returns on
+> `_data->user_paused`, and the Teensy handler for `'w'` sets `user_paused = true` in the **same
+> handler, from the same UART message** that sets `enabled = 0`
+> (`uart_commands.h::update_motor_enable_disable`, with `ENABLE_DISABLE = 0`). The `'w'` vs `'G'`
+> ordering race this document is built on **does not exist** — the two flags are atomic. The same
+> applies to `'G'` and `'Z'`. **No End Trial command can arm the trigger, on either branch.**
+>
+> An exhaustive enumeration of every `enabled = false` writer leaves exactly one live path
+> (`set_controller(disabled)`), which would fire at 500 Hz continuously and is therefore also
+> inconsistent with the observed "perfect during the trial, fails only on the click."
+>
+> **The true root cause is unknown.** See
+> `End-Trial-Diagnosis-Correction.md` for the disproof, the enumeration, and the defensive fixes
+> that were implemented instead.
+>
+> **What in this document still stands:** the decode of the malformed frame itself (§1) and the
+> reason it would be destructive *if* it were ever sent; the CAN starvation measurements; the
+> "invisible in every log" section; the parser-artifact explanation for the 100+ Nm plot spike; and
+> the ruled-out hypotheses list. **What does not:** §2–§4 (the arming chain), §5's "why the right
+> leg" as an *explanation of this event*, and the fix ordering in the recommendations.
+
 **Date:** 2026-07-23
 **Scope:** Analysis, plus **one code change**: the `is_AK60v3` guard in `_CANMotor::check_response()`
 (fix 1 below). **Not compiled, not flashed, not tested** — hardware is damaged and out of service.

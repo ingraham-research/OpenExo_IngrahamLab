@@ -150,7 +150,20 @@ void _CANMotor::transaction(float torque)
 
 void _CANMotor::read_data()
 {
-    if (_motor_data->enabled)
+    // Read on EVERY cycle, enabled or not (this used to be `if (_motor_data->enabled)`).
+    //
+    // Two reasons, both of which became load-bearing once send_data() started transmitting
+    // zero-torque frames while disabled:
+    //   1. The motor replies to every command frame. If we transmit but never read, those
+    //      replies pile up in the single shared FlexCAN RX queue. CAN::read() is one
+    //      destructive pop routed by QUEUE POSITION rather than by CAN id, so a backlog
+    //      permanently offsets the left/right alternation and each motor starts consuming
+    //      (and discarding) the other's frames. Draining every cycle prevents that.
+    //   2. Gating the read on `enabled` froze _motor_data->i the moment the motor was
+    //      disabled -- and that frozen value is exactly what check_response() measures the
+    //      variance of. The check meant to detect "motor stopped responding" had its input
+    //      disabled by the very flag it reacts to, so its re-enable was guaranteed to fire
+    //      eventually. Reading unconditionally keeps the variance signal real.
     {
         CAN* can = can->getInstance();
         int direction_modifier = _motor_data->flip_direction ? -1 : 1;
@@ -227,8 +240,79 @@ void _CANMotor::send_data(float torque)
         logger::print("\n");
     #endif
 
+    // ================= HARD OUTPUT CLAMP - LAST LINE OF DEFENCE =================
+    // This is deliberately the FINAL gate before the CAN frame is built, so it sits AFTER
+    // everything: feed-forward, PID, gain scheduling, every controller, every joint. The only
+    // pre-existing limits were on controller-internal feed-forward terms, so a PID output could
+    // reach the motor unbounded. Nothing this exo does should ever ask for more than
+    // MAX_JOINT_TORQUE_NM at the joint; if something computes more, it is a fault, not a command.
+    //
+    // `torque` here is at the MOTOR shaft. The joint sees torque * gearing (4.5 for our ankles),
+    // so the motor-side limit is MAX_JOINT_TORQUE_NM / gearing.
+    //
+    // Non-finite values are rejected separately because constrain() is a MACRO: every comparison
+    // against NaN is false, so NaN passes through unchanged. It then reaches _float_to_uint, and
+    // (unsigned int)NaN saturates to 0 on Cortex-M7 -- which the motor decodes as -I_MAX, i.e.
+    // FULL NEGATIVE TORQUE. A NaN anywhere upstream would otherwise become a maximum-torque command.
+    {
+        const float gearing = (_motor_data->gearing > 0.0f) ? _motor_data->gearing : 1.0f;
+        const float max_motor_torque = (float)MAX_JOINT_TORQUE_NM / gearing;
+
+        // Reporting note: logger::print() is gated on `level <= logging::level`, and
+        // logging::level is Release(0), so ONLY LogLevel::Release messages survive -- a plain
+        // logger::print() here would be silently discarded. A clamp is a safety event and must be
+        // visible, so use Serial directly. Rate-limited to 1 line/second because a stuck fault
+        // would otherwise print at 1000 lines/second and stall the control loop; the counters make
+        // sure a burst that lasts <1 s is still reported.
+        static uint32_t clamp_count = 0;
+        static uint32_t nonfinite_count = 0;
+        static uint32_t last_report_ms = 0;
+        bool tripped = false;
+
+        if (isnan(torque) || isinf(torque))
+        {
+            nonfinite_count++;
+            torque = 0.0f;
+            tripped = true;
+        }
+        else if (torque > max_motor_torque || torque < -max_motor_torque)
+        {
+            clamp_count++;
+            if (millis() - last_report_ms > 1000)
+            {
+                last_report_ms = millis();
+                Serial.print("TORQUE CLAMP: motor ");
+                Serial.print(uint32_t(_motor_data->id));
+                Serial.print(" asked for ");
+                Serial.print(torque * gearing, 1);
+                Serial.print(" Nm at the joint, limit ");
+                Serial.print((float)MAX_JOINT_TORQUE_NM, 1);
+                Serial.print(" Nm. clamped=");
+                Serial.print(clamp_count);
+                Serial.print(" nonfinite=");
+                Serial.println(nonfinite_count);
+            }
+            torque = (torque > 0.0f) ? max_motor_torque : -max_motor_torque;
+            tripped = false;   // already reported above
+        }
+
+        if (tripped && (millis() - last_report_ms > 1000))
+        {
+            last_report_ms = millis();
+            Serial.print("TORQUE CLAMP: motor ");
+            Serial.print(uint32_t(_motor_data->id));
+            Serial.print(" NON-FINITE command -> 0. clamped=");
+            Serial.print(clamp_count);
+            Serial.print(" nonfinite=");
+            Serial.println(nonfinite_count);
+        }
+    }
+    // ============================================================================
+
     int direction_modifier = _motor_data->flip_direction ? -1 : 1;
 
+    // t_ff records the CLAMPED value - what was actually commanded, not what was asked for.
+    // The clamp logs the pre-clamp value above, so nothing is hidden.
     _motor_data->t_ff = torque;
     const float current = torque / get_Kt();
 
@@ -288,10 +372,25 @@ void _CANMotor::send_data(float torque)
         can->send(msg);
         _prev_motor_enabled = true;
     }
-    else if (_prev_motor_enabled)
+    else
     {
-        // Motor was just disabled - send one final zero-torque command
-        // This is critical for AK60v3 which will otherwise hold the last command
+        // Motor is disabled - send a zero-torque command EVERY cycle, not just once on the
+        // enabled->disabled edge (this used to be `else if (_prev_motor_enabled)`).
+        //
+        // The AK60v3 holds its last command whenever the frame stream stops, so "disabled"
+        // used to mean "freeze whatever was last on the bus" rather than "stop". A single
+        // one-shot zero frame only works if nothing transmits after it -- but check_response()
+        // can still emit a frame later in the SAME cycle (Motor.cpp, the variance re-enable),
+        // and any glitched command frame likewise becomes the held command. Transmitting zero
+        // continuously makes the held command always zero: whatever went out on a bad cycle is
+        // overwritten ~2 ms later, and the motor is actively commanded to free-spin rather than
+        // latching. It also fixes the "ankle freezes on controller change / after End Trial"
+        // class of bugs at the root instead of by reset timing.
+        //
+        // kp=kd=0 and i_ff=0, so the p/v fields are ignored and this is a true free-spin command.
+        // Cost: 2 extra frames per control cycle while idle -- the same bus load as an active
+        // trial, which is already proven acceptable.
+        // See Modification log with claude/End-Trial-Diagnosis-Correction.md
         uint32_t zero_p_int = _float_to_uint(0, -_P_MAX, _P_MAX, 16);
         uint32_t zero_v_int = _float_to_uint(0, -_V_MAX, _V_MAX, 12);
         uint32_t zero_kp_int = _float_to_uint(0, _KP_MIN, _KP_MAX, 12);
@@ -418,6 +517,28 @@ bool _CANMotor::enable()
 
 bool _CANMotor::enable(bool overide)
 {
+    // ===== AK60v3: NEVER transmit from here. Guarded at the TOP, not per call site. =====
+    // The AK60v3 enables automatically and does not consume the MIT "enter motor mode" special
+    // frame. The frame built below is FF FF FF FF FF FF FF FC (or FD) sent on
+    // msg.id = ((8 << 8) | id) -- the SAME CAN id send_data() uses for torque -- so the motor
+    // unpacks it with the normal field layout: kp=500 (max), kd=5 (max), p_des=+12.5 rad (max),
+    // v_des=+48 rad/s (max), i_ff=+10.3 A (max). That is a full-current, max-gain position command
+    // to an unreachable target: the error never closes, so the motor saturates and HOLDS at
+    // I_MAX * Kt * gearing = 10.3 * 1.11 * 4.5 = 51.4 Nm at the joint. It also bypasses
+    // send_data()'s direction_modifier AND the MAX_JOINT_TORQUE_NM clamp entirely.
+    //
+    // Guarding here rather than at each caller is deliberate: the per-call-site guards in
+    // Joint.cpp::run_joint() and Motor.cpp::check_response() are easy to forget, and
+    // Side::disable_motors() (Side.cpp:62) already calls enable(true) on all six motors with no
+    // guard at all -- harmless today only because nothing calls it.
+    // See Modification log with claude/Fresh-Torque-Path-Safety-Audit.md
+    if (_motor_data->motor_type == (uint8_t)config_defs::motor::AK60v3)
+    {
+        _prev_motor_enabled = _motor_data->enabled;
+        _enable_response = true;   // the AK60v3 is always "enabled"; report success to callers
+        return _enable_response;
+    }
+
     #ifdef MOTOR_DEBUG
         //  logger::print(_prev_motor_enabled);
         //  logger::print("\t");
@@ -480,6 +601,22 @@ bool _CANMotor::enable(bool overide)
 
 void _CANMotor::zero()
 {
+    // ===== AK60v3: NEVER transmit from here. Same reasoning as enable() above. =====
+    // This sends FF FF FF FF FF FF FF FE on the torque CAN id, which the AK60v3 decodes as
+    // kp=500 / kd=5 / p_des=+12.5 rad / i_ff=+10.29 A -- within one LSB of enable()'s frame, and
+    // the same 51.4 Nm held slam. It bypasses the MAX_JOINT_TORQUE_NM clamp.
+    //
+    // The AK60v3 has no MIT "set origin" in this protocol, so there is nothing to send. The only
+    // caller is Joint.cpp:115 (`if (_joint_data->motor.do_zero) _motor->zero();`), which runs every
+    // control cycle. `do_zero` is never set true in the main firmware AND has no initializer in
+    // MotorData -- it is false only because ExoData has static storage duration and is therefore
+    // zero-initialized. This guard removes the dependence on that.
+    // See Modification log with claude/Fresh-Torque-Path-Safety-Audit.md
+    if (_motor_data->motor_type == (uint8_t)config_defs::motor::AK60v3)
+    {
+        return;
+    }
+
     CAN_message_t msg;
 
     // Determine if this is an AK60v3 (extended format) or old AK (standard format)

@@ -35,6 +35,26 @@
 	#define USE_ANGLE_SENSORS 1
 	//Heel FSR presence is a RUNTIME setting: [Sensors] heelFsrPresent in config.ini (see HeelFsrConfig.h / heel_fsr_present()).
 
+	//Absolute ceiling on commanded torque AT THE JOINT OUTPUT, in Nm. Enforced in
+	//_CANMotor::send_data() as the final gate before the CAN frame is built, so it applies AFTER
+	//feed-forward, PID, gain scheduling, and every controller. Non-finite commands are forced to 0
+	//there too (constrain() is a macro and passes NaN straight through to a full-scale command).
+	//This is a FAULT LIMIT, not a tuning knob: normal ankle assist peaks around 12-20 Nm, so 25
+	//leaves headroom while making a runaway physically impossible. Raise only with a real reason.
+	#define MAX_JOINT_TORQUE_NM 25.0f
+
+	//End Trial also drops the physical motor-enable pin (logic_micro_pins::enable_*_pin), not just
+	//the `enabled` software flag. Belt-and-braces against any held CAN command surviving the reboot.
+	//ON (1), BUT NOT YET BENCH-CHECKED -- verify before anyone wears the exo. It is not known
+	//whether that pin cuts driver power (joint free-spins, safe) or asserts a driver disable that
+	//SHORTS THE PHASES (velocity-dependent brake on both ankles at once, a fall hazard if End Trial
+	//is pressed mid-stride). To check: power the exo, back-drive an ankle by hand, drop the pin,
+	//and feel whether it goes free or stiff. Free -> keep this at 1. Stiff -> set it to 0.
+	//See uart_commands.h::get_system_reset.
+	//Note this path is untested code: the only other writer of is_on is the estop branch in
+	//Motor.cpp::on_off(), and estop is hardcoded off in Exo.cpp, so it has likely never run.
+	#define END_TRIAL_CUTS_MOTOR_POWER 1
+
     //MACRO magic to convert a define to a string
     #define VAL(str) #str
     #define TOSTRING(str) VAL(str)
