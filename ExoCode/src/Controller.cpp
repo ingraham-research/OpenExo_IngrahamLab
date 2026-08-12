@@ -942,11 +942,39 @@ float Spline::calc_motor_cmd()
         }
         // End of gain scheduling
 
-        cmd = torque_cmd + _pid(torque_cmd,
-                                _controller_data->filtered_torque_reading,
-                                kp_use,
-                                ki_use,
-                                kd_use);
+        // Uncalibrated-torque-sensor guard. Same check PJMC does (see
+        // ProportionalJointMoment::calc_motor_cmd), which the spline was missing.
+        //
+        // _pid() bails out with `return cmd;` when torque_offset_reading == 0 -- it returns its
+        // SETPOINT argument, not a PID contribution. So `torque_cmd + _pid(torque_cmd, ...)`
+        // evaluated to torque_cmd + torque_cmd, i.e. EXACTLY DOUBLE the intended feed-forward,
+        // with no indication anywhere: the -12 Nm ankle profile would command -24 Nm and the GUI's
+        // "Desired Torque" channel would still read -12, because that is ff_setpoint.
+        //
+        // torque_offset_reading is TorqueSensor::_calibration, which starts at 0 and is only
+        // written when the timed calibration completes. The GUI workflow makes this hard to hit
+        // (Start Trial is gated behind Calibrate Torque + 3 s in ScanPage.on_calibrate_torque), so
+        // the realistic route in is a disconnected or dead sensor reading ~0 V, or a calibration
+        // window that collected no samples. Cheap to guard either way.
+        //
+        // Fallback behaviour matches PJMC: drop to open-loop feed-forward rather than doubling it.
+        // NB: several other controllers still have this exact pattern unguarded -- ZhangCollins,
+        // FranksCollinsHip, ConstantTorque, ElbowMinMax, Step and SPV2. ZeroTorque has it too but
+        // is harmless there (its setpoint is 0, so 0 + 0 = 0). Only PJMC, PJMC_PLUS and now Spline
+        // are guarded. Fixing _pid() to return 0 instead would cover all of them at once, but that
+        // changes behaviour for every controller and was deliberately left out of scope here.
+        if (_joint_data->torque_offset_reading == 0)
+        {
+            cmd = torque_cmd;
+        }
+        else
+        {
+            cmd = torque_cmd + _pid(torque_cmd,
+                                    _controller_data->filtered_torque_reading,
+                                    kp_use,
+                                    ki_use,
+                                    kd_use);
+        }
     }
     else
     {

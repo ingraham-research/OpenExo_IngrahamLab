@@ -160,7 +160,7 @@ timing rather than to anything physical.
 chatter at loop rate on sensor noise. The near-zero gains are hard-coded and cannot be changed from
 the GUI.
 
-### F5 — Spline lacks PJMC's uncalibrated-sensor guard  🟠
+### F5 — Spline lacks PJMC's uncalibrated-sensor guard  🟠  → **FIXED, see Part 5**
 
 PJMC checks `if (_joint_data->torque_offset_reading == 0) cmd = filtered_setpoint;`
 (`Controller.cpp:699`). **Spline does not.** It calls `_pid` unconditionally, and `_pid`
@@ -317,7 +317,8 @@ last command. There is no watchdog.
 | Severity | Hazard |
 |---|---|
 | High | **Standing weight-shift triggers a full assist pulse.** With `heelFsrPresent = 0`, a ground strike is just the toe FSR's rising edge from swing (`Side.cpp:281`). Rocking on the spot re-arms `percent_gait = 0` and fires the whole −12 Nm plantarflexion ramp over ~230 ms while the wearer is stationary. |
-| High | **~2 s bilateral freeze on controller change while walking** (F1). Both ankles hold their last CAN command. |
+| High | **Commanded torque is probably being silently clamped on every step** (F2). `cmd = ff + Kp·(ff − measured)` with `Kp = 6` multiplies any tracking error by 7, and the shipped profile slews at ~155 Nm/s. The 25 Nm clamp truncates the result and reports only via a bare `Serial.print` nobody sees. This is a safety item *and* a data-validity item: the profile you think you are commanding would not be the one the ankle receives. **Untested prediction — bench-check it.** |
+| ~~High~~ → Low | ~~**~2 s bilateral freeze on controller change while walking** (F1).~~ **Downgraded with the F1 correction:** the stall is milliseconds, not seconds. The AK60v3 does hold its last command for that window, but a few control cycles is not a fall hazard. |
 | High | **No ramp-in / no arming step.** Any single parameter Apply switches the live controller instantly, at whatever gait phase you are in. |
 | High | **Asymmetric assist if "Bilateral mode" is unchecked** — one leg at −12 Nm, the other transparent, with no warning. |
 | Medium | **Direction convention unverified from the GUI.** `ankleFlipMotorDir = right`, `ankleFlipTorqueDir = left`. If either is wrong the PID becomes positive feedback. `CalibrManager` exists for exactly this check but has **no CSV entry in `controller_parameter_filenames::ankle`**, so it never appears in the handshake and **cannot be selected from the GUI**. |
@@ -700,3 +701,73 @@ Do not set `ERROR_MANAGER_ENABLED` back to `1` until all of these are true:
 
 A genuine torque cutout would be better written as a direct check with a direct action than routed
 through this framework.
+
+---
+
+# PART 5 — F5 fix: uncalibrated-torque-sensor guard on the Spline controller
+
+## 5.1 The defect
+
+`_Controller::_pid` bails out early when the torque sensor is uncalibrated, and it returns **its
+setpoint argument**, not a PID contribution (`Controller.cpp:210`):
+
+```cpp
+if (_joint_data->torque_offset_reading == 0) {
+    return cmd;                       // <- returns the SETPOINT
+}
+```
+
+PJMC and PJMC_PLUS wrap the call to account for that (`Controller.cpp:713`, `:3036`). **Spline did
+not**, so `cmd = torque_cmd + _pid(torque_cmd, ...)` evaluated to `torque_cmd + torque_cmd` —
+**exactly double the intended feed-forward**, silently. The GUI's "Desired Torque" channel would
+still read the single value, because that is `ff_setpoint`, so nothing on screen would show it.
+
+`torque_offset_reading` is `TorqueSensor::_calibration`, which starts at 0 and is written only when
+the timed calibration completes. The GUI workflow makes this hard to reach — Start Trial is gated
+behind Calibrate Torque plus a 3 s settle in `ScanPage.on_calibrate_torque` — so the realistic route
+in is **a disconnected or dead sensor reading ~0 V**, or a calibration window that collected no
+samples. Low probability, cheap guard.
+
+## 5.2 The change
+
+One `if`/`else` around the existing expression in `Spline::calc_motor_cmd`, matching PJMC's shape.
+Functional diff is 5 lines replaced by the same 5 lines wrapped:
+
+```cpp
+if (_joint_data->torque_offset_reading == 0)
+{
+    cmd = torque_cmd;                 // open-loop fallback, same as PJMC
+}
+else
+{
+    cmd = torque_cmd + _pid(torque_cmd, _controller_data->filtered_torque_reading,
+                            kp_use, ki_use, kd_use);
+}
+```
+
+Structural checks: brace delta identical before and after (+2, pre-existing, from braces inside
+comments), preprocessor directives balanced 30/30.
+
+## 5.3 Verification
+
+Modelled `_pid` and the Spline PID branch exactly, driven over a full stride of the shipped profile:
+
+| case | result |
+|---|---|
+| **calibrated** sensor (`offset_reading = 1.19`), full stride | max &#124;before − after&#124; = **0.0000000000** — behaviour bit-identical |
+| **uncalibrated**, at the profile peak (setpoint −12.0 Nm) | was **−24.0 Nm**, now **−12.0 Nm** |
+| **uncalibrated**, at 5 % gait (setpoint −7.85 Nm) | was −15.71 Nm, now −7.85 Nm |
+| `use_pid = 0` branch | untouched |
+
+## 5.4 Still unguarded elsewhere — NOT fixed here
+
+The same `setpoint + _pid(setpoint, ...)` pattern exists in six other controllers that have **no**
+guard: `ZhangCollins` (`:785`), `FranksCollinsHip` (`:1153`), `ConstantTorque` (`:1292`),
+`ElbowMinMax` (`:1579`), `Step` (`:1929`) and `SPV2` (`:2847`, `:2852`). `ZeroTorque` (`:338`) has
+it too but is harmless there — its setpoint is 0, so `0 + 0 = 0`.
+
+Guarded today: `ProportionalJointMoment`, `PJMC_PLUS`, and now `Spline`.
+
+Changing `_pid()` to return `0` instead of `cmd` would fix all of them at once and is arguably the
+right fix, but it alters behaviour for every controller in the codebase and was deliberately left
+out of scope. Flagged for a separate decision.
