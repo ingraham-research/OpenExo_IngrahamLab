@@ -23,9 +23,16 @@ class BioFeedbackPage(QtWidgets.QWidget):
     recalibrateFSRRequested = QtCore.Signal()
     markTrialRequested = QtCore.Signal()
 
+    # Real-time channel index of each leg's TOE FSR. These are only defaults - both are
+    # user-editable via the spin boxes on this page.
+    #
+    # WAS {"Left Leg": 7, "Right Leg": 5}, which pointed at "In Stance (R)" and "In Stance (L)"
+    # respectively: the wrong signal (a 0/1 stance boolean, not the FSR) AND swapped sides.
+    # Corrected here to the toe-FSR channels in the current layout - see
+    # ExoCode/src/PlottingTitles.h getColumnHeader/bilateral_ankle for the authoritative list.
     _LEG_FSR_INDEX = {
-        "Left Leg": 7,
-        "Right Leg": 5,
+        "Left Leg": 4,   # Toe FSR (L)
+        "Right Leg": 6,  # Toe FSR (R)
     }
 
     def __init__(self, parent=None):

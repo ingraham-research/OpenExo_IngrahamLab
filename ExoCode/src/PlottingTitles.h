@@ -41,15 +41,15 @@ inline const char* getColumnHeader(uint8_t column_index, uint8_t* config_to_send
                 case 5:  return "In Stance (L)";
                 case 6:  return "Toe FSR (R)";
                 case 7:  return "In Stance (R)";
-                case 8:  return "Status";   //HIJACK: was "Channel 8" (unused). Now carries exo status (see uart_commands.h bilateral_ankle data[8]).
-                case 9:  return "Exoskeleton time (seconds)";
-                case 10: return "Battery Level (Volts)";
                 //Final commanded torque at the JOINT: post-feed-forward, post-PID, post-clamp, and
                 //what actually went out on CAN (0 on cycles that transmitted a zero frame).
-                //Columns 0/2 ("Desired Torque") are the PRE-PID setpoint - the gap between the two
-                //is the PID's contribution. See uart_commands.h bilateral_ankle data[11]/data[12].
-                case 11: return "Commanded Torque (L)";
-                case 12: return "Commanded Torque (R)";
+                //Columns 0/2 ("Desired Torque") are the PRE-PID setpoint - the gap between 0 and 8
+                //is the PID's contribution. Plotted one per panel (ActiveTrialPage._PLOT_PAGES).
+                case 8:  return "Commanded Torque (L)";
+                case 9:  return "Commanded Torque (R)";
+                case 10: return "Status";   //HIJACK: was an unused constant. Now the exo status (see uart_commands.h bilateral_ankle data[10]).
+                case 11: return "Exoskeleton time (seconds)";
+                case 12: return "Battery Level (Volts)";
                 default: return "INVALID_COL";
             }
         }

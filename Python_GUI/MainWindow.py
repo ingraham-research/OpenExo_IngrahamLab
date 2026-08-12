@@ -105,6 +105,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._csv_file = None
         self._csv_writer = None
         self._csv_header_written = False
+        # Channel indices written to the CSV, fixed when the header is written so header and rows
+        # can never disagree. See _csv_channel_indices().
+        self._csv_indices = []
         self._param_names = []
         self._t0 = None
         self._csv_path_last = None
@@ -252,11 +255,19 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._csv_writer is not None:
                 if not self._csv_header_written:
                     header = ["epoch", "mark"]
-                    # Only include first 10 parameters (exclude battery and beyond)
+                    # Log EVERY advertised channel except the battery, which has its own readout.
+                    #
+                    # This used to be a hardcoded `[:10]`, which was only ever meant to drop the
+                    # battery (then at index 10). When the payload grew from 11 to 13 channels
+                    # that cap silently discarded the two new ones -- Commanded Torque (L/R), the
+                    # post-PID post-clamp value that actually drives the motor. Selecting by name
+                    # means the CSV follows whatever the firmware advertises, and survived the
+                    # channel renumbering that moved battery to index 12.
+                    self._csv_indices = self._csv_channel_indices(values)
                     if self._param_names:
-                        header.extend(self._param_names[:10])
+                        header.extend(self._param_names[i] for i in self._csv_indices)
                     else:
-                        header.extend([f"data{i}" for i in range(min(10, len(values)))])
+                        header.extend(f"data{i}" for i in self._csv_indices)
                     try:
                         self._csv_writer.writerow(header)
                         self._csv_header_written = True
@@ -265,29 +276,33 @@ class MainWindow(QtWidgets.QMainWindow):
                     except Exception as e:
                         self.logger.error(f"Failed to write CSV header: {e}")
                         self.logger.debug(traceback.format_exc())
-                # Write row - only include first 10 data values
+                # Write row using the same channel selection as the header, so they can never
+                # drift apart (a row shorter/longer than the header silently misaligns columns).
                 epoch_time = time.time()
-                data_values = values[:10] if len(values) > 10 else values
-                row = [f"{epoch_time:.6f}", str(self._mark_counter)] + [f"{v:.6f}" for v in data_values]
+                row = [f"{epoch_time:.6f}", str(self._mark_counter)] + [
+                    f"{values[i]:.6f}" if i < len(values) else "" for i in self._csv_indices]
                 try:
                     self._csv_writer.writerow(row)
                 except Exception as e:
                     self.logger.error(f"Failed to write CSV row: {e}")
                     self.logger.debug(traceback.format_exc())
             
-            # Update battery level (assuming it's in the data somewhere)
+            # Battery and status are located BY NAME, not by a hardcoded index. The channel
+            # layout has been renumbered once already (to put Commanded Torque L/R adjacent) and
+            # a stale literal here silently plots the wrong signal rather than failing.
             try:
-                if len(values) > 10:
-                    battery_voltage = values[10]  # Battery is typically at index 10
+                battery_voltage = self._channel_value(values, "Battery Level (Volts)", 12)
+                if battery_voltage is not None:
                     self.trial_page.update_battery_level(battery_voltage)
             except Exception as e:
                 self.logger.error(f"Failed to update battery level: {e}")
                 self.logger.debug(traceback.format_exc())
 
-            # Update exo status readout from the hijacked RT Channel 8 (firmware status word).
+            # Exo status readout from the hijacked status channel (firmware status word).
             try:
-                if len(values) > 8:
-                    self.trial_page.update_exo_status(values[8])
+                status_value = self._channel_value(values, "Status", 10)
+                if status_value is not None:
+                    self.trial_page.update_exo_status(status_value)
             except Exception as e:
                 self.logger.error(f"Failed to update exo status: {e}")
                 self.logger.debug(traceback.format_exc())
@@ -307,6 +322,37 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.logger.error(f"Failed to update status text for handshake: {e}")
             self.logger.debug(traceback.format_exc())
+
+    # Channels excluded from the CSV. Battery has its own on-screen readout and changes far too
+    # slowly to be worth a column at ~100 Hz. Matched by NAME so adding firmware channels never
+    # silently drops one (see PlottingTitles.h / uart_commands.h get_real_time_data).
+    _CSV_EXCLUDED_CHANNELS = ("Battery Level (Volts)",)
+
+    def _channel_value(self, values, name: str, fallback_index: int):
+        """Look up a real-time channel by its advertised name.
+
+        Falls back to `fallback_index` only when the handshake delivered no names (which also
+        happens when the controller list arrives truncated). Returns None if unavailable.
+        """
+        try:
+            idx = self._param_names.index(name) if self._param_names else fallback_index
+        except ValueError:
+            idx = fallback_index
+        return values[idx] if 0 <= idx < len(values) else None
+
+    def _csv_channel_indices(self, values) -> list:
+        """Which real-time channel indices get written to the CSV.
+
+        Resolved once, when the header is written, and reused for every row so header and data
+        can never misalign.
+        """
+        if self._param_names:
+            return [i for i, name in enumerate(self._param_names)
+                    if name not in self._CSV_EXCLUDED_CHANNELS]
+        # No names from the handshake. RtBridge pads every packet to 16, so len(values) cannot
+        # tell us how many channels the firmware actually sent; fall back to the bilateral_ankle
+        # layout (13 channels, battery LAST at index 12) rather than logging padding zeros.
+        return [i for i in range(min(13, len(values))) if i != 12]
 
     @QtCore.Slot(list)
     def _on_param_names(self, names):

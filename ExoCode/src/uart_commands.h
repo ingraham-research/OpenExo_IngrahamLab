@@ -416,34 +416,43 @@ namespace UART_command_handlers
         case (uint8_t)config_defs::exo_name::bilateral_ankle:
 		{
             rx_msg.len = (uint8_t)rt_data::BILATERAL_ANKLE_RT_LEN;
-            rx_msg.data[0] = exo_data->left_side.ankle.controller.desired_torque;
-            rx_msg.data[1] = exo_data->left_side.ankle.controller.filtered_torque_reading;
+			//CHANNEL LAYOUT (keep in sync with PlottingTitles.h getColumnHeader/bilateral_ankle
+			//and ActiveTrialPage._PLOT_PAGES). Channels 0-7 are UNCHANGED from the original
+			//layout, so every existing CSV stays directly comparable:
+			//  0-3   Desired vs Measured torque, per leg
+			//  4-7   Toe FSR + In Stance, per FOOT (deliberately paired: the stance step change
+			//        overlays the FSR trace on one panel, which is how they are read)
+			//  8-9   Commanded torque L/R  (NEW - plotted one per panel, see _PLOT_PAGES)
+			//  10-12 Status, exo clock, battery (not plotted; each has its own GUI readout)
+			rx_msg.data[0] = exo_data->left_side.ankle.controller.desired_torque;
+			rx_msg.data[1] = exo_data->left_side.ankle.controller.filtered_torque_reading;
 			rx_msg.data[2] = exo_data->right_side.ankle.controller.desired_torque;
 			rx_msg.data[3] = exo_data->right_side.ankle.controller.filtered_torque_reading;
 			rx_msg.data[4] = exo_data->left_side.toe_fsr;
-            rx_msg.data[5] = exo_data->left_side.toe_stance;
-			// rx_msg.data[5] = exo_data->left_side.heel_fsr;
-            rx_msg.data[6] = exo_data->right_side.toe_fsr;
+			rx_msg.data[5] = exo_data->left_side.toe_stance;
+			rx_msg.data[6] = exo_data->right_side.toe_fsr;
 			rx_msg.data[7] = exo_data->right_side.toe_stance;
-			// rx_msg.data[7] = exo_data->right_side.heel_fsr;
-			//HIJACK: Channel 8 was an unused constant placeholder (was = 8). Repurposed to stream
+			// heel FSR is unused on this build ([Sensors] heelFsrPresent = 0)
+
+			//Channels 8/9: the FINAL commanded torque at the JOINT, in Nm. This is what actually
+			//went out on CAN: post-feed-forward, post-PID, post-gain-schedule, post-
+			//MAX_JOINT_TORQUE_NM clamp, and ZERO on any cycle where a zero frame was sent
+			//(motor.t_ff is assigned in send_data()'s transmit branches for exactly this reason).
+			//Channels 0/2 ("Desired Torque") are the PRE-PID feed-forward setpoint and do NOT show
+			//what drives the motor -- the gap between 0 and 8 is the PID's contribution.
+			//motor.t_ff is motor-frame Nm; x gearing puts it at the joint, so 0/2, 1/3 and 8/9 are
+			//all directly comparable.
+			rx_msg.data[8] = exo_data->left_side.ankle.motor.t_ff * exo_data->left_side.ankle.motor.gearing;
+			rx_msg.data[9] = exo_data->right_side.ankle.motor.t_ff * exo_data->right_side.ankle.motor.gearing;
+
+			//HIJACK: this slot was an unused constant placeholder (was "= 8"). Repurposed to stream
 			//the exo status so the GUI/CSV can see the trial/calibration state (status_defs::messages:
 			//2=trial_on, 4=torque_calibration, 5=fsr_calibration, 6=fsr_refinement, 7=motor_start_up).
 			//Watching it settle at 2 (trial_on) marks FSR refinement finished (set in
-			//Side::check_calibration). Revert to "= 8;" if a real Channel 8 signal is ever needed.
-			rx_msg.data[8] = (float)exo_data->get_status();
-			rx_msg.data[9] = (float)millis()/1000;
-			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
-			//Channels 11/12: the FINAL commanded torque at the JOINT, in Nm.
-			//This is what actually went out on CAN: post-feed-forward, post-PID, post-gain-schedule,
-			//post-MAX_JOINT_TORQUE_NM clamp, and zero on any cycle where a zero frame was sent
-			//(motor.t_ff is now assigned in send_data()'s transmit branches for exactly this reason).
-			//Channels 0/2 ("Desired Torque") are the PRE-PID feed-forward setpoint and do NOT show
-			//what drives the motor - the difference between them is the PID's contribution.
-			//motor.t_ff is motor-frame Nm; x gearing puts it at the joint, comparable to
-			//"Desired Torque" and "Measured Torque".
-			rx_msg.data[11] = exo_data->left_side.ankle.motor.t_ff * exo_data->left_side.ankle.motor.gearing;
-			rx_msg.data[12] = exo_data->right_side.ankle.motor.t_ff * exo_data->right_side.ankle.motor.gearing;
+			//Side::check_calibration).
+			rx_msg.data[10] = (float)exo_data->get_status();
+			rx_msg.data[11] = (float)millis()/1000;
+			rx_msg.data[12] = exo_data->get_batt_info(0); //Excluded from the CSV by name, not index
 			break;
 		}
 
@@ -562,34 +571,43 @@ namespace UART_command_handlers
         default:
 		{
             rx_msg.len = (uint8_t)rt_data::BILATERAL_ANKLE_RT_LEN;
-            rx_msg.data[0] = exo_data->left_side.ankle.controller.desired_torque;
-            rx_msg.data[1] = exo_data->left_side.ankle.controller.filtered_torque_reading;
+			//CHANNEL LAYOUT (keep in sync with PlottingTitles.h getColumnHeader/bilateral_ankle
+			//and ActiveTrialPage._PLOT_PAGES). Channels 0-7 are UNCHANGED from the original
+			//layout, so every existing CSV stays directly comparable:
+			//  0-3   Desired vs Measured torque, per leg
+			//  4-7   Toe FSR + In Stance, per FOOT (deliberately paired: the stance step change
+			//        overlays the FSR trace on one panel, which is how they are read)
+			//  8-9   Commanded torque L/R  (NEW - plotted one per panel, see _PLOT_PAGES)
+			//  10-12 Status, exo clock, battery (not plotted; each has its own GUI readout)
+			rx_msg.data[0] = exo_data->left_side.ankle.controller.desired_torque;
+			rx_msg.data[1] = exo_data->left_side.ankle.controller.filtered_torque_reading;
 			rx_msg.data[2] = exo_data->right_side.ankle.controller.desired_torque;
 			rx_msg.data[3] = exo_data->right_side.ankle.controller.filtered_torque_reading;
 			rx_msg.data[4] = exo_data->left_side.toe_fsr;
-            rx_msg.data[5] = exo_data->left_side.toe_stance;
-			// rx_msg.data[5] = exo_data->left_side.heel_fsr;
-            rx_msg.data[6] = exo_data->right_side.toe_fsr;
+			rx_msg.data[5] = exo_data->left_side.toe_stance;
+			rx_msg.data[6] = exo_data->right_side.toe_fsr;
 			rx_msg.data[7] = exo_data->right_side.toe_stance;
-			// rx_msg.data[7] = exo_data->right_side.heel_fsr;
-			//HIJACK: Channel 8 was an unused constant placeholder (was = 8). Repurposed to stream
+			// heel FSR is unused on this build ([Sensors] heelFsrPresent = 0)
+
+			//Channels 8/9: the FINAL commanded torque at the JOINT, in Nm. This is what actually
+			//went out on CAN: post-feed-forward, post-PID, post-gain-schedule, post-
+			//MAX_JOINT_TORQUE_NM clamp, and ZERO on any cycle where a zero frame was sent
+			//(motor.t_ff is assigned in send_data()'s transmit branches for exactly this reason).
+			//Channels 0/2 ("Desired Torque") are the PRE-PID feed-forward setpoint and do NOT show
+			//what drives the motor -- the gap between 0 and 8 is the PID's contribution.
+			//motor.t_ff is motor-frame Nm; x gearing puts it at the joint, so 0/2, 1/3 and 8/9 are
+			//all directly comparable.
+			rx_msg.data[8] = exo_data->left_side.ankle.motor.t_ff * exo_data->left_side.ankle.motor.gearing;
+			rx_msg.data[9] = exo_data->right_side.ankle.motor.t_ff * exo_data->right_side.ankle.motor.gearing;
+
+			//HIJACK: this slot was an unused constant placeholder (was "= 8"). Repurposed to stream
 			//the exo status so the GUI/CSV can see the trial/calibration state (status_defs::messages:
 			//2=trial_on, 4=torque_calibration, 5=fsr_calibration, 6=fsr_refinement, 7=motor_start_up).
 			//Watching it settle at 2 (trial_on) marks FSR refinement finished (set in
-			//Side::check_calibration). Revert to "= 8;" if a real Channel 8 signal is ever needed.
-			rx_msg.data[8] = (float)exo_data->get_status();
-			rx_msg.data[9] = (float)millis()/1000;
-			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
-			//Channels 11/12: the FINAL commanded torque at the JOINT, in Nm.
-			//This is what actually went out on CAN: post-feed-forward, post-PID, post-gain-schedule,
-			//post-MAX_JOINT_TORQUE_NM clamp, and zero on any cycle where a zero frame was sent
-			//(motor.t_ff is now assigned in send_data()'s transmit branches for exactly this reason).
-			//Channels 0/2 ("Desired Torque") are the PRE-PID feed-forward setpoint and do NOT show
-			//what drives the motor - the difference between them is the PID's contribution.
-			//motor.t_ff is motor-frame Nm; x gearing puts it at the joint, comparable to
-			//"Desired Torque" and "Measured Torque".
-			rx_msg.data[11] = exo_data->left_side.ankle.motor.t_ff * exo_data->left_side.ankle.motor.gearing;
-			rx_msg.data[12] = exo_data->right_side.ankle.motor.t_ff * exo_data->right_side.ankle.motor.gearing;
+			//Side::check_calibration).
+			rx_msg.data[10] = (float)exo_data->get_status();
+			rx_msg.data[11] = (float)millis()/1000;
+			rx_msg.data[12] = exo_data->get_batt_info(0); //Excluded from the CSV by name, not index
 			break;
 		}
         }
