@@ -375,6 +375,11 @@ void _CANMotor::send_data(float torque)
         can->send(msg);
         _prev_motor_enabled = true;
         //Record what actually went on the wire (see the note where `current` is computed).
+        //NB: `t_ff` is a PROTOCOL name (the MIT frame's torque field), not a control one. `torque`
+        //here is the FULL post-PID command -- Controller::calc_motor_cmd() returns
+        //`torque_cmd + _pid(...)`, and the clamp above has already been applied. It is NOT the
+        //controller's feed-forward term (that is controller.ff_setpoint / desired_torque, streamed
+        //on RT channels 0/2). See MotorData.h.
         _motor_data->t_ff = torque;          //motor-frame Nm; x gearing = joint Nm
         _motor_data->last_command = i_sat;   //motor-frame amps
     }
@@ -532,10 +537,13 @@ bool _CANMotor::enable(bool overide)
     // frame. The frame built below is FF FF FF FF FF FF FF FC (or FD) sent on
     // msg.id = ((8 << 8) | id) -- the SAME CAN id send_data() uses for torque -- so the motor
     // unpacks it with the normal field layout: kp=500 (max), kd=5 (max), p_des=+12.5 rad (max),
-    // v_des=+48 rad/s (max), i_ff=+10.3 A (max). That is a full-current, max-gain position command
+    // v_des=+48 rad/s (max), t_ff = full scale. That is a max-torque, max-gain position command
     // to an unreachable target: the error never closes, so the motor saturates and HOLDS at
-    // I_MAX * Kt * gearing = 10.3 * 1.11 * 4.5 = 51.4 Nm at the joint. It also bypasses
-    // send_data()'s direction_modifier AND the MAX_JOINT_TORQUE_NM clamp entirely.
+    // T_MAX * gearing = 12.0 * 4.5 = 54.0 Nm at the joint (the AK60-6 unpacks that 12-bit field
+    // against +-12.0, manual v3.0.0 sec 4.2 -- NOT against our _I_MAX of 10.3; the older figure of
+    // 51.4 Nm assumed I_MAX * Kt * gearing and was low. See Modification log with claude/
+    // Motor-Current-Decode-Investigation.md). It also bypasses send_data()'s direction_modifier
+    // AND the MAX_JOINT_TORQUE_NM clamp entirely.
     //
     // Guarding here rather than at each caller is deliberate: the per-call-site guards in
     // Joint.cpp::run_joint() and Motor.cpp::check_response() are easy to forget, and
@@ -613,8 +621,8 @@ void _CANMotor::zero()
 {
     // ===== AK60v3: NEVER transmit from here. Same reasoning as enable() above. =====
     // This sends FF FF FF FF FF FF FF FE on the torque CAN id, which the AK60v3 decodes as
-    // kp=500 / kd=5 / p_des=+12.5 rad / i_ff=+10.29 A -- within one LSB of enable()'s frame, and
-    // the same 51.4 Nm held slam. It bypasses the MAX_JOINT_TORQUE_NM clamp.
+    // kp=500 / kd=5 / p_des=+12.5 rad / t_ff = one LSB below full scale -- within one LSB of
+    // enable()'s frame, and the same ~54 Nm held slam. It bypasses the MAX_JOINT_TORQUE_NM clamp.
     //
     // The AK60v3 has no MIT "set origin" in this protocol, so there is nothing to send. The only
     // caller is Joint.cpp:115 (`if (_joint_data->motor.do_zero) _motor->zero();`), which runs every
@@ -795,11 +803,38 @@ _CANMotor(id, exo_data, enable_pin)
 AK60v3::AK60v3(config_defs::joint_id id, ExoData* exo_data, int enable_pin): //Constructor: type is the motor type
 _CANMotor(id, exo_data, enable_pin)
 {
+    // !! THESE TWO CONSTANTS DO NOT MATCH THE MOTOR. Do not change either one alone. !!
+    //
+    // _I_MAX is NOT used as a current limit -- send_data() uses it as the full scale of the MIT
+    // t_ff field. 10.3 is the AK60-6 V3.0 datasheet PEAK CURRENT (10.3 A @24V), but the motor
+    // unpacks that 12-bit field against +-12.0 (AK Series Module Product Manual v3.0.0 sec 4.2,
+    // "Parameter Ranges", AK60-6 column: position +-12.56 rad, speed +-60.0 rad/s, torque
+    // +-12.0). CERTAIN, and independent of what unit that +-12.0 carries:
+    //
+    //     every command we send arrives 12.0/10.3 = 1.165x larger than intended.
+    //
+    // Side effect to remember: MAX_JOINT_TORQUE_NM = 25 therefore really clamps at 26.2 Nm, and
+    // the unguarded enable()/zero() slam is 54.0 Nm.
+    //
+    // UNRESOLVED: whether that +-12.0 is N.m or IQ amps. The manual contradicts itself -- the
+    // sec 4.2 table header says "Motor torque (N.M)", but the sec 4.4.1 command examples label the
+    // same field "2A IQ Current" / "4A IQ Current". Those examples cannot settle it (the 2A/4A
+    // pair doubles exactly for ANY full scale, so they are circular). Our logs lean N.m: measured
+    // current / commanded "amps" runs 1.32-1.62, vs 1.165 predicted if the field is amps.
+    // It matters, because it decides the sign of the net error:
+    //     field is N.m  -> delivered = requested * (12.0/10.3) * 4.5 / (4.5*1.11) = 1.049 (+5%)
+    //     field is amps -> delivered = requested * (12.0/10.3) * 0.81/1.11        = 0.850 (-15%)
+    // Either way, do NOT change _I_MAX alone: ->12.0 by itself makes every torque 16.5% smaller.
+    // Settle it first with the blocked-joint static test in Modification log with claude/
+    // Motor-Current-Decode-Investigation.md, then fix _I_MAX and Kt together.
     _I_MAX = 10.3f;
-    _V_MAX = 48.0f;
+    _V_MAX = 48.0f;   // manual says +-60.0 rad/s for AK60-6; inert while kd == 0 (it always is)
 
     // Experimentally determined AK60v3 Kt, including the internal 6:1 gearbox.
     // External joint gearing is handled in Joint.cpp.
+    // NB: the datasheet gives 0.135 Nm/A * 6 = 0.81 Nm/A at the output; this 1.11 is ~37% higher.
+    // Which one is right is still open and is tangled with the _I_MAX question above -- read that
+    // note before touching either value.
     float kt = 0.185f * 6;
     set_Kt(kt);
     exo_data->get_joint_with(static_cast<uint8_t>(id))->motor.kt = kt;
