@@ -1,6 +1,31 @@
 /**
  * @file SdLogger.h
  *
+ * =============================================================================================
+ * !!  WARNING - TWO COLUMNS IN THIS LOG ARE WRONG. READ BEFORE TRUSTING ANY OUTPUT.  !!
+ * =============================================================================================
+ *
+ *  1. `Current_A` IS GARBAGE - DO NOT USE IT.
+ *     It is `motor.i`, decoded in Motor.cpp::read_data() as `int16 * 0.01f` A from the AK60v3
+ *     status frame. That scale is WRONG by roughly 6x. Measured against the joint torque sensor
+ *     on trial 0009 it implies ~1.0 Nm/A where the firmware's own Kt*gearing is 4.995 Nm/A, and
+ *     it reports currents (19.5 A) far above the 10.3 A maximum the firmware can even command.
+ *     Either the scale, the byte offsets, or the reported quantity is wrong. UNRESOLVED.
+ *     The command path (Kt) is fine - closed-loop tracking measures ~90% - so this is a bug in
+ *     the FEEDBACK decode only. Nothing in the control path consumes motor.i, so it is not a
+ *     safety issue, but any analysis based on this column is worthless.
+ *     It also makes check_response()'s variance input mis-scaled (harmless, just wrong units).
+ *
+ *  2. `Commanded_Torque_Nm` IS IN AMPS, NOT Nm.
+ *     It is `motor.last_command`, which is `i_sat` - the saturated current in the MOTOR frame.
+ *     Multiply by Kt*gearing (1.11 * 4.5 = 4.995) for joint Nm. Note it is motor-frame, so on the
+ *     flipped side (ankleFlipMotorDir = right) its sign is opposite to `Current_A`, which is
+ *     joint-frame. Comparing the two directly on the right leg gives a spurious anti-correlation.
+ *
+ *  The GUI CSV is the better instrument now: channels 11/12 ("Commanded Torque L/R") carry the
+ *  final post-PID, post-clamp joint command in real Nm, and are streamed over BLE always-on.
+ * =============================================================================================
+ *
  * @brief Onboard SD-card data logger for the OpenExo Teensy.
  *
  * Writes per-motor and per-ground-strike .txt logs during a trial, matching the hip-exo

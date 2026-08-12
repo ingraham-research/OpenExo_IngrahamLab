@@ -163,7 +163,9 @@ void ComsMCU::update_gui()
 
     static Time_Helper* t_helper = Time_Helper::get_instance();
     static float my_mark = _data->mark;
-    static float* rt_floats = new float(rt_data::len);
+    // WAS: `new float(rt_data::len)` -- a single-float allocation, not an array, which
+    // real_time_i2c::poll() then filled with rt_data::len floats. See RealTimeI2C.h.
+    static float rt_floats[rt_data::MAX_LEN];
 
     //Get real time data from ExoData and send to GUI
     const bool new_rt_data = real_time_i2c::poll(rt_floats);

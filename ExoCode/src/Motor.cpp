@@ -311,9 +311,13 @@ void _CANMotor::send_data(float torque)
 
     int direction_modifier = _motor_data->flip_direction ? -1 : 1;
 
-    // t_ff records the CLAMPED value - what was actually commanded, not what was asked for.
-    // The clamp logs the pre-clamp value above, so nothing is hidden.
-    _motor_data->t_ff = torque;
+    // t_ff and last_command are NOT set here. They are set in the transmit branches at the bottom
+    // of this function so they record WHAT WENT ON THE WIRE, not what the controller computed.
+    // Previously they were assigned here, unconditionally -- so when the motor was disabled we put
+    // a ZERO frame on the bus but recorded the controller's (possibly large) value. Any log built
+    // on them then showed a big "commanded torque" for a cycle that actually commanded zero, which
+    // makes it impossible to tell "faulty command followed by zeros" from "faulty command followed
+    // by nothing" -- exactly the distinction we need at End Trial.
     const float current = torque / get_Kt();
 
     float p_sat = constrain(direction_modifier * _motor_data->p_des, -_P_MAX, _P_MAX);
@@ -321,7 +325,6 @@ void _CANMotor::send_data(float torque)
     float kp_sat = constrain(_motor_data->kp, _KP_MIN, _KP_MAX);
     float kd_sat = constrain(_motor_data->kd, _KD_MIN, _KD_MAX);
     float i_sat = constrain(direction_modifier * current, -_I_MAX, _I_MAX);
-    _motor_data->last_command = i_sat;
     uint32_t p_int = _float_to_uint(p_sat, -_P_MAX, _P_MAX, 16);
     uint32_t v_int = _float_to_uint(v_sat, -_V_MAX, _V_MAX, 12);
     uint32_t kp_int = _float_to_uint(kp_sat, _KP_MIN, _KP_MAX, 12);
@@ -371,6 +374,9 @@ void _CANMotor::send_data(float torque)
         //Set data in motor
         can->send(msg);
         _prev_motor_enabled = true;
+        //Record what actually went on the wire (see the note where `current` is computed).
+        _motor_data->t_ff = torque;          //motor-frame Nm; x gearing = joint Nm
+        _motor_data->last_command = i_sat;   //motor-frame amps
     }
     else
     {
@@ -419,6 +425,10 @@ void _CANMotor::send_data(float torque)
 
         can->send(msg);
         _prev_motor_enabled = false;
+        //A ZERO frame went out, so that is what we recorded as commanded - not the controller's
+        //computed value, which was never transmitted.
+        _motor_data->t_ff = 0.0f;
+        _motor_data->last_command = 0.0f;
     }
     return;
 };

@@ -210,6 +210,11 @@ void SdLogger::_open_session()
     }
 
     // Queue headers into the ring buffers (drained as normal data). Same format/columns as before.
+    // NOTE: two of these column names lie - see the WARNING block at the top of SdLogger.h.
+    //   Commanded_Torque_Nm is motor.last_command = i_sat, i.e. AMPS in the MOTOR frame
+    //                       (x 4.995 for joint Nm; sign is flipped vs Current_A on the right leg)
+    //   Current_A           is motor.i, whose decode is WRONG by ~6x. DO NOT USE.
+    // Names are kept as-is so existing parsers of old logs still work.
     const char* motor_hdr =
         "Motor,Teensy_time_s,Status,Gait_phase,Position_rad,Velocity_rad_s,Torque_Nm,"
         "Commanded_Torque_Nm,Current_A,Filtered_Torque_Nm,Desired_Torque_Nm,"

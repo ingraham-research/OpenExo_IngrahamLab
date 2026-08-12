@@ -26,8 +26,14 @@
 
 static volatile bool new_bytes = false;
 static const int byte_buffer_len = rt_data::len * sizeof(float)/sizeof(short int) + 2;
-static uint8_t* const byte_buffer = new uint8_t(byte_buffer_len);
-static float* float_values = new float(rt_data::len);
+
+// WAS: `new uint8_t(byte_buffer_len)` and `new float(rt_data::len)`.
+// Both are single-object allocations, NOT arrays: `new uint8_t(24)` allocates ONE byte holding
+// the value 24. The I2C receive ISR then wrote byte_buffer_len bytes into it and poll() memcpy'd
+// byte_buffer_len bytes out of it, and float_values was filled with rt_data::len floats -- heap
+// corruption on every real-time packet. Fixed arrays remove the heap from this path entirely.
+static uint8_t byte_buffer[byte_buffer_len];
+static float float_values[rt_data::len];
 
 static uint8_t _packed_len(uint8_t len)
 {

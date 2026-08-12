@@ -434,6 +434,16 @@ namespace UART_command_handlers
 			rx_msg.data[8] = (float)exo_data->get_status();
 			rx_msg.data[9] = (float)millis()/1000;
 			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
+			//Channels 11/12: the FINAL commanded torque at the JOINT, in Nm.
+			//This is what actually went out on CAN: post-feed-forward, post-PID, post-gain-schedule,
+			//post-MAX_JOINT_TORQUE_NM clamp, and zero on any cycle where a zero frame was sent
+			//(motor.t_ff is now assigned in send_data()'s transmit branches for exactly this reason).
+			//Channels 0/2 ("Desired Torque") are the PRE-PID feed-forward setpoint and do NOT show
+			//what drives the motor - the difference between them is the PID's contribution.
+			//motor.t_ff is motor-frame Nm; x gearing puts it at the joint, comparable to
+			//"Desired Torque" and "Measured Torque".
+			rx_msg.data[11] = exo_data->left_side.ankle.motor.t_ff * exo_data->left_side.ankle.motor.gearing;
+			rx_msg.data[12] = exo_data->right_side.ankle.motor.t_ff * exo_data->right_side.ankle.motor.gearing;
 			break;
 		}
 
@@ -468,6 +478,16 @@ namespace UART_command_handlers
             rx_msg.data[8] = 8;
 			rx_msg.data[9] = (float)millis()/1000;
 			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
+			//Channels 11/12: the FINAL commanded torque at the JOINT, in Nm.
+			//This is what actually went out on CAN: post-feed-forward, post-PID, post-gain-schedule,
+			//post-MAX_JOINT_TORQUE_NM clamp, and zero on any cycle where a zero frame was sent
+			//(motor.t_ff is now assigned in send_data()'s transmit branches for exactly this reason).
+			//Channels 0/2 ("Desired Torque") are the PRE-PID feed-forward setpoint and do NOT show
+			//what drives the motor - the difference between them is the PID's contribution.
+			//motor.t_ff is motor-frame Nm; x gearing puts it at the joint, comparable to
+			//"Desired Torque" and "Measured Torque".
+			rx_msg.data[11] = exo_data->left_side.ankle.motor.t_ff * exo_data->left_side.ankle.motor.gearing;
+			rx_msg.data[12] = exo_data->right_side.ankle.motor.t_ff * exo_data->right_side.ankle.motor.gearing;
 			break;
 		}
 
@@ -560,6 +580,16 @@ namespace UART_command_handlers
 			rx_msg.data[8] = (float)exo_data->get_status();
 			rx_msg.data[9] = (float)millis()/1000;
 			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
+			//Channels 11/12: the FINAL commanded torque at the JOINT, in Nm.
+			//This is what actually went out on CAN: post-feed-forward, post-PID, post-gain-schedule,
+			//post-MAX_JOINT_TORQUE_NM clamp, and zero on any cycle where a zero frame was sent
+			//(motor.t_ff is now assigned in send_data()'s transmit branches for exactly this reason).
+			//Channels 0/2 ("Desired Torque") are the PRE-PID feed-forward setpoint and do NOT show
+			//what drives the motor - the difference between them is the PID's contribution.
+			//motor.t_ff is motor-frame Nm; x gearing puts it at the joint, comparable to
+			//"Desired Torque" and "Measured Torque".
+			rx_msg.data[11] = exo_data->left_side.ankle.motor.t_ff * exo_data->left_side.ankle.motor.gearing;
+			rx_msg.data[12] = exo_data->right_side.ankle.motor.t_ff * exo_data->right_side.ankle.motor.gearing;
 			break;
 		}
         }
