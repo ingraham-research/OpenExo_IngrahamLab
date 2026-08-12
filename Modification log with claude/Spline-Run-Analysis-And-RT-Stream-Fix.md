@@ -91,23 +91,36 @@ defines 13. The GUI's `_param_names` therefore stopped at `"Status"`, so:
 
 ## 1.2 Failure modes, ranked
 
-### F1 — ~2-second control-loop freeze on every controller change  🔴
+### F1 — Synchronous SD I/O inside the 500 Hz loop on every controller change  🟡
 
-`set_controller_params()` (`ParamsFromSD.cpp:512-640`) runs inside the 500 Hz loop. `spline.csv`
-ends with a trailing `\r\n` (verified with `od`), so after reading the 16 parameters
-`while(param_file.available())` runs one more iteration:
+> **CORRECTION (2026-08-12, same day).** An earlier revision of this document claimed this stall was
+> **~2 s per joint**, caused by `while(param_file.available())` running a second iteration that hit
+> Arduino `Stream`'s 1000 ms EOF timeouts in `parseInt()` and `readStringUntil()`. **That was wrong.**
+> There is a `break;` at the end of the loop body (`ParamsFromSD.cpp:648`, comment "We don't need to
+> read the rest of the file"), verified by brace-depth analysis, so the loop runs **exactly once**
+> and EOF is never reached. No `Stream` timeout occurs anywhere on this path. The retracted figure
+> should not be used.
 
-- `parseInt()` hits EOF → Arduino `Stream` 1000 ms timeout → 0
-- `readStringUntil('\n')` hits EOF → another 1000 ms timeout
+What is actually true: `set_controller_params()` (`ParamsFromSD.cpp:512-651`) performs blocking SD
+card I/O **synchronously inside the 500 Hz control loop**:
 
-≈ **2 s per joint**, ≈ 4 s for both ankles at trial start (`update_status(trial_on)` →
-`set_default_parameters()`, `uart_commands.h:208`). During the stall `Exo::run()` never executes, so
-**no CAN frames go out and the AK60v3 holds its last torque command**.
+- `SD.open(filename)` — a FAT directory lookup and file open
+- five `findUntil('\n','\n')` line skips plus ~16 `parseFloat()` calls, all byte-at-a-time through
+  the `Stream` interface over a ~600-byte file
+- one `readStringUntil('\n')`, which builds an Arduino `String` (heap allocation)
+- `param_file.close()`
 
-This is very likely the residual cause of the "motor hangs for a bit and outputs a fixed non-zero
-torque" symptom that `a6413c9` only partially addressed — that commit removed the `SD.begin()`
-remount; these Stream timeouts remain. *(Inference from the Arduino `Stream` timeout contract;
-not measured on hardware.)*
+Order **milliseconds**, i.e. a few control cycles — not seconds. **Unmeasured; needs a scope or a
+`micros()` bracket to quantify.** During it `Exo::run()` does not execute, so no CAN frames go out
+and the AK60v3 holds its last torque command for that interval.
+
+Triggered by: every controller change from the GUI (`update_controller_param` →
+`set_default_parameters(id)`), and once per used joint at trial start (`update_status(trial_on)` →
+`set_default_parameters()`, `uart_commands.h:208`).
+
+Given the corrected magnitude, `a6413c9` (which removed the per-call `SD.begin()` remount) was
+probably the substantive fix for the "motor hangs for a bit" symptom, and what remains here is a
+much smaller residual. Note the same function still contains the genuine hang risk in F10.
 
 ### F2 — The output clamp will fire on essentially every step  🔴
 
@@ -156,15 +169,48 @@ early-returns `cmd` when the sensor is uncalibrated (`Controller.cpp:210`). Sinc
 profile becomes −24 Nm. Reachable if the torque sensor is disconnected/reads ~0 V, or if
 calibration collects zero samples.
 
-### F6 — Parameter edits during a trial can be lost, or wedge the command parser  🟠
+### F6 — `BleParser` has no partial-message timeout, and re-queues a stale message  🟠
 
-`updateTorqueValues` sends 5 separate **write-without-response** packets
-(`QtExoDeviceManager.py:843`). The codebase's own comment at `send_end_trial_sequence` documents
-that write-without-response **hangs on WinRT under real-time-notification congestion**.
-`BleParser` has **no timeout** on a partial message (`BleParser.cpp:55-83`): if fewer than four
-doubles arrive, `_waiting_for_data` stays true and the **next ~8 single-byte commands
-(`E`, `G`, `w`, `x`, `H`, `L`, `Z`) are consumed as payload instead of executed**. Worst case: you
-press END TRIAL and nothing happens.
+Two separate defects in `BleParser::handle_raw_data` (`BleParser.cpp:14-91`).
+
+**(a) A partial multi-byte command wedges the parser.** `updateTorqueValues` sends 5 separate
+**write-without-response** packets: `'f'`, then four 8-byte doubles (`QtExoDeviceManager.py:843`).
+The codebase's own comment at `send_end_trial_sequence` documents that write-without-response
+**hangs on WinRT under real-time-notification congestion**; an exception in the coroutine aborts
+the rest of the sequence the same way. There is **no timeout** on a partial message, so if only
+three doubles land, `_waiting_for_data` stays true with `_bytes_collected = 24` of an expected 32.
+
+Every subsequent BLE write is then appended as *payload*, not interpreted as a command. Single-byte
+commands are 1 byte each, so the **next eight** (`E`, `G`, `w`, `x`, `H`, `L`, `N`, `Z`) are
+swallowed. Concretely: `send_end_trial_sequence` writes `'Z'`, `'G'`, `'w'` — all three are eaten,
+**END TRIAL does nothing**, and the shutdown dialog sits until it reports TIMEOUT. Each dialog
+Retry sends three more bytes; the wedge clears on its own after ~8 bytes, so the third or fourth
+Retry gets through. That "it worked on the fourth try" signature is the fingerprint.
+
+When the 32nd byte finally arrives the parser declares the message complete and decodes four
+doubles: the first three (joint id, controller id, param index) are **real**, and the fourth — the
+*value* — is eight ASCII command bytes reinterpreted as a double. Most such patterns overflow to
+`inf` as a float and are rejected by `is_finite_float`, but not all: a `'$'` (0x24) in the top byte
+yields a denormal that converts to **0.0f**, which passes validation. Because spline parameter
+bounds are disabled (F7), that writes a silent **0** into whatever spline parameter was in flight.
+
+An 8-byte write while wedged instead trips `_bytes_collected >= expecting * 8` and resets the
+parser, so a following parameter update clears the wedge at the cost of garbling itself.
+
+**(b) A non-completing write re-executes the previous command.** `return_msg` is `static` and is
+only written when a message completes; `is_complete` is set true on the first completed message and
+**never cleared**. Every call that does not complete a message returns that stale object, and
+`ble_rx::on_rx_recieved` pushes it whenever `msg->is_complete` is true (`ExoBLE.cpp:466-476`), with
+`ble_queue::push` taking a copy. So the `'f'` byte and doubles 1-3 of *every* parameter update
+re-queue and re-execute the **previous** completed command four times (eight in bilateral mode).
+
+Masked today only because the reachable handlers are idempotent (`start`, `stop`, `motors_on/off`,
+`cal_fsr`, and a repeat of the identical previous `update_param`). It stops being masked the moment
+a non-idempotent command becomes the last completed one — `mark` (`data->mark++`) is already one.
+
+Related, same file: `ble_queue` is a **LIFO stack**, not a queue (`push` writes `queue[++m_size]`,
+`pop` returns `queue[m_size--]`), and `ComsMCU::handle_ble` pops one per loop iteration — so a burst
+of commands executes in reverse order.
 
 ### F7 — Node-order edits transiently kill assist; end-node torque is permanent  🟡
 
@@ -178,22 +224,78 @@ through all of swing and while standing still.**
 so `validate_request` skips range checking entirely and the GUI spinbox allows ±100000. Only the
 internal ±15 Nm clamp and the 25 Nm output clamp stand between a typo and a full-scale command.
 
-### F8 — Torque-variance error latches and floods UART  🟡
+### F8 — The error framework cannot detect anything, but pays for the attempt every cycle  🟡
 
-`torque_failure_count` is incremented and **never reset** (`error_types.h:123`; only other mention
-is the declaration at `JointData.h:80`). With `torque_std_dev_multiple = 10` over a 100-sample
-window, the first −12 Nm pulse after a quiet window trips it. From then on the check returns true
-**every control cycle, forever**, calling `ErrorReporter::report()` — ~1000 UART messages/second
-across two ankles. Two aggravators:
+> **CORRECTION (2026-08-12).** Two earlier revisions of this section were wrong, and the second was
+> badly wrong. It claimed `TorqueVarianceError` **latches** and therefore floods the UART with
+> ~1000 blocking messages/second, costing **~23 % of the control loop**. That was prompted for
+> re-examination by an excellent objection: *if the Teensy→Nano link were really that saturated,
+> the BLE stream should show obvious drops — and it doesn't.* Correct. **The latch never happens,
+> because the check is mathematically incapable of firing.** The ~23 % figure, the ~1000 msg/s
+> figure, and the claim that this feeds F3's D-term dropouts are all **retracted**. An earlier
+> revision also claimed the error queue leaks; that was retracted separately and is confirmed below.
 
-- `Joint.cpp:1127` — `for (i=0; i < errorQueueSize(); i++) pop()` drains only half the queue each
-  pass, so `std::queue<ErrorCodes>` **grows without bound** on the heap.
-- Every check calls `online_std_dev`, which takes the queue **by value and copies it again**
-  (`Utilities.cpp:344`) — ~4000 deque copies/s across both ankles plus `check_response`. Real,
-  unmodelled control-loop jitter.
+**Why `TorqueVarianceError` can never fire.** It tests whether the newest torque sample lies more
+than `torque_std_dev_multiple = 10` **sample** standard deviations from the mean of a window that
+**contains that same sample**. For a value inside its own sample of size *n*, using the sample sd
+(`utils::online_std_dev` divides `M2` by `n-1`, `Utilities.cpp:372`), the maximum possible
+studentized deviate is:
 
-All error handlers have their `motor.enabled = false` **commented out**, so an error takes no
-protective action.
+```
+max |x_i - mean| / s  =  (n - 1) / sqrt(n)
+n = torque_data_window_max_size = 100   ->   99 / 10  =  9.9
+```
+
+9.9 < 10 for **any input whatsoever**. Verified numerically against the exact transcribed algorithm:
+
+| input | max &#124;z&#124; observed | fires? |
+|---|---|---|
+| quiet standing, ±2 ADC counts | 3.60 | no |
+| walking transparency, ±3 Nm | 3.20 | no |
+| quiet → the −12 Nm spline pulse (my claimed trigger) | 9.88 | **no** |
+| 101 zeros then a +1000 Nm spike | 9.90 | no |
+| pathological: 99 equal values + 1 huge, repeated | 9.90 | no |
+
+Identical constants and divisor on `backup_branch_with_UW_edits`, so this has never fired on either
+branch.
+
+**What that means for the rest of the framework.** Five of the eight checks are hardcoded
+`return false`. `MotorTimeoutError` needs `motor.timeout_count >= 40`, but the only code that would
+increment it (`_CANMotor::_handle_read_failure`) is commented out. `TorqueVarianceError` is
+impossible as shown. That leaves **`TorqueOutOfBoundsError` (|torque| > 60 Nm) as the only reachable
+check**, and only on a railed or faulted torque sensor — never in normal walking.
+
+So in normal operation: **zero errors fire, zero UART messages are sent, and there is no flood.**
+
+**What it does still cost.** Every control cycle, per joint, the framework does 8 `std::map::at()`
+lookups, 8 virtual `check()` calls, and — inside `TorqueVarianceError::check` — **two full copies of
+a 100-element `std::queue<float>`** (`online_std_dev` takes its argument by value *and* copies it
+again internally, `Utilities.cpp:344,346`) plus a 100-iteration Welford pass with a float divide per
+iteration. Across two ankles that is **~4000 heap-allocating deque copies per second** inside a hard
+real-time loop, to reach a conclusion that can never change. Order **~1 % of the 2000 µs cycle —
+estimated, not measured.** Real waste and a heap-fragmentation risk, but not a jitter driver.
+
+Note `_CANMotor::check_response` calls the same `online_std_dev` on a 25-element queue every cycle
+per motor. That is **live logic** (it re-enables a motor whose measured current has gone static) and
+is *not* covered by the Part 4 disable, so roughly half the deque churn remains.
+
+**Confirmed (not retracted):** the error queue does **not** leak. The half-draining loop
+`for (i = 0; i < errorQueueSize(); i++) pop()` leaves `floor(S/2)` entries, so with `k` errors per
+cycle the steady state `R = floor((R+k)/2)` converges to `R ≈ k`. Measured on the host with a forced
+`k = 8`: converges to 7, peaks at 15. Still a defect (bursts are reported with a lag), not a leak.
+
+**Confirmed:** all handlers have `motor.enabled = false` commented out, so a detected error takes no
+protective action, and `ComsMCU::handle_errors` only forwards on a *change* of code — one BLE
+notification per trial at most, to a signal nothing consumes.
+
+**The latent hazard is real even though the current cost is not.** If someone "fixes" the detector
+by lowering `torque_std_dev_multiple` to something reachable without fixing the rest, everything the
+retracted revision described happens for real: `torque_failure_count` is never reset so the error
+latches permanently, `Joint.cpp` reports once per joint per cycle, and each report ends in
+`UARTHandler::UART_msg` → `MY_SERIAL.flush()`, which **spins until the UART shift register drains**
+(~234 µs per 6-byte SLIP frame at 256000 baud 8N1) → ~469 µs per 2000 µs cycle across two ankles,
+and ~1000 msg/s into a coms MCU whose `ComsMCU::update_UART` consumes at most **one message per
+1000 µs**. That is what the Part 4 switch and its checklist exist to prevent.
 
 ### F9 — `-fpermissive` hides a const-map bug  🟡
 
@@ -303,7 +405,7 @@ Every finding above, checked against the UW branch. "Present" means the same def
 | B20 | Continuous zero-torque frames while disabled | **ABSENT on UW** | UW uses `else if (_prev_motor_enabled)` — a one-shot zero frame, so the AK60v3 "hold last command" freeze is present. |
 | B21 | Unconditional CAN drain (`read_data` every cycle) | **ABSENT on UW** | UW gates on `if (_motor_data->enabled)`, so the FIFO backlog / positional-routing starvation and the frozen current-variance signal are both present. |
 | B22 | End Trial deferred reset | **ABSENT on UW** | UW's `get_system_reset` reboots inline after `delay(10)` → the AK60v3 holds its last command through the reboot. |
-| B23 | F8 torque-variance latch + queue half-drain | **PRESENT** | Identical in both. |
+| B23 | F8 error framework inert but costly | **PRESENT** | Identical constants (`torque_std_dev_multiple = 10`, `torque_data_window_max_size = 100`) and the same `M2/(n-1)` divisor, so `TorqueVarianceError` has never been able to fire on either branch. *(Row revised with F8 — the "latches and floods the UART" description applied to neither branch.)* |
 | B24 | Error handlers neutered (`motor.enabled = false` commented out) | Present | Identical. |
 | B25 | `status_defs::messages::error` never set | Present | Identical. |
 
@@ -311,8 +413,8 @@ Every finding above, checked against the UW branch. "Present" means the same def
 
 | # | Finding | UW branch | Notes |
 |---|---|---|---|
-| B26 | F1 ~2 s Stream-timeout stall in `set_controller_params` | **PRESENT** | Identical loop structure. |
-| B27 | `SD.begin()` remount on every controller change | **PRESENT** (worse) | 6 call sites on UW; ours caches via `_sd_ready()`. So UW's controller-change stall is the ~2 s **plus** a card remount. |
+| B26 | F1 synchronous SD I/O in the control loop | **PRESENT** | Identical loop structure, including the `break` that bounds it. *(Row revised with F1 — the retracted ~2 s figure applied to neither branch.)* |
+| B27 | `SD.begin()` remount on every controller change | **PRESENT** (worse) | 6 call sites on UW; ours caches via `_sd_ready()`. UW's controller-change stall is therefore the SD read **plus** a full card remount — so on UW this is the dominant cost, and it is what `a6413c9` removed on our branch. |
 | B28 | `set_default_parameters()` on trial start wipes GUI edits | Present | Identical. |
 
 ## 2.5 GUI
@@ -458,9 +560,10 @@ Stage by stage, what can still go wrong:
 | `RtBridge.feed_bytes` | OK | Parses 13, pads to 16. |
 | CSV / plots / readouts | OK | All resolved by name. |
 
-**Not fixed by this change** (unchanged, still open): F1 SD stall, F2 clamp saturation, F3 D-term
-noise, F4 gain-schedule discontinuity, F5 torque doubling, F6 BleParser wedge, F7 disabled bounds,
-F8 error latch/leak, F9 const map, F10 EOF spin, and every item in §1.3 except the logging ones.
+**Not fixed by this change** (unchanged, still open): F1 SD I/O in the loop, F2 clamp saturation,
+F3 D-term noise, F4 gain-schedule discontinuity, F5 torque doubling, F6 BleParser wedge/stale
+re-push, F7 disabled bounds, F9 const map, F10 EOF spin, and every item in §1.3 except the logging
+ones. **F8 is addressed separately in Part 4.**
 
 ## 3.6 What to check on first hardware run
 
@@ -470,4 +573,130 @@ F8 error latch/leak, F9 const map, F10 EOF spin, and every item in §1.3 except 
 3. Confirm the plot x-axis advances smoothly (exo clock) rather than in bursts.
 4. With the joint clamped and unworn, run a single spline step and watch for `TORQUE CLAMP:` on
    serial — F2 predicts it will fire.
-5. Time a controller change; F1 predicts a ~2 s freeze.
+5. Bracket `set_controller_params()` with `micros()` and log the delta once, to put a real number on
+   F1 (expected: milliseconds).
+6. Instrument the actual loop period (`delta_t` in `Exo::run`) and count cycles over 2200 us. This
+   is now the **open question**, not a confirmation: F8 turned out to be inert, so whatever is
+   causing F3's D-term dropouts has not been found yet. Candidates still on the table are F1's SD
+   I/O, the surviving `check_response` deque copies, and plain superloop variance.
+
+---
+
+# PART 4 — Disabling the error manager / error reporter (F8)
+
+## 4.1 Decision
+
+F8 is disabled rather than repaired, behind a single switch:
+**`ERROR_MANAGER_ENABLED` in `Config.h` (currently `0`)**.
+
+The rationale, written out in full at the define itself:
+
+- **It protects nothing.** Every handler in `error_types.h` has its `motor.enabled = false` line
+  commented out, so a detected error takes no action.
+- **It cannot detect anything either.** Five of the eight checks are hardcoded `return false`;
+  `MotorTimeoutError` is unreachable; `TorqueVarianceError` is mathematically incapable of firing
+  (10 σ threshold against a 9.9 σ ceiling — see the corrected F8). Only `TorqueOutOfBoundsError`
+  can fire, and only on a railed/faulted torque sensor.
+- **Nothing receives the output.** The chain ends at `deviceErrorReceived`, which `MainWindow` only
+  connects inside the `if remote.is_bound():` block. With no UDP subscriber attached the signal is
+  dropped. It is not in the UI, not in the CSV, not even in the GUI log file.
+- **It still costs every cycle.** ~4000 heap-allocating deque copies/second plus 100-iteration
+  Welford passes, to reach a conclusion that can never change. Estimated ~1 % of the loop — small,
+  but pure waste, and heap churn inside a hard real-time loop.
+- **It is a loaded gun.** Lowering the σ threshold without fixing the rest turns it into ~1000
+  blocking UART messages/second and ~23 % of the control loop (see the end of F8). The switch plus
+  §4.5's checklist is what stops that from being a one-line mistake.
+
+The real torque ceiling — `MAX_JOINT_TORQUE_NM` enforced in `_CANMotor::send_data()`, together with
+its non-finite rejection — is **untouched** and remains the actual protection. Disabling this
+framework removes no safety behaviour, because it had none.
+
+## 4.2 Implementation
+
+Purely additive: **82 insertions, 0 deletions.** No existing line was modified or removed; the
+original logic is intact inside `#else` branches, so re-enabling is a one-character change.
+
+| File | Change |
+|---|---|
+| `Config.h` | new `#define ERROR_MANAGER_ENABLED 0` with the full rationale and a re-enable checklist |
+| `ErrorManager.h` | `run()` early-returns `false` when disabled, compiling out all eight checks; includes `Config.h`; fail-closed `#ifndef` fallback |
+| `ErrorReporter.h` | `report()` early-returns when disabled (second gate, in case a new caller appears); same include + fallback |
+
+Short-circuiting `ErrorManager::run()` is safe because every field the checks touch —
+`smoothed_motor_torque`, `torque_error`, `torque_data_window`, `torque_failure_count` — is written
+**and read only inside the check that owns it**. Verified by grepping each one across the whole
+firmware: no external consumer. `motor.timeout_count` is only ever set to `0` elsewhere
+(`Motor.cpp:205,228`) and read in `enable()` and the SD logger, so nothing depended on
+`MotorTimeoutError` clearing it.
+
+## 4.3 Verification
+
+The **real edited headers** were copied verbatim into a stub environment and compiled + executed on
+the host with `g++ -std=gnu++17 -fpermissive -Wall -Wextra`, driven for 5000 iterations (10 s at
+500 Hz) exactly the way `run_joint()` drives them.
+
+Disabled (`ERROR_MANAGER_ENABLED 0`) — compiles with **no diagnostics**:
+
+```
+  PASS  run() reports no error
+  PASS  no checks executed (JointData untouched)
+  PASS  torque_failure_count never incremented
+  PASS  error queue stayed empty
+  PASS  no ErrorReporter::report() calls
+  PASS  no blocking UART sends
+  PASS  direct report() call is also a no-op
+  PASS  popError() unreachable while disabled
+```
+
+Re-enabled (`ERROR_MANAGER_ENABLED 1`) — also compiles with no diagnostics, proving the switch is
+usable and the `#else` branch was not broken:
+
+```
+  PASS  checks DID execute when enabled
+  PASS  reports happened when enabled / UART sends happened when enabled
+  INFO  8 errors pushed per cycle over 5000 cycles
+  INFO  peak queue length: 15,  final queue length: 7
+  INFO  reports: 39993  (8.00 per cycle)
+  PASS  queue is BOUNDED, not a leak
+```
+
+That last result is also the empirical confirmation of the F8 correction: with `k = 8` errors per
+cycle the queue converges to 7 and peaks at 15 (= `R + k`), exactly as `R = floor((R+k)/2)`
+predicts. It does **not** leak.
+
+The Part 3 real-time-stream harnesses were re-run afterwards and still pass, confirming no
+cross-contamination between the two changes.
+
+## 4.4 End-to-end re-analysis — every path this touches
+
+| Path | Effect | Verdict |
+|---|---|---|
+| Teensy boot | `error_map` still constructs its 8 objects at static init (unchanged, now unused — a few dozen bytes) | no change |
+| `run_joint()` x6 joints | `error` is always `false`; the `if (error)` body is dead code | no change in behaviour; `popError()` on an empty queue (which would be UB) is now unreachable, i.e. **safer** |
+| Teensy 500 Hz loop | ~4 of the ~8 deque copies/cycle removed, plus two 100-iteration Welford passes and 16 map lookups + 16 virtual calls | **small improvement**, estimated ~1 % of the cycle. The other ~4 copies/cycle are `_CANMotor::check_response`, which is live logic and stays. **No** measurable jitter change should be expected — the retracted ~23 % figure was wrong. |
+| Teensy -> Nano UART | **no change** | The framework was never sending anything, because no check can fire. The earlier claim that error spam was saturating the Nano's intake (which caps at one message per 1000 us) is **retracted** — that is a hazard of *re-enabling* naively, not a description of today. |
+| Nano `handle_errors()` | `_data->error_code` stays `NO_ERROR`, so the `!=` guard never fires and no BLE error notification is sent. `ExoBLE::setup()`'s one-time `send_error(0,0)` at boot is unchanged | no change |
+| GUI `_on_error` / `deviceErrorReceived` | never fires | **no observable change** — it was already connected only inside the remote-bound block and had no UI, CSV or log consumer |
+| SD logger | logs `motor.timeout_count`, which is `0` either way; logs none of the error-check fields | no change |
+| Real-time stream (Part 3) | separate code path entirely | unaffected; harnesses re-run and pass |
+| Torque clamp / NaN rejection | untouched | still active |
+
+**Conclusion: no functional regression.** The change removes work that could never produce an output
+at all, let alone one anybody consumed. The only behavioural delta is a small reduction in per-cycle
+computation and heap churn; **do not expect a visible improvement**, and if loop-timing jitter does
+change noticeably after this, that means something else was going on and is worth chasing.
+
+## 4.5 Before re-enabling
+
+Do not set `ERROR_MANAGER_ENABLED` back to `1` until all of these are true:
+
+1. Handlers take a real action (or the check is removed).
+2. `torque_failure_count` is reset, so `TorqueVarianceError` stops latching.
+3. `utils::online_std_dev` stops taking its queue by value and copying it again internally.
+4. Reporting is non-blocking or rate-limited — `UARTHandler::UART_msg` ends in a spinning
+   `MY_SERIAL.flush()`, and the Nano can only consume ~1000 messages/second.
+5. The half-draining loop in `Joint.cpp` (`for (i = 0; i < errorQueueSize(); i++) pop()`) is fixed.
+6. `deviceErrorReceived` is wired to something a human actually sees.
+
+A genuine torque cutout would be better written as a direct check with a direct action than routed
+through this framework.
