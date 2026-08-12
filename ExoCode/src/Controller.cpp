@@ -208,7 +208,21 @@ float _Controller::_pid(float cmd, float measurement, float p_gain, float i_gain
 {	
 	// Disable pid for torque control if the torque sensor isn't calibrated
 	if (_joint_data->torque_offset_reading == 0) {
-		Serial.print("\nTorque sensor not calibrated. Closed-loop torque control disabled.");
+		// ---- 500 Hz Serial print removed (left here on purpose, see below) ----
+		// Serial.print("\nTorque sensor not calibrated. Closed-loop torque control disabled.");
+		//
+		// This ran once per joint per control cycle, i.e. ~1000 lines/second at 500 Hz with two
+		// ankles, for as long as the fault persisted. Two problems with that:
+		//   1. Teensy's usb_serial_write BLOCKS for up to ~120 ms when the port is enumerated but
+		//      nothing is draining it, which is a control-loop stall on the exact code path that
+		//      is already misbehaving.
+		//   2. Nobody sees it anyway. The exo runs on battery with no USB attached during a
+		//      trial, so the message goes nowhere.
+		// Kept commented rather than deleted because the CONDITION is genuinely worth knowing
+		// about - it means closed-loop torque control is silently off - but reading serial off
+		// this hardware mid-trial is impractical, so this is not a useful debug channel any time
+		// soon. If this state ever needs to be visible, surface it on a real-time channel or in
+		// the exo status word so it reaches the GUI, rather than reinstating the print.
 		return cmd;
 	}
     const float expected_us = (1.0f / LOOP_FREQ_HZ) * 1000000.0f;

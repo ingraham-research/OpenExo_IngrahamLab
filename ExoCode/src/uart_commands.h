@@ -640,11 +640,19 @@ namespace UART_command_handlers
         #if REAL_TIME_I2C
                 return;
         #endif
-        if (rt_data::len != msg.len)
+        //Bound-check against the buffer CAPACITY instead of demanding an exact match. The old test
+        //was `rt_data::len != msg.len`, where `len` was the capacity - so it rejected every
+        //correctly sized message, exactly like the I2C guard did. Copy what arrived, clamped.
+        //
+        //NOTE: this UART fallback is dead while REAL_TIME_I2C is 1, and it has a second latent
+        //problem: rt_data::float_values / new_rt_msg are `static` in a header, so every
+        //translation unit gets its own copy. The writer here and the reader in ComsMCU.cpp are
+        //different TUs, so this path cannot actually deliver data until those become extern.
+        if (msg.len == 0 || msg.len > rt_data::capacity)
         {
             return;
         }
-        for (int i = 0; i < rt_data::len; i++)
+        for (int i = 0; i < msg.len; i++)
         {
             rt_data::float_values[i] = msg.data[i];
         }
@@ -951,9 +959,20 @@ namespace UART_command_utils
 
         //logger::println("UART_command_utils::handle_message->got message: ");
         //UART_msg_t_utils::print_msg(msg);
-		
-		Serial.print("\nmsg.command:");
-		Serial.print(msg.command);
+
+		// ---- Per-message Serial print removed (left here on purpose, see below) ----
+		// Serial.print("\nmsg.command:");
+		// Serial.print(msg.command);
+		//
+		// handle_msg() is called from the 500 Hz control loop on the Teensy and from the coms
+		// loop on the Nano, once per inbound UART message. Normally that is a trickle, but any
+		// condition that spams UART turns it into a torrent - the latched TorqueVarianceError,
+		// for instance, reports every single control cycle, which is ~1000 messages/second and
+		// therefore ~1000 blocking Serial writes/second right inside the control loop.
+		// Kept commented because it is the fastest way to see what the two boards are saying to
+		// each other, but it is not a practical debug channel any time soon: getting serial out
+		// of this hardware means tethering a board that normally runs untethered on battery.
+		// Prefer the BLE/RT stream or a rate-limited one-shot if this needs to be observed.
         switch (msg.command)
         {
         case UART_command_names::empty_msg:

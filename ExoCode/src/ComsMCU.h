@@ -18,6 +18,7 @@
 #include "ExoData.h"
 #include "BleMessageQueue.h"
 #include "ParamUpdateValidation.h"
+#include "RealTimeI2C.h"    //rt_data::*_RT_LEN / rt_data::capacity for the real-time payload length
 
 /**
  * @brief ComsMCU class. 
@@ -93,10 +94,20 @@ class ComsMCU
         
         //Data
         ExoData* _data;
-        
+
         //Battery
         // _Battery* _battery;
 
+        // How many real-time floats this exo configuration sends. Derived from the config in the
+        // constructor and used as the FALLBACK length; the authoritative length comes back from
+        // real_time_i2c::poll(), which reads it off the packet itself. It is deliberately not
+        // rt_data::capacity: sending the capacity is what made update_gui() write 6 floats past
+        // the end of BleMessage::data and put garbage on the BLE stream.
+        uint8_t _rt_len = (uint8_t)rt_data::BILATERAL_ANKLE_RT_LEN;
+
+        // NOTE: index 1 is "Measured Torque (L)" on the bilateral_ankle layout, so a mark
+        // increment overwrites one sample of a real signal. Dormant today (the Qt GUI's Mark
+        // button only bumps a local counter and never sends 'N'), but it is a live landmine.
         const int _mark_index = 1;
 
         // End-trial reset handshake state machine: drives Nano->GUI shutdown progress and waits
