@@ -107,8 +107,9 @@ control cycle, ~1000/s. It looked like a prime loop-timing suspect. It is not:
 
 The reported behaviour — plot refreshes on the End Trial click, then 1–2 huge readings appear — is
 the exact signature already documented in
-`End-Trial-Malformed-Enable-Frame-Right-Ankle-Damage.md` §"artifact", and **that part of that
-document was not retracted**:
+`superseded/End-Trial-Malformed-Enable-Frame-Right-Ankle-Damage.md` §"artifact", and **that part of
+that document was not retracted** (only its root-cause chain was; the file was moved to
+`superseded/` on 2026-08-12):
 
 - `_on_rt_update` **always plots** (`MainWindow.py:244`) but **only writes CSV if the file is open**
   (`MainWindow.py:252`), and `_on_end_trial` closes the CSV while notifications are still arriving —

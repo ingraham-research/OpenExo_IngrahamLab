@@ -99,14 +99,21 @@
 
 	//End Trial also drops the physical motor-enable pin (logic_micro_pins::enable_*_pin), not just
 	//the `enabled` software flag. Belt-and-braces against any held CAN command surviving the reboot.
-	//ON (1), BUT NOT YET BENCH-CHECKED -- verify before anyone wears the exo. It is not known
-	//whether that pin cuts driver power (joint free-spins, safe) or asserts a driver disable that
-	//SHORTS THE PHASES (velocity-dependent brake on both ankles at once, a fall hazard if End Trial
-	//is pressed mid-stride). To check: power the exo, back-drive an ankle by hand, drop the pin,
-	//and feel whether it goes free or stiff. Free -> keep this at 1. Stiff -> set it to 0.
 	//See uart_commands.h::get_system_reset.
-	//Note this path is untested code: the only other writer of is_on is the estop branch in
-	//Motor.cpp::on_off(), and estop is hardcoded off in Exo.cpp, so it has likely never run.
+	//
+	//ON (1) DELIBERATELY -- reviewed and confirmed 2026-08-12. This note previously demanded a bench
+	//check before anyone wore the exo, because it is not known whether that pin cuts driver power
+	//(joint free-spins, safe) or asserts a driver disable that SHORTS THE PHASES (a velocity-
+	//dependent brake on both ankles at once). That distinction only matters if End Trial is pressed
+	//MID-STRIDE -- and End Trial is an end-of-session action, so it should not be. If it ever is hit
+	//mid-stride that is a hazard whether or not this toggle is set, so gating on it buys nothing.
+	//Keeping it ON for the de-powering benefit.
+	//
+	//Still true, and worth knowing if this path ever misbehaves: the pin's actual electrical effect
+	//has never been measured, and this is lightly-exercised code -- the only other writer of is_on
+	//is the estop branch in Motor.cpp::on_off(), and estop is hardcoded off in Exo.cpp, so it has
+	//likely never run. To measure it if you ever want the answer: power the exo, back-drive an ankle
+	//by hand, drop the pin, and feel whether it goes free or stiff.
 	#define END_TRIAL_CUTS_MOTOR_POWER 1
 
     //MACRO magic to convert a define to a string

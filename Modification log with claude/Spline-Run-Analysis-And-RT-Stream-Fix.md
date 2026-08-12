@@ -10,6 +10,13 @@ the CAN frame, plus one targeted fix (the Teensy → Nano → GUI real-time stre
 profile, git archaeology on the RT payload length, and host-side compile + execution of the edited
 transport logic. No hardware was involved; every hardware-behaviour claim below is marked as such.
 
+**Deliberately derived independently.** This analysis was produced without reading the other
+documents in this folder, at the user's instruction, so it would not inherit their conclusions.
+Cross-references were added afterwards (2026-08-12). Prior work covering overlapping ground:
+`Spline-Jitter-Diagnosis.md` (round 1 — the gain scheduler and the `percent_gait` int→float fix,
+both of which F3 and F7 rediscover from the other direction), `Spline-Jitter-Round-2-SD-Logging-
+Regression.md`, and `End-Trial-Diagnosis-Correction.md`. See `README.md` for the full index.
+
 ---
 
 # PART 1 — Analysis

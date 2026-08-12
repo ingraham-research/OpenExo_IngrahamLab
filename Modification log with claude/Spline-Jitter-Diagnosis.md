@@ -2,9 +2,14 @@
 
 **Date:** 2026-07-22
 **Scope:** Teensy 4.1 firmware (`ExoCode/src/Controller.cpp`, `ExoCode/src/Side.cpp`).
-**Status:** Both fixes committed on branch `add_remote_control`, **pending bench validation** (nothing
-run on the motors during this investigation). Commit `7f95828` = spline gain scheduler; the Side.cpp
-int→float change is the working-tree diff alongside it.
+**Status:** ~~Both fixes committed on branch `add_remote_control`~~ — **updated 2026-08-12: that
+branch no longer exists.** Both fixes live on **`fix_spline_jitter`**: `7f95828` = the spline gain
+scheduler, `226854b` = the `Side.cpp` int→float `percent_gait` change. Still **pending bench
+validation** (nothing was run on the motors during this investigation).
+**Round 2 / follow-ups:** `Spline-Jitter-Round-2-SD-Logging-Regression.md`, then
+`Spline-Run-Analysis-And-RT-Stream-Fix.md` (2026-08-12), which re-derives this ground independently
+and extends it — see its F3 (the D-term noise gain this document's root cause #1 addresses) and F7
+(the "end nodes must be zero" invariant flagged under root cause #3 below).
 
 ---
 

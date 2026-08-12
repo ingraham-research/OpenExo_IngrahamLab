@@ -6,8 +6,10 @@ this document says so plainly rather than substituting another chain. Two defens
 implemented that make the failure class impossible regardless of which mechanism was responsible.
 **Code changed:** `Motor.cpp` (`send_data`, `read_data`), `uart_commands.h` (`get_system_reset`),
 `Config.h` (new flag). **Not compiled, not flashed, not tested.**
-**Supersedes:** `End-Trial-Malformed-Enable-Frame-Right-Ankle-Damage.md` (root cause section) and
-Part 1 of `Branch-Comparison-End-Trial-Regression-And-Must-Keep-Edits.md`.
+**Supersedes:** `superseded/End-Trial-Malformed-Enable-Frame-Right-Ankle-Damage.md` (root cause
+section) and Part 1 of `superseded/Branch-Comparison-End-Trial-Regression-And-Must-Keep-Edits.md`.
+Both were moved into `superseded/` on 2026-08-12; **Part 2 of the branch-comparison doc is still
+current** (the must-keep vs optional edit tiers) — see `README.md`.
 
 ---
 
@@ -153,13 +155,22 @@ Draining every cycle prevents that, and simultaneously un-freezes the variance s
 `_Motor::on_off()` drives `logic_micro_pins::enable_*_pin` low on the next control cycle — inside
 the `reset_pending` deferral and after zero frames have gone out.
 
-**Gated behind `END_TRIAL_CUTS_MOTOR_POWER`, which defaults to 0 (OFF).** It is not known whether
-that pin cuts driver power (joint free-spins — safe) or asserts a driver disable that shorts the
-phases (velocity-dependent brake on **both** ankles at once — a fall hazard mid-stride). It is also
-untested code: the only other writer of `is_on` is the estop branch, and estop is hardcoded off.
+**Gated behind `END_TRIAL_CUTS_MOTOR_POWER`.**
 
-**Bench check to enable it:** power the exo, back-drive an ankle by hand, drop the pin, feel whether
-it goes free or stiff. Free → set the flag to 1. Stiff → leave it 0.
+> **UPDATED 2026-08-12 — this flag is now `1` (ON), deliberately.** This section previously said it
+> "defaults to 0 (OFF)", which had drifted out of step with `Config.h` and was the wrong direction
+> for a doc to be wrong in. Decision recorded by the user: **End Trial is not pressed mid-stride** —
+> it is an end-of-session action — and if it ever is pressed mid-stride that is a hazard whether or
+> not this toggle is set, so gating on it buys nothing. The flag stays ON for the belt-and-braces
+> benefit of physically de-powering the driver after the zero frames have gone out.
+
+It is still not established whether that pin cuts driver power (joint free-spins — safe) or asserts
+a driver disable that shorts the phases (velocity-dependent brake on both ankles). It is also still
+lightly-exercised code: the only other writer of `is_on` is the estop branch, and estop is hardcoded
+off. Neither changes the decision above, but both are worth knowing if this path ever misbehaves.
+
+**Optional bench check, if you ever want the answer:** power the exo, back-drive an ankle by hand,
+drop the pin, feel whether it goes free or stiff.
 
 Scoped to the reset path only. It must **not** be copied into `motors_off` (`'w'` = the Pause
 button) — nothing sets `is_on` back to true except the first-run init block in `ExoCode.ino`, so the

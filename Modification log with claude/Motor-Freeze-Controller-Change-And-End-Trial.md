@@ -2,8 +2,15 @@
 
 **Date:** 2026-07-22
 **Scope:** Teensy 4.1 firmware (`ExoCode/`). No Nano, no GUI changes.
-**Status:** Edits made, **pending on-device build/flash validation.** Could not compile in the editing
-environment (no Teensy toolchain). Nothing committed.
+**Status:** ~~Edits made, pending on-device build/flash validation. Nothing committed.~~
+**Updated 2026-08-12: both fixes were committed as `a6413c9`** ("Attempt to solve a bug where
+changing controller or ending trial cause the motor to hang…"). Still not independently
+bench-validated for the freeze symptom itself.
+**Later correction:** a 2026-08-12 analysis initially claimed a large residual stall remained in
+`set_controller_params()` (~2 s per joint from `Stream` EOF timeouts). That was **wrong** — a
+`break` at `ParamsFromSD.cpp:648` ends the read loop after one pass, so no timeout occurs. The
+residual cost is milliseconds of SD I/O, which suggests fix A below was the substantive one. See
+`Spline-Run-Analysis-And-RT-Stream-Fix.md` §F1.
 **Read alongside:** `Modification log with claude/SD-Card-Logging-and-End-Trial-Reset.md` (the
 end-trial reset/shutdown handshake this builds on — if the reset misbehaves, cross-check both),
 and `docs/superpowers/specs/2026-07-07-end-trial-shutdown-progress-design.md`.

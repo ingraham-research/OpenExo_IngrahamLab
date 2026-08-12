@@ -3,8 +3,16 @@
 **Date:** 2026-07-23
 **Scope:** `Python_GUI/services/RtBridge.py`, `Python_GUI/MainWindow.py` (GUI), `ExoCode/src/ExoBLE.cpp` (Nano).
 **Status:** **Root cause identified (RF link quality) and detection shipped. The transport is deliberately
-NOT "fixed" in software** — see *Why we stopped here*. GUI warning code committed as `ac1c88e`; the
-row-count header, phantom rejection, and exact row check are working-tree changes on top of it.
+NOT "fixed" in software** — see *Why we stopped here*. GUI warning code committed as `ac1c88e`;
+~~the row-count header, phantom rejection, and exact row check are working-tree changes on top of
+it~~ — **updated 2026-08-12: those were committed as `53079b5`.**
+
+> **Known gap in the exact row check (found 2026-08-12, not yet fixed).** The firmware's `n,<rows>`
+> header counts `row_count + 1`, but the GUI parses the header line itself as an extra row, so
+> `actual_rows` is normally `declared_rows + 1`. The `actual_rows < declared_rows` test therefore
+> only trips once **two or more** rows are lost — a single lost row slips through it, and is caught
+> only by the weaker malformed-row and left/right-asymmetry heuristics. See
+> `Spline-Run-Analysis-And-RT-Stream-Fix.md` §1.1, precondition 1.
 **Read alongside:** `Modification log with claude/Remote-Control-UDP.md` (the same `'f'` /
 `update_controller_param` path) and `Spline-Jitter-Round-2-SD-Logging-Regression.md` (the session this
 was found during).

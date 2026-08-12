@@ -8,6 +8,24 @@ deliberately not assumed. No code changed by this audit.
 **Verdict on goal 2: one quantitative, branch-specific mechanism reaches the damage level using
 only ordinary numbers. It is the best candidate found so far, and it is not proven.**
 
+> ### ⚠ PARTLY OVERTAKEN BY `3c08c77`, COMMITTED 38 MINUTES AFTER THIS AUDIT WAS WRITTEN
+> Noted 2026-08-12. Two things below are no longer current:
+>
+> 1. **"Protected by three accidents rather than by design" — no longer true for `enable()`/`zero()`.**
+>    `3c08c77` put an `is_AK60v3` guard at the **top of `_CANMotor::enable(bool)` and
+>    `_CANMotor::zero()` themselves**, so every caller is covered by construction. In particular the
+>    §"three accidents" claim that `Side::disable_motors` (`Side.cpp:62`) has **NO GUARD** and is
+>    "saved only because the function has zero callers" is **now false** — it is guarded at the
+>    callee. The audit's point that guarding at each call site was fragile is what motivated that
+>    change; treat this document as the argument, not the current state.
+> 2. **The 51.4 Nm ceiling below is superseded by 54.0 Nm.** That figure assumed
+>    `_I_MAX × Kt × gearing`. The AK60-6 unpacks the 12-bit torque field against ±12.0, not against
+>    our `_I_MAX` of 10.3, so the real held value is `12.0 × 4.5 = 54.0 Nm`. See
+>    `Motor-Current-Decode-Investigation.md` and the comment at `Motor.cpp::enable()`.
+>
+> Everything else here — the four-transmit-site map, the frame decode, the field table — still
+> stands and is still the clearest description of *why* those two frames are dangerous.
+
 ---
 
 # Goal 1 — Complete map of every path to the motor

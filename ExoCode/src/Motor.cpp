@@ -477,7 +477,12 @@ void _CANMotor::check_response()
             // wrong way. This destroyed the right ankle on 2026-07-23. This branch was the only
             // path that could still reach enable() for an AK60v3, and it is reachable only at
             // End Trial (it needs !enabled while the status is still an active trial).
-            // See Modification log with claude/End-Trial-Malformed-Enable-Frame-Right-Ankle-Damage.md
+            // NB: the document below has since had its ROOT CAUSE RETRACTED and has been moved to
+            // Modification log with claude/superseded/. The retraction is about *what armed* the
+            // path, not about what the frame does -- the frame decode and the damage record are
+            // unchanged, and this guard stays. Current account:
+            // Modification log with claude/End-Trial-Diagnosis-Correction.md
+            // See Modification log with claude/superseded/End-Trial-Malformed-Enable-Frame-Right-Ankle-Damage.md
             if (_motor_data->motor_type != (uint8_t)config_defs::motor::AK60v3)
             {
                 enable(true);
