@@ -3,4 +3,4 @@
 ,Parameter list for the ZeroTorque controller,,
 ,Parameter order: ,,
 use_pid,p_gain,i_gain,d_gain
-1,3,0,0.001
+0,3,0,0.001
