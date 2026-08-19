@@ -31,6 +31,18 @@ _EXO_TIME_WRAP_HALF = _EXO_TIME_WRAP_SPAN / 2.0  # 327.68 s: wrap-detection thre
 class ActiveTrialPage(QtWidgets.QWidget):
     """Active Trial page with two stacked real-time plots (simulated data)."""
 
+    # Which real-time channels each press of "Toggle Data Points" shows.
+    #   4-channel page -> (top curve A, top curve B, bottom curve A, bottom curve B)
+    #   2-channel page -> (top panel, bottom panel), one curve on each
+    # Channel numbers must match ExoCode/src/PlottingTitles.h getColumnHeader/bilateral_ankle.
+    # Channels 10-12 (Status, exo clock, battery) are deliberately absent: each already has its
+    # own GUI readout, and their scales would wreck a shared torque axis.
+    _PLOT_PAGES = (
+        (0, 1, 2, 3),   # Desired vs Measured torque, per leg
+        (4, 5, 6, 7),   # Toe FSR overlaid with the In Stance step change, per foot
+        (8, 9),         # Commanded torque - one leg per panel, never overlaid
+    )
+
     # Signals to be handled by MainWindow (placeholders can be wired later)
     endTrialRequested = QtCore.Signal()
     saveCsvRequested = QtCore.Signal()
@@ -346,7 +358,7 @@ class ActiveTrialPage(QtWidgets.QWidget):
         self.timer.timeout.connect(self._on_tick)
         self.timer.setTimerType(QtCore.Qt.PreciseTimer)
         # Toggle state: which 4-value block to plot (0..3 or 4..7)
-        self._block_index = 0  # 0 = data[0..3], 1 = data[4..7]
+        self._block_index = 0  # index into _PLOT_PAGES; see _page_slots()/_toggle_points()
         # Store dynamic parameter names from device
         self._param_names = []
         # Track real data start time
@@ -491,39 +503,38 @@ class ActiveTrialPage(QtWidgets.QWidget):
             pass
 
     def _update_labels(self):
-        """Update plot titles and legend names based on current block index."""
-        base = 4 * self._block_index
+        """Update plot titles and legend names for the current page (see _PLOT_PAGES).
 
-        def channel_name(offset: int) -> str:
-            index = base + offset
-            if index < len(self._param_names) and self._param_names[index]:
-                return self._param_names[index]
-            return f"Ch{index}"
-        
+        Also clears any curve the page does not use, so a 2-channel page leaves one clean trace
+        per panel instead of a stale one from the previous page.
+        """
+        slots = self._page_slots()
+
+        def channel_name(ch):
+            if ch is None:
+                return None
+            if ch < len(self._param_names) and self._param_names[ch]:
+                return self._param_names[ch]
+            return f"Ch{ch}"
+
+        def title(a, b):
+            return f"{a} vs {b}" if (a and b) else (a or b or "")
+
         try:
-            # Update top plot title and curve names
-            top_cmd_name = channel_name(0)
-            top_meas_name = channel_name(1)
-            self.plot_top.setTitle(f"{top_cmd_name} vs {top_meas_name}")
-            
-            # Update legend items
-            self.plot_top.legend.clear()
-            self.curve_top_cmd.opts['name'] = top_cmd_name
-            self.curve_top_meas.opts['name'] = top_meas_name
-            self.plot_top.legend.addItem(self.curve_top_cmd, top_cmd_name)
-            self.plot_top.legend.addItem(self.curve_top_meas, top_meas_name)
-            
-            # Update bottom plot title and curve names
-            bot_a_name = channel_name(2)
-            bot_b_name = channel_name(3)
-            self.plot_bottom.setTitle(f"{bot_a_name} vs {bot_b_name}")
-            
-            # Update legend items
-            self.plot_bottom.legend.clear()
-            self.curve_bot_a.opts['name'] = bot_a_name
-            self.curve_bot_b.opts['name'] = bot_b_name
-            self.plot_bottom.legend.addItem(self.curve_bot_a, bot_a_name)
-            self.plot_bottom.legend.addItem(self.curve_bot_b, bot_b_name)
+            names = [channel_name(ch) for ch in slots]
+
+            for plot, curves, pair in (
+                (self.plot_top, (self.curve_top_cmd, self.curve_top_meas), (0, 1)),
+                (self.plot_bottom, (self.curve_bot_a, self.curve_bot_b), (2, 3)),
+            ):
+                plot.setTitle(title(names[pair[0]], names[pair[1]]))
+                plot.legend.clear()
+                for curve, idx in zip(curves, pair):
+                    if names[idx] is None:
+                        curve.setData([], [])       # unused on this page
+                        continue
+                    curve.opts['name'] = names[idx]
+                    plot.legend.addItem(curve, names[idx])
         except Exception:
             pass
 
@@ -572,15 +583,31 @@ class ActiveTrialPage(QtWidgets.QWidget):
         # Reset real data timing when switching from sim to real data
         self._real_data_t0 = None
 
+    def _page_slots(self) -> tuple:
+        """Channel index for each of the four fixed curves, None where a curve is unused.
+
+        Order is (top curve A, top curve B, bottom curve A, bottom curve B). A 2-channel page
+        puts one channel alone on each panel, which is what Commanded Torque needs -- overlaying
+        the two legs on a shared axis hides exactly the left/right difference we care about.
+        """
+        page = self._PLOT_PAGES[self._block_index % len(self._PLOT_PAGES)]
+        if len(page) == 4:
+            return (page[0], page[1], page[2], page[3])
+        return (page[0], None, page[1], None)   # 2-channel page: one curve per panel
+
+    def _page_label(self, block_index: int) -> str:
+        page = self._PLOT_PAGES[block_index % len(self._PLOT_PAGES)]
+        return f"{page[0]}-{page[-1]}" if len(page) > 1 else str(page[0])
+
     def _toggle_points(self):
-        # Toggle which 4-value block we plot
-        self._block_index = 1 - self._block_index
-        self.btn_toggle_points.setText(
-            "Show Data 0-3" if self._block_index == 1 else "Show Data 4-7"
-        )
+        # Cycle through the pages. This used to flip between only two 4-channel blocks (0-3 and
+        # 4-7), which left every channel from 8 up unreachable.
+        self._block_index = (self._block_index + 1) % len(self._PLOT_PAGES)
         self._clear_plot_buffers()
-        # Update labels for the new block
         self._update_labels()
+        # Button names the page it will switch TO, matching the previous behaviour.
+        nxt = (self._block_index + 1) % len(self._PLOT_PAGES)
+        self.btn_toggle_points.setText(f"Show Data {self._page_label(nxt)}")
 
     def _x_for_sample(self, values: list) -> float:
         """X-axis value (seconds) for an incoming real-time sample.
@@ -622,27 +649,31 @@ class ActiveTrialPage(QtWidgets.QWidget):
 
     def apply_values(self, values: list):
         """Update plots from incoming rtDataUpdated(values).
-        Uses indices 0..3 or 4..7 depending on toggle state.
+
+        Which channels are shown depends on the current page - see _PLOT_PAGES.
         """
-        if not values or len(values) < 4:
+        if not values:
             return
-        base = 4 * self._block_index
-        # Ensure we have enough values for selected block
-        if len(values) < base + 4:
+        slots = self._page_slots()
+        # Every channel this page needs must be present, or the curves would desynchronise
+        # from t_vals (a curve that skips a sample can never realign).
+        if any(ch is not None and ch >= len(values) for ch in slots):
             return
         # X-axis from the exo timestamp (steady cadence) rather than bursty BLE arrival.
         t_next = self._x_for_sample(values)
         self.t_vals.append(t_next)
-        # Map to curves
-        self.top_cmd_vals.append(values[base + 0])
-        self.top_meas_vals.append(values[base + 1])
-        self.bot_a_vals.append(values[base + 2])
-        self.bot_b_vals.append(values[base + 3])
-        # Update
-        self.curve_top_cmd.setData(self.t_vals, self.top_cmd_vals)
-        self.curve_top_meas.setData(self.t_vals, self.top_meas_vals)
-        self.curve_bot_a.setData(self.t_vals, self.bot_a_vals)
-        self.curve_bot_b.setData(self.t_vals, self.bot_b_vals)
+        # Unused curves (None) are left cleared by _update_labels; skipping them here keeps
+        # their deque empty so it never gets out of step with t_vals.
+        for buf, curve, ch in (
+            (self.top_cmd_vals,  self.curve_top_cmd,  slots[0]),
+            (self.top_meas_vals, self.curve_top_meas, slots[1]),
+            (self.bot_a_vals,    self.curve_bot_a,    slots[2]),
+            (self.bot_b_vals,    self.curve_bot_b,    slots[3]),
+        ):
+            if ch is None:
+                continue
+            buf.append(values[ch])
+            curve.setData(self.t_vals, buf)
 
     # Update callback
     def _on_tick(self):

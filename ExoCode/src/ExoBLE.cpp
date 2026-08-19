@@ -15,13 +15,48 @@ ExoBLE* ExoBLE::_instance = nullptr;
 
 namespace
 {
+    // 19 bytes is deliberate: the default ATT MTU is 23, leaving 20 usable. Do NOT raise this
+    // without first confirming a larger MTU was actually negotiated - writing more than the
+    // negotiated MTU silently truncates EVERY notification.
     constexpr size_t kHandshakeChunkSize = 19;
+
+    constexpr unsigned long kInterChunkDelayMs = 20;
+
+    // DO NOT add a writeValue() return check here expecting it to catch dropped notifications.
+    // It cannot, and this was tried: ArduinoBLE's BLELocalCharacteristic::writeValue() returns
+    // ATT.handleNotify(), which calls HCI.sendAclPkt() and *discards its result*, then returns
+    // success whenever any peer is connected. So the return value is non-zero even when the
+    // notification never lands. (HCI.sendAclPkt itself blocks on `_pendingPkt >= _maxPkt`, so
+    // the Nano's TX path applies backpressure and is not where bytes go missing.)
+    // Retrying on that return value is dead code; pumping BLE.poll() inside this loop is worse
+    // than dead, because it lets other BLE events dispatch mid-payload and interleave bytes
+    // into the stream. Keep this loop dumb.
+    bool send_chunked(BLECharacteristic &characteristic, const char *data, size_t len)
+    {
+        size_t offset = 0;
+        while (offset < len)
+        {
+            const size_t chunk_len = ((len - offset) > kHandshakeChunkSize)
+                                         ? kHandshakeChunkSize
+                                         : (len - offset);
+            characteristic.writeValue((const uint8_t *)(data + offset), (int)chunk_len);
+            delay(kInterChunkDelayMs);
+            offset += chunk_len;
+        }
+        return true;
+    }
 
     bool send_handshake_payload(BLECharacteristic &characteristic)
     {
         const char ready_msg[] = "READY";
-        characteristic.writeValue(ready_msg);
-        delay(20);
+        if (!send_chunked(characteristic, ready_msg, sizeof(ready_msg) - 1))
+        {
+            #ifdef SIMPLE_DEBUG
+            Serial.print("\nExoBLE::handshake_payload FAILED to send READY");
+            #endif
+            return false;
+        }
+        delay(kInterChunkDelayMs);
 
         const char *raw_payload = rxBuffer_bulkStr;
         if (raw_payload == nullptr || raw_payload[0] == '\0')
@@ -31,22 +66,31 @@ namespace
 
         static char sanitized_payload[MAX_MESSAGE_SIZE + 2] = {0};
         size_t write_index = 0;
+        bool truncated = false;
         sanitized_payload[0] = '\0';
 
-        for (size_t i = 0; raw_payload[i] != '\0' && i < MAX_MESSAGE_SIZE; ++i)
+        size_t read_index = 0;
+        for (; raw_payload[read_index] != '\0' && read_index < MAX_MESSAGE_SIZE; ++read_index)
         {
             if (write_index >= (MAX_MESSAGE_SIZE - 1))
             {
+                truncated = true;
                 break;
             }
 
-            char c = raw_payload[i];
+            char c = raw_payload[read_index];
             if (c == '\r')
             {
                 continue;
             }
 
             sanitized_payload[write_index++] = (c == '\n') ? '|' : c;
+        }
+
+        // Overrunning the buffer used to be a bare break - no error, no flag. Say so instead.
+        if (raw_payload[read_index] != '\0')
+        {
+            truncated = true;
         }
 
         if (write_index >= MAX_MESSAGE_SIZE)
@@ -57,18 +101,7 @@ namespace
         sanitized_payload[write_index++] = '\n';
         sanitized_payload[write_index] = '\0';
 
-        size_t offset = 0;
-        size_t chunk_count = 0;
-        while (offset < write_index)
-        {
-            size_t chunk_len = ((write_index - offset) > kHandshakeChunkSize) ? kHandshakeChunkSize : (write_index - offset);
-            characteristic.writeValue((const uint8_t *)(sanitized_payload + offset), chunk_len);
-            delay(20);
-            offset += chunk_len;
-            chunk_count++;
-        }
-
-        #ifdef SIMPLE_DEBUG
+        // Count rows before sending. '|' separates rows, so the row total is its count.
         size_t row_count = 0;
         size_t value_row_count = 0;
         bool row_start = true;
@@ -90,6 +123,18 @@ namespace
             }
         }
 
+        // Row-count header, sent first: "n,<total rows including this one>|". The GUI compares
+        // it against the number of rows it actually parsed, which detects a dropped chunk
+        // exactly instead of inferring it from left/right symmetry.
+        char header[24];
+        const int header_len = snprintf(header, sizeof(header), "n,%u|", (unsigned)(row_count + 1));
+        const bool header_ok = (header_len > 0) && ((size_t)header_len < sizeof(header)) &&
+                               send_chunked(characteristic, header, (size_t)header_len);
+        const bool body_ok = header_ok &&
+                             send_chunked(characteristic, sanitized_payload, write_index);
+        const size_t chunk_count = (write_index + kHandshakeChunkSize - 1) / kHandshakeChunkSize;
+
+        #ifdef SIMPLE_DEBUG
         Serial.print("\nExoBLE::handshake_payload bytes=");
         Serial.print(write_index);
         Serial.print(" chunks=");
@@ -98,9 +143,11 @@ namespace
         Serial.print(row_count);
         Serial.print(" value_rows=");
         Serial.print(value_row_count);
+        Serial.print(truncated ? " TRUNCATED(buffer full)" : "");
+        Serial.print(body_ok ? " sent=OK" : " sent=FAILED(chunk undelivered)");
         #endif
 
-        return true;
+        return body_ok;
     }
 }
 

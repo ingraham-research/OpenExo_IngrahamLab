@@ -691,7 +691,24 @@ void loop()
 
     //Feed the onboard SD logger (writes only during an active trial; never blocks control)
     sd_logger.update(ran);
-    
+
+    //Deferred system reset (End Trial 'Z'). get_system_reset() disabled the motor + set trial_off
+    //and armed reset_pending instead of rebooting inline, so run_side() (inside exo.run() above)
+    //gets a cycle to transmit the AK60v3's final zero-torque CAN frame before the CPU restarts.
+    //Count only real control cycles (ran). The threshold must be >=2: the zero frame is sent on the
+    //first cycle AFTER enabled dropped to 0, so rebooting any earlier would hold the last command.
+    //close_active() before the reset is belt-and-suspenders (sd_logger.update() already closed the
+    //log on the trial_off edge) so a reboot never leaves the log files open (FAT corruption).
+    if (exo_data.reset_pending && ran)
+    {
+        static const uint8_t RESET_ZERO_TICKS = 3;
+        if (++exo_data.reset_ticks >= RESET_ZERO_TICKS)
+        {
+            SdLogger::close_active();
+            exo_system_reset();
+        }
+    }
+
     //Print some dots so we know it is doing something if we are trying to debug
     #ifdef MAIN_DEBUG
         unsigned int dot_print_ms = 5000;

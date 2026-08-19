@@ -210,6 +210,15 @@ void SdLogger::_open_session()
     }
 
     // Queue headers into the ring buffers (drained as normal data). Same format/columns as before.
+    // NOTE: two of these column names lie - see the WARNING block at the top of SdLogger.h.
+    //   Commanded_Torque_Nm is motor.last_command = i_sat, a number in fictitious "firmware amps"
+    //                       in the MOTOR frame. x 5.243 for joint Nm (the 1.165 range error is
+    //                       included); sign is flipped vs Current_A on the right leg.
+    //   Current_A           is motor.i. The decode is CORRECT (manual v3.0.0 sec 4.3.1), but the
+    //                       sample is STALE by an unknown amount - the motor broadcasts on its own
+    //                       clock and we pop one frame per motor per cycle. 85% of right-leg rows
+    //                       are repeats. Do not pair it with the same row's command.
+    // Names are kept as-is so existing parsers of old logs still work.
     const char* motor_hdr =
         "Motor,Teensy_time_s,Status,Gait_phase,Position_rad,Velocity_rad_s,Torque_Nm,"
         "Commanded_Torque_Nm,Current_A,Filtered_Torque_Nm,Desired_Torque_Nm,"

@@ -172,6 +172,9 @@ class ExoData
         int error_joint_id;
         bool user_paused;       /**< If the user has paused the system */
 
+        bool reset_pending = false; /**< Set by the get_system_reset handler to defer the Teensy reboot by a few control cycles so run_side() can transmit the motor's final zero-torque CAN frame before the CPU restarts. Without this the AK60v3 holds its last (non-zero) command through the reboot. */
+        uint8_t reset_ticks = 0;    /**< Counts control cycles (ran==true) since reset_pending was armed; the superloop reboots once it reaches the threshold. */
+
         int hip_torque_flag = 0;    /**< Flag to determine if we want to use torque sensor for that joint */
         int knee_torque_flag = 0;   /**< Flag to determine if we want to use torque sensor for that joint */
         int ankle_torque_flag = 0;  /**< Flag to determine if we want to use torque sensor for that joint */

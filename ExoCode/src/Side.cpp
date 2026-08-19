@@ -329,57 +329,61 @@ bool Side::_check_toe_off()
     return toe_off;
 };
 
+/*
+ * Keep percent_gait a FLOAT. It used to be an int, which truncated the result to whole percent
+ * before widening it back to float on return. Controllers that map this onto a torque profile
+ * (Spline, ZhangCollins, FranksCollinsHip) then saw a staircase instead of a ramp: at a ~1.2 s
+ * stride, 1% is ~12 ms, so the setpoint sat frozen for ~6 control cycles and then jumped. For the
+ * ankle spline that jump reached 1.69 Nm, and since cmd = setpoint + p_gain*(setpoint - measured),
+ * the commanded torque stepped by (1 + p_gain) * 1.69 ~= 11.8 Nm at p_gain = 6 - a self-inflicted
+ * ~81 Hz sawtooth in the error signal that presented as "PID jitter".
+ * Resolution is now bounded by millis() (1 ms, ~0.08% of a stride) instead of the 1% grid.
+ */
 float Side::_calc_percent_gait()
 {
     int timestamp = millis();
-    int percent_gait = -1;
-    
+    float percent_gait = -1.0f;
+
     //Only calulate if the expected step duration has been established.
     if (_side_data->expected_step_duration > 0)
     {
-        percent_gait = 100 * ((float)timestamp - _ground_strike_timestamp) / _side_data->expected_step_duration;
-        percent_gait = min(percent_gait, 100); //Set saturation.
-        
-        // logger::print("Side::_calc_percent_gait : percent_gait_x10 = ");
-        // logger::print(percent_gait_x10);
-        // logger::print("\n");
+        percent_gait = 100.0f * ((float)timestamp - _ground_strike_timestamp) / _side_data->expected_step_duration;
+        percent_gait = min(percent_gait, 100.0f); //Set saturation.
     }
     return percent_gait;
 };
 
+//Float for the same reason as _calc_percent_gait above - see that comment.
 float Side::_calc_percent_stance()
 {
     int timestamp = millis();
-    int percent_stance = -1;
-    
+    float percent_stance = -1.0f;
+
     //Only calulate if the expected stance duration has been established.
     if (_side_data->expected_stance_duration > 0)
     {
-        percent_stance = 100 * ((float)timestamp - _toe_strike_timestamp) / _side_data->expected_stance_duration;
-        percent_stance = min(percent_stance, 100); //Set saturation.
+        percent_stance = 100.0f * ((float)timestamp - _toe_strike_timestamp) / _side_data->expected_stance_duration;
+        percent_stance = min(percent_stance, 100.0f); //Set saturation.
     }
 
     if (_side_data->toe_stance == 0)
     {
-        percent_stance = 0;
+        percent_stance = 0.0f;
     }
     return percent_stance;
 };
 
+//Float for the same reason as _calc_percent_gait above - see that comment.
 float Side::_calc_percent_swing()
 {
     int timestamp = millis();
-    int percent_swing = -1;
-    
+    float percent_swing = -1.0f;
+
     //Only calulate if the expected swing duration has been established.
     if (_side_data->expected_stance_duration > 0)
     {
-        percent_swing = 100 * ((float)timestamp - _toe_off_timestamp) / _side_data->expected_swing_duration;
-        percent_swing = min(percent_swing, 100); //Set saturation.
-        
-        // logger::print("Side::_calc_percent_gait : percent_gait_x10 = ");
-        // logger::print(percent_gait_x10);
-        // logger::print("\n");
+        percent_swing = 100.0f * ((float)timestamp - _toe_off_timestamp) / _side_data->expected_swing_duration;
+        percent_swing = min(percent_swing, 100.0f); //Set saturation.
     }
     return percent_swing;
 };

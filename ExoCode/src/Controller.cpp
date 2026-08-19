@@ -208,7 +208,21 @@ float _Controller::_pid(float cmd, float measurement, float p_gain, float i_gain
 {	
 	// Disable pid for torque control if the torque sensor isn't calibrated
 	if (_joint_data->torque_offset_reading == 0) {
-		Serial.print("\nTorque sensor not calibrated. Closed-loop torque control disabled.");
+		// ---- 500 Hz Serial print removed (left here on purpose, see below) ----
+		// Serial.print("\nTorque sensor not calibrated. Closed-loop torque control disabled.");
+		//
+		// This ran once per joint per control cycle, i.e. ~1000 lines/second at 500 Hz with two
+		// ankles, for as long as the fault persisted. Two problems with that:
+		//   1. Teensy's usb_serial_write BLOCKS for up to ~120 ms when the port is enumerated but
+		//      nothing is draining it, which is a control-loop stall on the exact code path that
+		//      is already misbehaving.
+		//   2. Nobody sees it anyway. The exo runs on battery with no USB attached during a
+		//      trial, so the message goes nowhere.
+		// Kept commented rather than deleted because the CONDITION is genuinely worth knowing
+		// about - it means closed-loop torque control is silently off - but reading serial off
+		// this hardware mid-trial is impractical, so this is not a useful debug channel any time
+		// soon. If this state ever needs to be visible, surface it on a real-time channel or in
+		// the exo status word so it reaches the GUI, rather than reinstating the print.
 		return cmd;
 	}
     const float expected_us = (1.0f / LOOP_FREQ_HZ) * 1000000.0f;
@@ -877,16 +891,90 @@ float Spline::calc_motor_cmd()
     }
 
     _controller_data->ff_setpoint = torque_cmd;
-    _controller_data->filtered_torque_reading = utils::ewma(_joint_data->torque_reading, _controller_data->filtered_torque_reading, 0.5f);
+
+    // Torque-measurement filter. Was a hard-coded ewma alpha of 0.5f; PJMC reads its
+    // torque_alpha param, which is 1 in SDCard/ankleControllers/PJMC.csv - i.e. PJMC runs the RAW
+    // reading with no filtering. That was the only remaining difference between the two controllers
+    // in the swing/zero regime (identical setpoint 0, identical scheduled gains), and in trial 0009
+    // the spline showed 32-47% higher measured-torque RMS there. A low-pass inside the feedback
+    // loop adds phase lag, which erodes phase margin and lets the loop ring instead of damping.
+    // Set to 1.0f to match PJMC exactly. TODO: promote to a real parameter like PJMC's
+    // torque_alpha_idx (needs a 17th column in spline.csv) instead of another hard-coded constant.
+    _controller_data->filtered_torque_reading = utils::ewma(_joint_data->torque_reading, _controller_data->filtered_torque_reading, 1.0f);
 
     float cmd = 0.0f;
     if (_controller_data->parameters[controller_defs::spline::use_pid_idx] > 0.0f)
     {
-        cmd = torque_cmd + _pid(torque_cmd,
-                                _controller_data->filtered_torque_reading,
-                                _controller_data->parameters[controller_defs::spline::p_gain_idx],
-                                _controller_data->parameters[controller_defs::spline::i_gain_idx],
-                                _controller_data->parameters[controller_defs::spline::d_gain_idx]);
+        // --------------------------- Gain scheduling (near-zero torque) ------------------------------
+        // Mirrors the PJMC gain scheduler (see ProportionalJointMoment::calc_motor_cmd) so the spline
+        // behaves like the tuned transparency controller whenever it is commanding ~zero torque. Without
+        // this the spline runs the full nominal gains through swing and the flat regions of the profile,
+        // where the high d gain turns torque-sensor noise into visible shaking.
+        //
+        // !! These near-zero gains are HARD CODED and CANNOT be modified from the GUI or the SD card. !!
+        // Only the nominal p/i/d below are read from the controller parameters. The values here match
+        // SDCard/ankleControllers/zeroTorque.csv (3 / 0 / 0.001) and PJMC's kp_zero/ki_zero/kd_zero.
+        // TODO: make these configurable by reading the ZeroTorque controller's parameters instead of
+        // hard-coding them, so the transparency gains are tuned in exactly one place.
+        const float KP_ZERO = 3.0f;
+        const float KI_ZERO = 0.0f;
+        const float KD_ZERO = 0.001f;
+
+        // Nominal gains. These DO come from the parameters, so the GUI can still change them.
+        float kp_use = _controller_data->parameters[controller_defs::spline::p_gain_idx];
+        float ki_use = _controller_data->parameters[controller_defs::spline::i_gain_idx];
+        float kd_use = _controller_data->parameters[controller_defs::spline::d_gain_idx];
+
+        // Conditions for "near zero", same bands as PJMC:
+        // - the spline is commanding close to zero torque
+        // - the measured torque is not far from that zero-torque target
+        const float ZERO_SETPOINT_BAND_NM = 0.5f;
+        const float ZERO_ERROR_BAND_NM = 3.5f;
+        const float torque_error = torque_cmd - _controller_data->filtered_torque_reading;
+        const bool near_zero_setpoint = (fabsf(torque_cmd) <= ZERO_SETPOINT_BAND_NM);
+        const bool near_zero_error = (fabsf(torque_error) <= ZERO_ERROR_BAND_NM);
+
+        if (near_zero_setpoint && near_zero_error)
+        {
+            kp_use = KP_ZERO;
+            ki_use = KI_ZERO;
+            kd_use = KD_ZERO;
+        }
+        // End of gain scheduling
+
+        // Uncalibrated-torque-sensor guard. Same check PJMC does (see
+        // ProportionalJointMoment::calc_motor_cmd), which the spline was missing.
+        //
+        // _pid() bails out with `return cmd;` when torque_offset_reading == 0 -- it returns its
+        // SETPOINT argument, not a PID contribution. So `torque_cmd + _pid(torque_cmd, ...)`
+        // evaluated to torque_cmd + torque_cmd, i.e. EXACTLY DOUBLE the intended feed-forward,
+        // with no indication anywhere: the -12 Nm ankle profile would command -24 Nm and the GUI's
+        // "Desired Torque" channel would still read -12, because that is ff_setpoint.
+        //
+        // torque_offset_reading is TorqueSensor::_calibration, which starts at 0 and is only
+        // written when the timed calibration completes. The GUI workflow makes this hard to hit
+        // (Start Trial is gated behind Calibrate Torque + 3 s in ScanPage.on_calibrate_torque), so
+        // the realistic route in is a disconnected or dead sensor reading ~0 V, or a calibration
+        // window that collected no samples. Cheap to guard either way.
+        //
+        // Fallback behaviour matches PJMC: drop to open-loop feed-forward rather than doubling it.
+        // NB: several other controllers still have this exact pattern unguarded -- ZhangCollins,
+        // FranksCollinsHip, ConstantTorque, ElbowMinMax, Step and SPV2. ZeroTorque has it too but
+        // is harmless there (its setpoint is 0, so 0 + 0 = 0). Only PJMC, PJMC_PLUS and now Spline
+        // are guarded. Fixing _pid() to return 0 instead would cover all of them at once, but that
+        // changes behaviour for every controller and was deliberately left out of scope here.
+        if (_joint_data->torque_offset_reading == 0)
+        {
+            cmd = torque_cmd;
+        }
+        else
+        {
+            cmd = torque_cmd + _pid(torque_cmd,
+                                    _controller_data->filtered_torque_reading,
+                                    kp_use,
+                                    ki_use,
+                                    kd_use);
+        }
     }
     else
     {

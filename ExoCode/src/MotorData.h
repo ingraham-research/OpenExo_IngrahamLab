@@ -43,7 +43,22 @@ class MotorData
         float v_des = 0;            /**< Desired velocity, not currently used but available for velocity control */
         float kp = 0;               /**< Proportional gain */
         float kd = 0;               /**< Derivative gain */
-        float t_ff = 0;             /**< Torque command */
+        /**
+         * @brief FULL torque command at the motor shaft [Nm], post-PID. NOT a feed-forward term.
+         *
+         * The name is a protocol name, not a control name: this value goes into the MIT frame's
+         * `t_ff` field, which is feed-forward with respect to the MOTOR's own kp/kd impedance loop
+         * (kp = kd = 0 here, so it is the entire command). It has nothing to do with the exo
+         * controller's feed-forward term -- that is ControllerData::ff_setpoint / desired_torque.
+         *
+         * Provenance: Controller::calc_motor_cmd() returns `cmd = torque_cmd + _pid(...)`
+         * -> JointData::controller.setpoint (Joint.cpp:652) -> / gearing -> Motor::send_data(),
+         * which clamps it to MAX_JOINT_TORQUE_NM and only then assigns it here, inside the
+         * transmit branches. So t_ff is post-PID, post-gain-schedule, post-clamp, and is exactly
+         * what went on the wire -- 0 on cycles that sent a zero frame.
+         * x gearing puts it at the joint (streamed that way on RT channels 8/9).
+         */
+        float t_ff = 0;
         
         bool do_zero;               /**< Flag to zero the position of the motor */
         bool enabled;               /**< Motor enable state*/

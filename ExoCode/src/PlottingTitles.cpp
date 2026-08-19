@@ -6,8 +6,8 @@
 // The Serial object is typically made available by including the .ino file or Arduino.h
 
 /**
- * @brief Combines the 11 dynamic column header strings into a single, 
- * comma-delimited row with "t," prefix and appends it to the bulk payload.
+ * @brief Combines the dynamic column header strings into a single, comma-delimited row with a
+ * "t," prefix and appends it to the bulk payload.
  *
  * @param config_to_send Active firmware configuration used to select labels.
  */
@@ -19,9 +19,11 @@ void create_plotting_titles(uint8_t* config_to_send) {
     const char END_MARKER[] = "\n,??";
     const size_t START_LEN = strlen(START_MARKER);
     const size_t END_LEN = strlen(END_MARKER);
-    
-    // This constant ensures we only process 11 columns (index 0 to 10)
-    const size_t num_columns = 11; 
+
+    // Number of columns comes from the configuration, NOT a literal. It was hardcoded to 11
+    // while bilateral_ankle sends 13, so the last two labels never reached the GUI. See
+    // getColumnCount() in PlottingTitles.h for what that silently broke.
+    const size_t num_columns = getColumnCount(config_to_send);
 
     // Initial check for minimum size including START and END markers
     if (buffer_size < MAX_COMBINED_HEADER_LENGTH) {

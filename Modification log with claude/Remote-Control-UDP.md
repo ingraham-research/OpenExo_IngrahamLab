@@ -2,7 +2,14 @@
 
 **Date:** 2026-07-18
 **Scope:** Python GUI only (`Python_GUI/`). No firmware changes.
-**Status:** Implemented, all headless tests passing (35/35). Not yet exercised against a real exo — bench validation with a live device is a separate step, pending user consent.
+**Status:** Implemented, all headless tests passing (35/35). ~~Not yet exercised against a real exo.~~
+**Updated 2026-08-12: validated on the exo** — see `60dd3ed` ("Added a sample remote client with
+pre-written commands to test the remote. Tested on exo and confirm that they work"), which added
+`Python_GUI/examples/remote_console.py`.
+**Note:** the listener is **enabled by default** (`utils/config.py` `RemoteConfig.ENABLED = True`,
+`127.0.0.1:9750`). Any local process can change controller parameters with no authentication.
+Localhost-only, so the exposure is small, but it is a live actuation path — disable it if you do not
+want that.
 **Detailed design/plan (deeper reference):**
 `docs/superpowers/specs/2026-07-17-udp-remote-control-design.md`,
 `docs/superpowers/plans/2026-07-18-udp-remote-control.md`
