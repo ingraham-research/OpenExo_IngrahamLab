@@ -4,9 +4,14 @@ import threading
 import logging
 import os
 import sys
+import time
 import traceback
 from datetime import datetime
 from typing import Optional
+
+# TEMPORARY (fix_nano_GUI_handshaking): handshake chunk probe / connect-sequence arms.
+# Relative submodule import - services/__init__.py imports this file.
+from . import HandshakeProbe
 
 try:
     from PySide6 import QtCore
@@ -163,7 +168,10 @@ class QtExoDeviceManager(QtCore.QObject):
     def _mark_disconnected(self, reason: str = ""):
         """Reset internal connection state after an unexpected disconnect."""
         self.logger.warning(f"Device disconnected. Reason: {reason or 'unknown'}, Intentional: {self._intentional_disconnect}")
-        
+
+        # TEMPORARY (fix_nano_GUI_handshaking): close this connection's chunk log.
+        HandshakeProbe.end_connection(f"disconnected: {reason or 'unknown'}")
+
         self._is_connected = False
         self._is_connecting = False
         self._client = None
@@ -367,14 +375,56 @@ class QtExoDeviceManager(QtCore.QObject):
 
                     self.connectionProgress.emit(75)
                     self.log.emit("Starting notifications…")
-                    await client.start_notify(UART_RX_UUID, _on_rx)
-                    self._error_notify_enabled = False
-                    try:
-                        await client.start_notify(ERROR_CHAR_UUID, _on_error)
-                        self._error_notify_enabled = True
-                    except Exception as ex:
-                        self.log.emit("Error characteristic not found; continuing with UART only.")
-                        self.logger.warning("Error characteristic notify failed: %s", ex)
+
+                    # ---- TEMPORARY (fix_nano_GUI_handshaking): Tier 1 A/B/C arm ----------------
+                    # Subscribing to UART_RX triggers the Nano's BLESubscribed handler, which
+                    # blocks in send_handshake_payload() for ~3.4 s. In the stock order (arm A)
+                    # the *second* start_notify is a CCCD Write Request that therefore lands in
+                    # the MIDDLE of that payload - the inbound ATT request the credit-race
+                    # hypothesis needs (audit doc §3.3.1).
+                    #   A: UART -> ERROR          (control, stock behaviour)
+                    #   B: ERROR -> UART          (same traffic, request no longer mid-payload)
+                    #   C: UART -> wait -> ERROR  (same traffic, request after payload)
+                    # B is the control that separates "request landed mid-payload" from
+                    # "there was simply less radio traffic".
+                    arm = HandshakeProbe.next_arm()
+                    HandshakeProbe.begin_connection(address_hint or str(target))
+                    self.logger.info("Handshake probe arm %s", arm)
+                    self.log.emit(f"Starting notifications… (handshake arm {arm})")
+
+                    async def _subscribe_error():
+                        self._error_notify_enabled = False
+                        try:
+                            await client.start_notify(ERROR_CHAR_UUID, _on_error)
+                            self._error_notify_enabled = True
+                            HandshakeProbe.mark("ERROR_SUBSCRIBE_DONE")
+                        except Exception as ex:
+                            self.log.emit("Error characteristic not found; continuing with UART only.")
+                            self.logger.warning("Error characteristic notify failed: %s", ex)
+                            HandshakeProbe.mark("ERROR_SUBSCRIBE_FAILED", str(ex))
+
+                    async def _subscribe_uart():
+                        await client.start_notify(UART_RX_UUID, _on_rx)
+                        HandshakeProbe.mark("UART_SUBSCRIBE_DONE")
+
+                    if arm == "B":
+                        await _subscribe_error()
+                        await _subscribe_uart()
+                    elif arm == "C":
+                        await _subscribe_uart()
+                        # Wait for the handshake payload to finish before adding any inbound
+                        # traffic. Bounded so a lost/absent payload cannot wedge the connect.
+                        deadline = time.monotonic() + 10.0
+                        while not HandshakeProbe.payload_complete.is_set():
+                            if time.monotonic() >= deadline:
+                                HandshakeProbe.mark("ARM_C_WAIT_TIMEOUT")
+                                break
+                            await asyncio.sleep(0.05)
+                        await _subscribe_error()
+                    else:
+                        await _subscribe_uart()
+                        await _subscribe_error()
+                    # ---- end TEMPORARY --------------------------------------------------------
 
                     connected_name = (name_hint or "").strip() or "Unknown"
                     connected_address = address_hint or getattr(client, "address", "") or self._mac
@@ -534,7 +584,10 @@ class QtExoDeviceManager(QtCore.QObject):
         
         # Mark as intentional so we don't show disconnect notification
         self._intentional_disconnect = True
-        
+
+        # TEMPORARY (fix_nano_GUI_handshaking): close this connection's chunk log.
+        HandshakeProbe.end_connection("intentional disconnect")
+
         # Immediately mark as disconnected in UI
         self._is_connected = False
         self._is_connecting = False

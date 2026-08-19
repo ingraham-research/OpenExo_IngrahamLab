@@ -8,6 +8,11 @@ try:
 except ImportError as e:
     raise SystemExit("PySide6 is required. Install with: pip install PySide6") from e
 
+# TEMPORARY (fix_nano_GUI_handshaking): handshake chunk probe. Observational only.
+# Relative submodule import - services/__init__.py imports this file, so `from services import X`
+# would hit a partially-initialised package.
+from . import HandshakeProbe
+
 
 class RtBridge(QtCore.QObject):
     """
@@ -123,13 +128,19 @@ class RtBridge(QtCore.QObject):
             # Begin collecting the initial long handshake payload split across notifications
             self._collecting_handshake_payload = True
             self._handshake_payload_buf = ""
+            HandshakeProbe.mark("READY")
             return
 
         # If we're collecting the extended handshake payload, accumulate until newline
         if self._collecting_handshake_payload:
+            # Tier 0 probe: record every notification of the handshake stream before it is
+            # merged into the buffer, so a lost chunk can be located exactly instead of being
+            # inferred from a mangled controller name. Purely observational.
+            HandshakeProbe.log_chunk(s)
             self._handshake_payload_buf += s
             if "\n" in self._handshake_payload_buf:
-                line, _, _ = self._handshake_payload_buf.partition("\n")
+                line, _, _tail = self._handshake_payload_buf.partition("\n")
+                HandshakeProbe.log_payload(line, _tail)
                 # Split by commas and drop empty entries
                 tokens = [tok.strip() for tok in line.split(",") if tok.strip()]
                 
@@ -268,6 +279,11 @@ class RtBridge(QtCore.QObject):
                 self.controllerValuesReceived.emit(flat_values)
 
                 # Done collecting extended handshake
+                HandshakeProbe.mark(
+                    "PAYLOAD_COMPLETE",
+                    f"rows={len(rows)} declared={declared_rows} entries={len(self._controller_matrix)}")
+                # Arm C waits on this before subscribing to the Error characteristic.
+                HandshakeProbe.payload_complete.set()
                 self._collecting_handshake_payload = False
                 self._handshake_payload_buf = ""
                 # Treat the handshake payload as the complete parameter preamble
@@ -514,10 +530,12 @@ class RtBridge(QtCore.QObject):
             if reasons:
                 detail = "; ".join(reasons)
                 self.logger.warning("Controller list looks incomplete: %s", detail)
+                HandshakeProbe.mark("VERDICT", f"INCOMPLETE entries={count} :: {detail}")
                 self.controllerMatrixIncomplete.emit(
                     f"Controller list may be incomplete ({detail}). Disconnect and reconnect to reload it.")
             else:
                 self.logger.info("Controller list looks complete (%d entries)", count)
+                HandshakeProbe.mark("VERDICT", f"CLEAN entries={count}")
                 self.controllerMatrixIncomplete.emit("")
         except Exception as e:
             self.logger.warning("Controller matrix completeness check failed: %s", e)
