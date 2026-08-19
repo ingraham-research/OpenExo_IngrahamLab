@@ -28,6 +28,7 @@
 //Specific Libraries
 #include "src/ParseIni.h"
 #include "src/ParamsFromSD.h"
+#include "src/HeelFsrConfig.h"
 #include "src/ListCtrlParams.h"
 #include "src/SendBulkChar.h"
 #include "src/PlottingTitles.h"
@@ -40,6 +41,7 @@
 //Logging
 #include "src/Logger.h"
 #include "src/PiLogger.h"
+#include "src/SdLogger.h"
 
 //Array used to store config information
 namespace config_info
@@ -63,7 +65,19 @@ void setup()
     #endif
 
     //Get the config information from the SD card (calls function in ParseIni).
-    ini_parser(config_info::config_to_send);              
+    ini_parser(config_info::config_to_send);
+
+    //Pre-read the heel-FSR-present flag from config.ini now (cached), so neither the control
+    //loop nor the FSR command handlers pay the SD read later. ([Sensors] heelFsrPresent)
+    heel_fsr_present();
+
+    //Safe SD-logging write self-test: runs a no-motor, no-trial write/read-back test then HALTS.
+    //Set SD_LOG_SELFTEST back to 0 (in SdLogger.h) for normal operation.
+    #if SD_LOG_SELFTEST
+        SdLogger::self_test();
+        while (1) { }
+    #endif
+
     
 	//Debugging ListCtrlParams
 	long initialTime = millis();
@@ -122,6 +136,22 @@ void loop()
         {
             logger::print("Superloop :: exo created");
         }
+    #endif
+
+    //Onboard SD logger (Teensy side); no-op until a trial is active
+    static SdLogger sd_logger(&exo_data);
+
+    //Simulated-trial logger test: drives the REAL sd_logger.update() path with a faked
+    //active trial. Motors are NEVER enabled (we halt before any motor setup), and update()
+    //only reads data + writes SD, so nothing can move. Verifies the actual logger code path.
+    //Set SD_LOG_SELFTEST_TRIAL=0 (in SdLogger.h) for normal operation.
+    #if SD_LOG_SELFTEST_TRIAL
+        exo_data.set_status(status_defs::messages::trial_on);
+        for (int i = 0; i < 2000; i++) { sd_logger.update(true); }
+        exo_data.set_status(status_defs::messages::trial_off);
+        sd_logger.update(true);   //trial-off edge flushes + closes the files
+        Serial.println("SelfTestTrial: drove real logger update() with a fake trial (no motors). Check newest /EXOLOG/000N/.");
+        while (1) { }
     #endif
 
     //Creates instance of UART Handler
@@ -657,8 +687,28 @@ void loop()
     #endif                                                                                        
 
     //Run the exo calculations (go to exo.h/exo.cpp to follow the cascade of functions this runs)
-    bool ran = exo.run();     
-    
+    bool ran = exo.run();
+
+    //Feed the onboard SD logger (writes only during an active trial; never blocks control)
+    sd_logger.update(ran);
+
+    //Deferred system reset (End Trial 'Z'). get_system_reset() disabled the motor + set trial_off
+    //and armed reset_pending instead of rebooting inline, so run_side() (inside exo.run() above)
+    //gets a cycle to transmit the AK60v3's final zero-torque CAN frame before the CPU restarts.
+    //Count only real control cycles (ran). The threshold must be >=2: the zero frame is sent on the
+    //first cycle AFTER enabled dropped to 0, so rebooting any earlier would hold the last command.
+    //close_active() before the reset is belt-and-suspenders (sd_logger.update() already closed the
+    //log on the trial_off edge) so a reboot never leaves the log files open (FAT corruption).
+    if (exo_data.reset_pending && ran)
+    {
+        static const uint8_t RESET_ZERO_TICKS = 3;
+        if (++exo_data.reset_ticks >= RESET_ZERO_TICKS)
+        {
+            SdLogger::close_active();
+            exo_system_reset();
+        }
+    }
+
     //Print some dots so we know it is doing something if we are trying to debug
     #ifdef MAIN_DEBUG
         unsigned int dot_print_ms = 5000;

@@ -9,11 +9,23 @@
 #ifndef BLEMESSAGE_H
 #define BLEMESSAGE_H
 
-static const int _max_size = 10;
+// Capacity of BleMessage::data, in floats.
+//
+// MUST be >= rt_data::MAX_LEN (RealTimeI2C.h). ComsMCU::update_gui() fills this array with a
+// real-time packet and ExoBLE/BleParser then walk it up to `expecting`; when the real-time
+// payload grew past 10 this array did not, so every packet wrote past the end of the object
+// (and past `_size`, which sits immediately after it) at ~100 Hz. Raising it here is the fix;
+// update_gui() also clamps to k_max_data so the two can never disagree silently again.
+// Kept as a plain constant rather than pulling in RealTimeI2C.h, because this header is also
+// compiled for the Teensy where that namespace means something slightly different.
+static const int _max_size = 16;
 
 class BleMessage
 {
 public:
+    //Public alias so callers can bound-check before writing into data[].
+    static constexpr int k_max_data = _max_size;
+
     /**
      * @brief Construct a new Ble Message object
      *

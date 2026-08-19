@@ -19,9 +19,29 @@ from utils import (
     apply_button_style_batch, set_size_policy_fixed_height
 )
 
+# The exo clock ("Exoskeleton time (seconds)") reaches the GUI as a signed 16-bit
+# fixed-point value: RealTimeI2C packs every RT channel as short(value * 100) across
+# the Teensy->coms-MCU I2C hop (FIXED_POINT_FACTOR = 100). Uptime seconds * 100
+# overflows int16 at 327.68s, so the raw value jumps +327.67 -> -327.68 (a full
+# int16 span) and repeats every 655.36s. _x_for_sample undoes that wrap.
+_EXO_TIME_WRAP_SPAN = 65536 / 100.0   # 655.36 s: one full int16 range of the *100 clock
+_EXO_TIME_WRAP_HALF = _EXO_TIME_WRAP_SPAN / 2.0  # 327.68 s: wrap-detection threshold
+
 
 class ActiveTrialPage(QtWidgets.QWidget):
     """Active Trial page with two stacked real-time plots (simulated data)."""
+
+    # Which real-time channels each press of "Toggle Data Points" shows.
+    #   4-channel page -> (top curve A, top curve B, bottom curve A, bottom curve B)
+    #   2-channel page -> (top panel, bottom panel), one curve on each
+    # Channel numbers must match ExoCode/src/PlottingTitles.h getColumnHeader/bilateral_ankle.
+    # Channels 10-12 (Status, exo clock, battery) are deliberately absent: each already has its
+    # own GUI readout, and their scales would wreck a shared torque axis.
+    _PLOT_PAGES = (
+        (0, 1, 2, 3),   # Desired vs Measured torque, per leg
+        (4, 5, 6, 7),   # Toe FSR overlaid with the In Stance step change, per foot
+        (8, 9),         # Commanded torque - one leg per panel, never overlaid
+    )
 
     # Signals to be handled by MainWindow (placeholders can be wired later)
     endTrialRequested = QtCore.Signal()
@@ -128,6 +148,14 @@ class ActiveTrialPage(QtWidgets.QWidget):
         self.lbl_battery.setStyleSheet(f"font-size: {UIConfig.FONT_SMALL}pt; color: {UIConfig.COLOR_SUCCESS}; font-weight: bold;")
         self.lbl_battery.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         controls.addWidget(self.lbl_battery)
+
+        # Exo status readout, driven by the HIJACKED RT Channel 8 (firmware exo status word).
+        # Shows the live calibration/refinement/trial state; flips to "Trial On / Ready" the
+        # moment FSR refinement finishes. See update_exo_status().
+        self.lbl_exo_status = QtWidgets.QLabel("Exo: --")
+        self.lbl_exo_status.setStyleSheet(f"font-size: {UIConfig.FONT_SMALL}pt; font-weight: bold;")
+        self.lbl_exo_status.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        controls.addWidget(self.lbl_exo_status)
 
         self.lbl_param_update_status = QtWidgets.QLabel("")
         self.lbl_param_update_status.setWordWrap(True)
@@ -330,11 +358,19 @@ class ActiveTrialPage(QtWidgets.QWidget):
         self.timer.timeout.connect(self._on_tick)
         self.timer.setTimerType(QtCore.Qt.PreciseTimer)
         # Toggle state: which 4-value block to plot (0..3 or 4..7)
-        self._block_index = 0  # 0 = data[0..3], 1 = data[4..7]
+        self._block_index = 0  # index into _PLOT_PAGES; see _page_slots()/_toggle_points()
         # Store dynamic parameter names from device
         self._param_names = []
         # Track real data start time
         self._real_data_t0 = None
+        # Plot x-axis uses the exo's own timestamp (smooth ~100Hz) instead of bursty BLE
+        # wall-clock arrival. Index is resolved from the channel labels (None -> fall back
+        # to wall-clock); _exo_t0 anchors the axis to start near 0. See _x_for_sample.
+        self._exo_time_idx = None
+        self._exo_t0 = None
+        # int16 wrap tracking for the exo clock (see _EXO_TIME_WRAP_SPAN, _x_for_sample)
+        self._exo_prev_raw = None
+        self._exo_wrap_offset = 0.0
 
     def set_update_controller_enabled(self, enabled: bool):
         try:
@@ -346,6 +382,43 @@ class ActiveTrialPage(QtWidgets.QWidget):
         """Update the Mark Trial button to show current count."""
         try:
             self.btn_mark.setText(f"Mark Trial ({count})")
+        except Exception:
+            pass
+
+    def update_exo_status(self, status_value: float):
+        """Show the exo state, driven by the hijacked RT Channel 8 (firmware status word,
+        status_defs::messages). Flips to 'Trial On / Ready' when FSR refinement finishes.
+        See uart_commands.h bilateral_ankle data[8] on the Teensy for the transport."""
+        try:
+            code = int(round(float(status_value)))
+        except (ValueError, TypeError):
+            return
+        names = {
+            0: "Off", 1: "Trial Off", 2: "Trial On / Ready", 3: "Test",
+            4: "Torque Calibration", 5: "FSR Calibration",
+            6: "FSR Refinement", 7: "Motor Startup",
+        }
+        if code in names:
+            name = names[code]
+        elif code >= 8:                       # error bit (8) or higher error/warning codes
+            name = f"Error / Warning ({code})"
+        else:
+            name = f"Status {code}"
+        # Colour cue: green = ready, orange = calibrating/refining/startup, red = error.
+        if code == 2:
+            color = UIConfig.COLOR_SUCCESS
+        elif code in (4, 5, 6, 7):
+            color = UIConfig.COLOR_PARAM_REJECT
+        elif code >= 8:
+            color = UIConfig.COLOR_WARNING
+        else:
+            color = None                      # off / trial_off -> default theme colour
+        style = f"font-size: {UIConfig.FONT_SMALL}pt; font-weight: bold;"
+        if color:
+            style += f" color: {color};"
+        try:
+            self.lbl_exo_status.setText(f"Exo: {name}")
+            self.lbl_exo_status.setStyleSheet(style)
         except Exception:
             pass
 
@@ -405,6 +478,9 @@ class ActiveTrialPage(QtWidgets.QWidget):
         self.bot_b_vals.clear()
 
         self._real_data_t0 = None
+        self._exo_t0 = None
+        self._exo_prev_raw = None
+        self._exo_wrap_offset = 0.0
         self.t0 = time.time()
 
         self.curve_top_cmd.setData([], [])
@@ -416,45 +492,49 @@ class ActiveTrialPage(QtWidgets.QWidget):
         """Update plot labels with dynamic parameter names from device handshake."""
         try:
             self._param_names = list(param_names) if param_names else []
+            # Resolve the exo-time channel used for the plot x-axis (see _x_for_sample).
+            try:
+                self._exo_time_idx = self._param_names.index("Exoskeleton time (seconds)")
+            except ValueError:
+                self._exo_time_idx = None
             # Update labels for current block
             self._update_labels()
         except Exception:
             pass
 
     def _update_labels(self):
-        """Update plot titles and legend names based on current block index."""
-        base = 4 * self._block_index
+        """Update plot titles and legend names for the current page (see _PLOT_PAGES).
 
-        def channel_name(offset: int) -> str:
-            index = base + offset
-            if index < len(self._param_names) and self._param_names[index]:
-                return self._param_names[index]
-            return f"Ch{index}"
-        
+        Also clears any curve the page does not use, so a 2-channel page leaves one clean trace
+        per panel instead of a stale one from the previous page.
+        """
+        slots = self._page_slots()
+
+        def channel_name(ch):
+            if ch is None:
+                return None
+            if ch < len(self._param_names) and self._param_names[ch]:
+                return self._param_names[ch]
+            return f"Ch{ch}"
+
+        def title(a, b):
+            return f"{a} vs {b}" if (a and b) else (a or b or "")
+
         try:
-            # Update top plot title and curve names
-            top_cmd_name = channel_name(0)
-            top_meas_name = channel_name(1)
-            self.plot_top.setTitle(f"{top_cmd_name} vs {top_meas_name}")
-            
-            # Update legend items
-            self.plot_top.legend.clear()
-            self.curve_top_cmd.opts['name'] = top_cmd_name
-            self.curve_top_meas.opts['name'] = top_meas_name
-            self.plot_top.legend.addItem(self.curve_top_cmd, top_cmd_name)
-            self.plot_top.legend.addItem(self.curve_top_meas, top_meas_name)
-            
-            # Update bottom plot title and curve names
-            bot_a_name = channel_name(2)
-            bot_b_name = channel_name(3)
-            self.plot_bottom.setTitle(f"{bot_a_name} vs {bot_b_name}")
-            
-            # Update legend items
-            self.plot_bottom.legend.clear()
-            self.curve_bot_a.opts['name'] = bot_a_name
-            self.curve_bot_b.opts['name'] = bot_b_name
-            self.plot_bottom.legend.addItem(self.curve_bot_a, bot_a_name)
-            self.plot_bottom.legend.addItem(self.curve_bot_b, bot_b_name)
+            names = [channel_name(ch) for ch in slots]
+
+            for plot, curves, pair in (
+                (self.plot_top, (self.curve_top_cmd, self.curve_top_meas), (0, 1)),
+                (self.plot_bottom, (self.curve_bot_a, self.curve_bot_b), (2, 3)),
+            ):
+                plot.setTitle(title(names[pair[0]], names[pair[1]]))
+                plot.legend.clear()
+                for curve, idx in zip(curves, pair):
+                    if names[idx] is None:
+                        curve.setData([], [])       # unused on this page
+                        continue
+                    curve.opts['name'] = names[idx]
+                    plot.legend.addItem(curve, names[idx])
         except Exception:
             pass
 
@@ -503,41 +583,97 @@ class ActiveTrialPage(QtWidgets.QWidget):
         # Reset real data timing when switching from sim to real data
         self._real_data_t0 = None
 
+    def _page_slots(self) -> tuple:
+        """Channel index for each of the four fixed curves, None where a curve is unused.
+
+        Order is (top curve A, top curve B, bottom curve A, bottom curve B). A 2-channel page
+        puts one channel alone on each panel, which is what Commanded Torque needs -- overlaying
+        the two legs on a shared axis hides exactly the left/right difference we care about.
+        """
+        page = self._PLOT_PAGES[self._block_index % len(self._PLOT_PAGES)]
+        if len(page) == 4:
+            return (page[0], page[1], page[2], page[3])
+        return (page[0], None, page[1], None)   # 2-channel page: one curve per panel
+
+    def _page_label(self, block_index: int) -> str:
+        page = self._PLOT_PAGES[block_index % len(self._PLOT_PAGES)]
+        return f"{page[0]}-{page[-1]}" if len(page) > 1 else str(page[0])
+
     def _toggle_points(self):
-        # Toggle which 4-value block we plot
-        self._block_index = 1 - self._block_index
-        self.btn_toggle_points.setText(
-            "Show Data 0-3" if self._block_index == 1 else "Show Data 4-7"
-        )
+        # Cycle through the pages. This used to flip between only two 4-channel blocks (0-3 and
+        # 4-7), which left every channel from 8 up unreachable.
+        self._block_index = (self._block_index + 1) % len(self._PLOT_PAGES)
         self._clear_plot_buffers()
-        # Update labels for the new block
         self._update_labels()
+        # Button names the page it will switch TO, matching the previous behaviour.
+        nxt = (self._block_index + 1) % len(self._PLOT_PAGES)
+        self.btn_toggle_points.setText(f"Show Data {self._page_label(nxt)}")
+
+    def _x_for_sample(self, values: list) -> float:
+        """X-axis value (seconds) for an incoming real-time sample.
+
+        Prefer the exo's own timestamp channel ("Exoskeleton time (seconds)"), which is
+        evenly spaced at the control cadence, over wall-clock arrival time. BLE hands the
+        GUI samples in bursts separated by gaps, so a wall-clock x-axis clumps points and
+        makes the trace look jerky even though the underlying data is a steady ~100Hz.
+        Falls back to wall-clock when no exo-time channel is present (e.g. hip/arm configs).
+
+        NOTE: BioFeedbackPage.apply_values still uses raw wall-clock time and was left that
+        way on purpose (out of scope when this was fixed). If that plot ever looks jerky,
+        this method is the fix to port over.
+        """
+        idx = self._exo_time_idx
+        if idx is not None and idx < len(values):
+            t_exo = values[idx]
+            # Undo the signed-16-bit fixed-point wrap of the exo clock. Every ~655.36s
+            # the raw value drops by a full int16 span (e.g. +327.67 -> -327.68); left
+            # alone this made the x-axis snap back to 0 for a few seconds while the stale
+            # window flushed. A drop larger than half the span is a wrap, not real time
+            # moving backward, so bump a cumulative offset to keep the clock monotonic.
+            if self._exo_prev_raw is not None and (t_exo - self._exo_prev_raw) < -_EXO_TIME_WRAP_HALF:
+                self._exo_wrap_offset += _EXO_TIME_WRAP_SPAN
+            self._exo_prev_raw = t_exo
+            t_exo_unwrapped = t_exo + self._exo_wrap_offset
+
+            if self._exo_t0 is None:
+                self._exo_t0 = t_exo_unwrapped
+            t = t_exo_unwrapped - self._exo_t0
+            if t < 0:  # genuine exo clock reset (reboot) -> re-anchor
+                self._exo_t0 = t_exo_unwrapped
+                t = 0.0
+            return t
+        # Fallback: wall-clock arrival time
+        if self._real_data_t0 is None:
+            self._real_data_t0 = time.time()
+        return time.time() - self._real_data_t0
 
     def apply_values(self, values: list):
         """Update plots from incoming rtDataUpdated(values).
-        Uses indices 0..3 or 4..7 depending on toggle state.
+
+        Which channels are shown depends on the current page - see _PLOT_PAGES.
         """
-        if not values or len(values) < 4:
+        if not values:
             return
-        base = 4 * self._block_index
-        # Ensure we have enough values for selected block
-        if len(values) < base + 4:
+        slots = self._page_slots()
+        # Every channel this page needs must be present, or the curves would desynchronise
+        # from t_vals (a curve that skips a sample can never realign).
+        if any(ch is not None and ch >= len(values) for ch in slots):
             return
-        # Use actual wall-clock time instead of synthetic increments
-        if self._real_data_t0 is None:
-            self._real_data_t0 = time.time()
-        t_next = time.time() - self._real_data_t0
+        # X-axis from the exo timestamp (steady cadence) rather than bursty BLE arrival.
+        t_next = self._x_for_sample(values)
         self.t_vals.append(t_next)
-        # Map to curves
-        self.top_cmd_vals.append(values[base + 0])
-        self.top_meas_vals.append(values[base + 1])
-        self.bot_a_vals.append(values[base + 2])
-        self.bot_b_vals.append(values[base + 3])
-        # Update
-        self.curve_top_cmd.setData(self.t_vals, self.top_cmd_vals)
-        self.curve_top_meas.setData(self.t_vals, self.top_meas_vals)
-        self.curve_bot_a.setData(self.t_vals, self.bot_a_vals)
-        self.curve_bot_b.setData(self.t_vals, self.bot_b_vals)
+        # Unused curves (None) are left cleared by _update_labels; skipping them here keeps
+        # their deque empty so it never gets out of step with t_vals.
+        for buf, curve, ch in (
+            (self.top_cmd_vals,  self.curve_top_cmd,  slots[0]),
+            (self.top_meas_vals, self.curve_top_meas, slots[1]),
+            (self.bot_a_vals,    self.curve_bot_a,    slots[2]),
+            (self.bot_b_vals,    self.curve_bot_b,    slots[3]),
+        ):
+            if ch is None:
+                continue
+            buf.append(values[ch])
+            curve.setData(self.t_vals, buf)
 
     # Update callback
     def _on_tick(self):

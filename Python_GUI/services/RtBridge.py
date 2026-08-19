@@ -23,9 +23,13 @@ class RtBridge(QtCore.QObject):
     parameterNamesReceived = QtCore.Signal(list)
     controllersReceived = QtCore.Signal(list, list)
     controllerMatrixReceived = QtCore.Signal(list)
+    # Emitted with a human-readable reason when the handshake payload looks incomplete
+    # (rows lost in transit). Empty string means "looks complete" and clears any warning.
+    controllerMatrixIncomplete = QtCore.Signal(str)
     controllerValuesReceived = QtCore.Signal(list)
     paramUpdateAckReceived = QtCore.Signal(dict)
     rtDataUpdated = QtCore.Signal(list)
+    shutdownProgressReceived = QtCore.Signal(int)   # end-trial shutdown step code (see ble_commands.h shutdown_progress::)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -43,6 +47,10 @@ class RtBridge(QtCore.QObject):
         self._temp_params: List[str] = []
         self._controllers_done = False
         self._controller_matrix: List[List[str]] = []
+        # Largest controller-matrix size seen since the app started. Deliberately NOT reset
+        # per BLE session: comparing a new connection against the best one this run is what
+        # catches a short payload.
+        self._best_matrix_count = 0
         self._rows_68: List[List[str]] = []
         self._rows_36: List[List[str]] = []
         self._rows_38: List[List[str]] = []
@@ -136,6 +144,7 @@ class RtBridge(QtCore.QObject):
                 value_rows = []
                 controller_values = {}
                 param_names = []
+                declared_rows = None  # set by the firmware's "n,<rows>" header, if it arrives
                 self._rows_68 = []
                 self._rows_36 = []
                 self._rows_38 = []
@@ -166,6 +175,12 @@ class RtBridge(QtCore.QObject):
                         continue
                     if prefix.startswith('?'):
                         # End-of-handshake sentinel
+                        continue
+                    if prefix == 'n' and len(parts) >= 2 and parts[1].isdigit():
+                        # Row-count header from ExoBLE::send_handshake_payload: the number of
+                        # rows the firmware sent, including this one. Lets us detect a chunk
+                        # lost in transit exactly, instead of inferring it.
+                        declared_rows = int(parts[1])
                         continue
                     
                     # Each row format: [JointName, JointID, ControllerName, ParamCount, ...params]
@@ -212,25 +227,39 @@ class RtBridge(QtCore.QObject):
                 if controller_rows:
                     # Build matrix: [JointName, JointID, ControllerName, ControllerID, Param1, Param2, ...]
                     self._controller_matrix = []
+                    malformed_rows = 0
                     for row in controller_rows:
-                        if len(row) >= 3:
-                            # row[0] = joint name (e.g., "Ankle(L)")
-                            # row[1] = joint ID (e.g., "68")
-                            # row[2] = controller name (e.g., "pjmc_plus")
-                            # row[3] = controller ID (e.g., "11")
-                            # row[4:] = parameter names
-                            joint_name = row[0]
-                            joint_id = row[1]
-                            controller_name = row[2]
-                            controller_id = row[3] if len(row) > 3 else "0"
-                            params = row[4:] if len(row) > 4 else []
-                            
-                            # Create display row: [Joint(ID), JointID, ControllerName, ControllerID, Param1, Param2, ...]
-                            display_row = [f"{joint_name} ({joint_id})", joint_id, controller_name, controller_id] + params
-                            self._controller_matrix.append(display_row)
+                        # A valid row is [JointName, <numeric JointID>, ControllerName, ...].
+                        # When a chunk goes missing mid-row the surviving fields shift left, so a
+                        # parameter name can land in the joint-ID slot and invent a phantom joint
+                        # like "Ankle(L) (Dorsi Sca)" ("Dorsi Scaling [Nm]" truncated to 10 chars
+                        # by ListCtrlParams MAX_STRING_LENGTH). Requiring a numeric joint ID
+                        # rejects those rows instead of showing them in the dropdown, and counts
+                        # them as evidence the payload was damaged.
+                        if len(row) < 3 or not str(row[1]).strip().isdigit():
+                            malformed_rows += 1
+                            continue
+
+                        # row[0] = joint name (e.g., "Ankle(L)")
+                        # row[1] = joint ID (e.g., "68")
+                        # row[2] = controller name (e.g., "pjmc_plus")
+                        # row[3] = controller ID (e.g., "11")
+                        # row[4:] = parameter names
+                        joint_name = row[0]
+                        joint_id = row[1]
+                        controller_name = row[2]
+                        controller_id = row[3] if len(row) > 3 else "0"
+                        params = row[4:] if len(row) > 4 else []
+
+                        # Create display row: [Joint(ID), JointID, ControllerName, ControllerID, Param1, Param2, ...]
+                        display_row = [f"{joint_name} ({joint_id})", joint_id, controller_name, controller_id] + params
+                        self._controller_matrix.append(display_row)
                     
                     if self._controller_matrix:
                         self.controllerMatrixReceived.emit(list(self._controller_matrix))
+                        self._emit_matrix_completeness(
+                            self._controller_matrix, malformed_rows,
+                            declared_rows=declared_rows, actual_rows=len(rows))
 
                 # Always emit (possibly empty) so MainWindow can replace stale DB and pad from matrix.
                 flat_values: List[list] = []
@@ -298,6 +327,8 @@ class RtBridge(QtCore.QObject):
             event_info = parts[0]
             event_data = parts[1]
             command = event_info[1] if len(event_info) > 1 else ""
+            if command and command != '?':   # '?' = real-time data (noisy); log the rest
+                self.logger.info(f"[shutdown-debug] cmd={command!r} event_info={event_info!r} event_data={event_data!r}")
             # Extract count from event_info using regex
             m = self._event_count_regex.match(event_info)
             if not m.hasMatch():
@@ -311,6 +342,18 @@ class RtBridge(QtCore.QObject):
 
             if command == 'a':
                 self._handle_param_update_ack(event_data, self._data_length)
+                return
+
+            if command == 'P':
+                # send_shutdown_progress: event_data carries one value = step code, encoded
+                # like every other command payload here (int(value*100), 'n'-terminated).
+                try:
+                    tokens = [t for t in event_data.split('n') if t]
+                    step = int(round(float(tokens[0]) / 100.0)) if tokens else 0
+                except Exception:
+                    step = 0
+                self.logger.warning(f"[shutdown-debug] parsed step={step} from {event_data!r}")
+                self.shutdownProgressReceived.emit(step)
                 return
 
             event_without_count = f"{event_info[0]}{event_info[1]}{event_data}"
@@ -420,6 +463,64 @@ class RtBridge(QtCore.QObject):
         except Exception as e:
             self.logger.error(f"Failed to parse parameter update ack: {e}")
             self.logger.debug(traceback.format_exc())
+
+    def _emit_matrix_completeness(self, matrix, malformed_rows=0,
+                                  declared_rows=None, actual_rows=None):
+        """Warn when the handshake payload looks like it lost rows in transit.
+
+        The controller list is delivered ONCE per connection, as one long string pushed in
+        small BLE notification chunks (ExoBLE.cpp send_handshake_payload). A dropped chunk
+        silently removes controllers from the list; the only symptom used to be a controller
+        quietly absent from the GUI dropdown for the whole session. These checks make that
+        visible so the user knows to reconnect.
+        """
+        try:
+            reasons = []
+
+            # 0) Exact check, when the firmware sent its row-count header. This is the only
+            #    check that catches a symmetric loss on the very first connection.
+            if declared_rows is not None and actual_rows is not None and actual_rows < declared_rows:
+                reasons.append(
+                    f"{declared_rows - actual_rows} of {declared_rows} rows lost in transit")
+
+            # 1) Rows that arrived too short to parse - direct evidence of a mangled payload.
+            if malformed_rows:
+                reasons.append(f"{malformed_rows} malformed row(s)")
+
+            # 2) A bilateral setup exposes the same controllers on both sides, so an
+            #    asymmetric list means at least one side lost entries.
+            per_joint = {}
+            for row in matrix:
+                if len(row) >= 3:
+                    per_joint.setdefault(str(row[0]), set()).add(str(row[2]))
+            if len(per_joint) > 1:
+                full = set()
+                for names in per_joint.values():
+                    full |= names
+                for joint, names in sorted(per_joint.items()):
+                    missing = full - names
+                    if missing:
+                        reasons.append(f"{joint} missing {', '.join(sorted(missing))}")
+
+            # 3) Fewer entries than an earlier connection this run. Catches symmetric
+            #    losses that check 2 cannot see (e.g. one row lost on each side).
+            count = len(matrix)
+            if self._best_matrix_count and count < self._best_matrix_count:
+                reasons.append(
+                    f"{count} entries now vs {self._best_matrix_count} earlier this session")
+            if count > self._best_matrix_count:
+                self._best_matrix_count = count
+
+            if reasons:
+                detail = "; ".join(reasons)
+                self.logger.warning("Controller list looks incomplete: %s", detail)
+                self.controllerMatrixIncomplete.emit(
+                    f"Controller list may be incomplete ({detail}). Disconnect and reconnect to reload it.")
+            else:
+                self.logger.info("Controller list looks complete (%d entries)", count)
+                self.controllerMatrixIncomplete.emit("")
+        except Exception as e:
+            self.logger.warning("Controller matrix completeness check failed: %s", e)
 
     def reset_for_new_ble_session(self):
         """Drop handshake/name/controller parse state before data from the next link arrives."""

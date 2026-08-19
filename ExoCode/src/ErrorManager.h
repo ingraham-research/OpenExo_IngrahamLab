@@ -12,7 +12,13 @@
 #include "error_types.h"
 #include "error_codes.h"
 #include "error_map.h"
+#include "Config.h"     //ERROR_MANAGER_ENABLED
 #include <queue>
+
+//Fail closed: if Config.h somehow is not in scope, stay disabled rather than silently re-enabling.
+#ifndef ERROR_MANAGER_ENABLED
+    #define ERROR_MANAGER_ENABLED 0
+#endif
 
 /**
  * @brief Class manages the calling of error handlers and triggers. Only the control MCU is required to use this.
@@ -33,6 +39,25 @@ class ErrorManager
         template <typename data>
         bool run(data* _data)
         {
+        #if !ERROR_MANAGER_ENABLED
+            // FEATURE TEMPORARILY DISABLED - see ERROR_MANAGER_ENABLED in Config.h for the full
+            // reasoning and the checklist that must be satisfied before turning it back on.
+            //
+            // Short version: no handler takes any protective action, nothing downstream receives
+            // the errors, and the checks cannot fire anyway (five are hardcoded false, MotorTimeout
+            // is unreachable, and TorqueVarianceError's 10-sigma test has a mathematical ceiling of
+            // 9.9 sigma). So the per-cycle cost - two full copies of a 100-element std::queue plus a
+            // 100-iteration Welford pass, per joint - buys a conclusion that can never change.
+            // Returning false here compiles out all eight checks, so the queue stays empty and
+            // Joint.cpp's `if (error)` block never runs.
+            //
+            // Safe to short-circuit: every field these checks touch (smoothed_motor_torque,
+            // torque_error, torque_data_window, torque_failure_count) is written and read ONLY
+            // inside the check that owns it - verified, no external consumer. motor.timeout_count
+            // is only ever set to 0 elsewhere, so nothing depends on MotorTimeoutError clearing it.
+            (void)_data;
+            return false;
+        #else
             //Check for errors
             for (int i_error = (NO_ERROR + 1); i_error != ERROR_CODE_LENGTH; i_error++)
             {
@@ -51,6 +76,7 @@ class ErrorManager
             }
 
             return static_cast<bool>(this->errorQueueSize());
+        #endif
         }
 
         /**

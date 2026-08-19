@@ -13,7 +13,15 @@
 #if defined(ARDUINO_ARDUINO_NANO33BLE) | defined(ARDUINO_NANO_RP2040_CONNECT)
 
 //#define EXOBLE_DEBUG      //Uncomment if you want to print debug statements to the serial monitor
-#define MAX_PARSER_CHARACTERS       8
+
+// Worst-case characters BleParser::package_raw_data can emit for ONE value, used by
+// ExoBLE::send_message to size its stack buffer as (3 + expecting) * (MAX_PARSER_CHARACTERS + 1).
+//
+// This was 8 while package_raw_data bounds each value by its own `_maxChars = 12` (an int is up
+// to "-2147483648", 11 chars, plus the 'n' delimiter). With 8 the buffer was undersized by ~40
+// bytes for a full-length real-time frame, i.e. a stack overrun waiting on the value magnitudes.
+// Keep this >= BleParser::_maxChars.
+#define MAX_PARSER_CHARACTERS       12
 #define NAME_PREAMBLE               "EXOBLE_"
 #define MAC_ADDRESS_TOTAL_LENGTH    17
 #define MAC_ADDRESS_NAME_LENGTH     6

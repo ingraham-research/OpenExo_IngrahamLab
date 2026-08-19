@@ -23,9 +23,16 @@ class BioFeedbackPage(QtWidgets.QWidget):
     recalibrateFSRRequested = QtCore.Signal()
     markTrialRequested = QtCore.Signal()
 
+    # Real-time channel index of each leg's TOE FSR. These are only defaults - both are
+    # user-editable via the spin boxes on this page.
+    #
+    # WAS {"Left Leg": 7, "Right Leg": 5}, which pointed at "In Stance (R)" and "In Stance (L)"
+    # respectively: the wrong signal (a 0/1 stance boolean, not the FSR) AND swapped sides.
+    # Corrected here to the toe-FSR channels in the current layout - see
+    # ExoCode/src/PlottingTitles.h getColumnHeader/bilateral_ankle for the authoritative list.
     _LEG_FSR_INDEX = {
-        "Left Leg": 7,
-        "Right Leg": 5,
+        "Left Leg": 4,   # Toe FSR (L)
+        "Right Leg": 6,  # Toe FSR (R)
     }
 
     def __init__(self, parent=None):
@@ -178,6 +185,12 @@ class BioFeedbackPage(QtWidgets.QWidget):
         except Exception:
             return
 
+        # KNOWN JERKINESS (intentionally not fixed here): this uses wall-clock arrival
+        # time for the x-axis. BLE delivers samples in bursts (~8 at once, then a gap),
+        # so points clump on the time axis and the trace looks jerky even though the data
+        # is a steady ~100Hz. ActiveTrialPage solves this by plotting against the exo's
+        # own "Exoskeleton time (seconds)" channel instead (see ActiveTrialPage._x_for_sample).
+        # If this bio-feedback plot ever looks jerky, that's why -- port _x_for_sample here.
         t_next = time.time() - self._t0
         self._t_vals.append(t_next)
         self._fsr_vals.append(fsr_val)

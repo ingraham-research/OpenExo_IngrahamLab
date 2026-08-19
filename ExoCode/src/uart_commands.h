@@ -10,9 +10,11 @@
 #include "JointData.h"
 #include "ParamsFromSD.h"
 #include "ParamUpdateValidation.h"
+#include "HeelFsrConfig.h"
 #include "Logger.h"
 #include "RealTimeI2C.h"
 #include "SystemReset.h"
+#include "SdLogger.h"     // for SdLogger::close_active() in the reset path (Teensy-only inside)
 
 /**
  * @brief Type to associate a command with an ammount of data
@@ -50,6 +52,7 @@ namespace UART_command_names
     static const uint8_t get_system_reset = 0x19;
     static const uint8_t update_system_reset = 0x1A;
     static const uint8_t update_controller_param_ack = 0x1B;
+    static const uint8_t reset_ack = 0x1C;   // Teensy -> Nano: "got the reset, closing logs"
 };
 
 /**
@@ -337,10 +340,13 @@ namespace UART_command_handlers
         // logger::println("UART_command_handlers::update_cal_fsr->Got msg");
         exo_data->right_side.reset_fsr_calibration = true;
         exo_data->right_side.do_calibration_toe_fsr = 1;
-        exo_data->right_side.do_calibration_heel_fsr = 1;
         exo_data->left_side.reset_fsr_calibration = true;
         exo_data->left_side.do_calibration_toe_fsr = 1;
-        exo_data->left_side.do_calibration_heel_fsr = 1;
+        if (heel_fsr_present())
+        {
+            exo_data->right_side.do_calibration_heel_fsr = 1;
+            exo_data->left_side.do_calibration_heel_fsr = 1;
+        }
     }
 
     inline static void get_refine_fsr(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
@@ -350,9 +356,12 @@ namespace UART_command_handlers
     {
         // logger::println("UART_command_handlers::update_refine_fsr->Got msg");
         exo_data->right_side.do_calibration_refinement_toe_fsr = 1;
-        exo_data->right_side.do_calibration_refinement_heel_fsr = 1;
         exo_data->left_side.do_calibration_refinement_toe_fsr = 1;
-        exo_data->left_side.do_calibration_refinement_heel_fsr = 1;
+        if (heel_fsr_present())
+        {
+            exo_data->right_side.do_calibration_refinement_heel_fsr = 1;
+            exo_data->left_side.do_calibration_refinement_heel_fsr = 1;
+        }
     }
 
     inline static void get_motor_enable_disable(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
@@ -407,19 +416,43 @@ namespace UART_command_handlers
         case (uint8_t)config_defs::exo_name::bilateral_ankle:
 		{
             rx_msg.len = (uint8_t)rt_data::BILATERAL_ANKLE_RT_LEN;
-            rx_msg.data[0] = exo_data->left_side.ankle.controller.desired_torque;
-            rx_msg.data[1] = exo_data->left_side.ankle.controller.filtered_torque_reading;
+			//CHANNEL LAYOUT (keep in sync with PlottingTitles.h getColumnHeader/bilateral_ankle
+			//and ActiveTrialPage._PLOT_PAGES). Channels 0-7 are UNCHANGED from the original
+			//layout, so every existing CSV stays directly comparable:
+			//  0-3   Desired vs Measured torque, per leg
+			//  4-7   Toe FSR + In Stance, per FOOT (deliberately paired: the stance step change
+			//        overlays the FSR trace on one panel, which is how they are read)
+			//  8-9   Commanded torque L/R  (NEW - plotted one per panel, see _PLOT_PAGES)
+			//  10-12 Status, exo clock, battery (not plotted; each has its own GUI readout)
+			rx_msg.data[0] = exo_data->left_side.ankle.controller.desired_torque;
+			rx_msg.data[1] = exo_data->left_side.ankle.controller.filtered_torque_reading;
 			rx_msg.data[2] = exo_data->right_side.ankle.controller.desired_torque;
 			rx_msg.data[3] = exo_data->right_side.ankle.controller.filtered_torque_reading;
 			rx_msg.data[4] = exo_data->left_side.toe_fsr;
-            rx_msg.data[5] = exo_data->left_side.toe_stance;
-			// rx_msg.data[5] = exo_data->left_side.heel_fsr;
-            rx_msg.data[6] = exo_data->right_side.toe_fsr;
+			rx_msg.data[5] = exo_data->left_side.toe_stance;
+			rx_msg.data[6] = exo_data->right_side.toe_fsr;
 			rx_msg.data[7] = exo_data->right_side.toe_stance;
-			// rx_msg.data[7] = exo_data->right_side.heel_fsr;
-			rx_msg.data[8] = 8;
-			rx_msg.data[9] = (float)millis()/1000;
-			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
+			// heel FSR is unused on this build ([Sensors] heelFsrPresent = 0)
+
+			//Channels 8/9: the FINAL commanded torque at the JOINT, in Nm. This is what actually
+			//went out on CAN: post-feed-forward, post-PID, post-gain-schedule, post-
+			//MAX_JOINT_TORQUE_NM clamp, and ZERO on any cycle where a zero frame was sent
+			//(motor.t_ff is assigned in send_data()'s transmit branches for exactly this reason).
+			//Channels 0/2 ("Desired Torque") are the PRE-PID feed-forward setpoint and do NOT show
+			//what drives the motor -- the gap between 0 and 8 is the PID's contribution.
+			//motor.t_ff is motor-frame Nm; x gearing puts it at the joint, so 0/2, 1/3 and 8/9 are
+			//all directly comparable.
+			rx_msg.data[8] = exo_data->left_side.ankle.motor.t_ff * exo_data->left_side.ankle.motor.gearing;
+			rx_msg.data[9] = exo_data->right_side.ankle.motor.t_ff * exo_data->right_side.ankle.motor.gearing;
+
+			//HIJACK: this slot was an unused constant placeholder (was "= 8"). Repurposed to stream
+			//the exo status so the GUI/CSV can see the trial/calibration state (status_defs::messages:
+			//2=trial_on, 4=torque_calibration, 5=fsr_calibration, 6=fsr_refinement, 7=motor_start_up).
+			//Watching it settle at 2 (trial_on) marks FSR refinement finished (set in
+			//Side::check_calibration).
+			rx_msg.data[10] = (float)exo_data->get_status();
+			rx_msg.data[11] = (float)millis()/1000;
+			rx_msg.data[12] = exo_data->get_batt_info(0); //Excluded from the CSV by name, not index
 			break;
 		}
 
@@ -454,6 +487,16 @@ namespace UART_command_handlers
             rx_msg.data[8] = 8;
 			rx_msg.data[9] = (float)millis()/1000;
 			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
+			//Channels 11/12: the FINAL commanded torque at the JOINT, in Nm.
+			//This is what actually went out on CAN: post-feed-forward, post-PID, post-gain-schedule,
+			//post-MAX_JOINT_TORQUE_NM clamp, and zero on any cycle where a zero frame was sent
+			//(motor.t_ff is now assigned in send_data()'s transmit branches for exactly this reason).
+			//Channels 0/2 ("Desired Torque") are the PRE-PID feed-forward setpoint and do NOT show
+			//what drives the motor - the difference between them is the PID's contribution.
+			//motor.t_ff is motor-frame Nm; x gearing puts it at the joint, comparable to
+			//"Desired Torque" and "Measured Torque".
+			rx_msg.data[11] = exo_data->left_side.ankle.motor.t_ff * exo_data->left_side.ankle.motor.gearing;
+			rx_msg.data[12] = exo_data->right_side.ankle.motor.t_ff * exo_data->right_side.ankle.motor.gearing;
 			break;
 		}
 
@@ -528,19 +571,43 @@ namespace UART_command_handlers
         default:
 		{
             rx_msg.len = (uint8_t)rt_data::BILATERAL_ANKLE_RT_LEN;
-            rx_msg.data[0] = exo_data->left_side.ankle.controller.desired_torque;
-            rx_msg.data[1] = exo_data->left_side.ankle.controller.filtered_torque_reading;
+			//CHANNEL LAYOUT (keep in sync with PlottingTitles.h getColumnHeader/bilateral_ankle
+			//and ActiveTrialPage._PLOT_PAGES). Channels 0-7 are UNCHANGED from the original
+			//layout, so every existing CSV stays directly comparable:
+			//  0-3   Desired vs Measured torque, per leg
+			//  4-7   Toe FSR + In Stance, per FOOT (deliberately paired: the stance step change
+			//        overlays the FSR trace on one panel, which is how they are read)
+			//  8-9   Commanded torque L/R  (NEW - plotted one per panel, see _PLOT_PAGES)
+			//  10-12 Status, exo clock, battery (not plotted; each has its own GUI readout)
+			rx_msg.data[0] = exo_data->left_side.ankle.controller.desired_torque;
+			rx_msg.data[1] = exo_data->left_side.ankle.controller.filtered_torque_reading;
 			rx_msg.data[2] = exo_data->right_side.ankle.controller.desired_torque;
 			rx_msg.data[3] = exo_data->right_side.ankle.controller.filtered_torque_reading;
 			rx_msg.data[4] = exo_data->left_side.toe_fsr;
-            rx_msg.data[5] = exo_data->left_side.toe_stance;
-			// rx_msg.data[5] = exo_data->left_side.heel_fsr;
-            rx_msg.data[6] = exo_data->right_side.toe_fsr;
+			rx_msg.data[5] = exo_data->left_side.toe_stance;
+			rx_msg.data[6] = exo_data->right_side.toe_fsr;
 			rx_msg.data[7] = exo_data->right_side.toe_stance;
-			// rx_msg.data[7] = exo_data->right_side.heel_fsr;
-			rx_msg.data[8] = 8;
-			rx_msg.data[9] = (float)millis()/1000;
-			rx_msg.data[10] = exo_data->get_batt_info(0); //Not saved in the CSV file
+			// heel FSR is unused on this build ([Sensors] heelFsrPresent = 0)
+
+			//Channels 8/9: the FINAL commanded torque at the JOINT, in Nm. This is what actually
+			//went out on CAN: post-feed-forward, post-PID, post-gain-schedule, post-
+			//MAX_JOINT_TORQUE_NM clamp, and ZERO on any cycle where a zero frame was sent
+			//(motor.t_ff is assigned in send_data()'s transmit branches for exactly this reason).
+			//Channels 0/2 ("Desired Torque") are the PRE-PID feed-forward setpoint and do NOT show
+			//what drives the motor -- the gap between 0 and 8 is the PID's contribution.
+			//motor.t_ff is motor-frame Nm; x gearing puts it at the joint, so 0/2, 1/3 and 8/9 are
+			//all directly comparable.
+			rx_msg.data[8] = exo_data->left_side.ankle.motor.t_ff * exo_data->left_side.ankle.motor.gearing;
+			rx_msg.data[9] = exo_data->right_side.ankle.motor.t_ff * exo_data->right_side.ankle.motor.gearing;
+
+			//HIJACK: this slot was an unused constant placeholder (was "= 8"). Repurposed to stream
+			//the exo status so the GUI/CSV can see the trial/calibration state (status_defs::messages:
+			//2=trial_on, 4=torque_calibration, 5=fsr_calibration, 6=fsr_refinement, 7=motor_start_up).
+			//Watching it settle at 2 (trial_on) marks FSR refinement finished (set in
+			//Side::check_calibration).
+			rx_msg.data[10] = (float)exo_data->get_status();
+			rx_msg.data[11] = (float)millis()/1000;
+			rx_msg.data[12] = exo_data->get_batt_info(0); //Excluded from the CSV by name, not index
 			break;
 		}
         }
@@ -573,11 +640,19 @@ namespace UART_command_handlers
         #if REAL_TIME_I2C
                 return;
         #endif
-        if (rt_data::len != msg.len)
+        //Bound-check against the buffer CAPACITY instead of demanding an exact match. The old test
+        //was `rt_data::len != msg.len`, where `len` was the capacity - so it rejected every
+        //correctly sized message, exactly like the I2C guard did. Copy what arrived, clamped.
+        //
+        //NOTE: this UART fallback is dead while REAL_TIME_I2C is 1, and it has a second latent
+        //problem: rt_data::float_values / new_rt_msg are `static` in a header, so every
+        //translation unit gets its own copy. The writer here and the reader in ComsMCU.cpp are
+        //different TUs, so this path cannot actually deliver data until those become extern.
+        if (msg.len == 0 || msg.len > rt_data::capacity)
         {
             return;
         }
-        for (int i = 0; i < rt_data::len; i++)
+        for (int i = 0; i < msg.len; i++)
         {
             rt_data::float_values[i] = msg.data[i];
         }
@@ -732,19 +807,45 @@ namespace UART_command_handlers
     // Request a system reset on the receiving MCU (used to reboot Teensy from Nano)
     inline static void get_system_reset(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
     {
-        (void)handler;
         (void)msg;
 
-        // Put system in a safe state before rebooting
+        // Tell the Nano we received the reset FIRST, so the ack is on the wire before we die.
+        // (The Nano relays this to the GUI as the ACKED shutdown step.)
+        UART_msg_t ack;
+        ack.command = UART_command_names::reset_ack;
+        ack.joint_id = 0;
+        ack.len = 0;
+        handler->UART_msg(ack);
+
+        // Put the system in a safe state, then DEFER the reboot by a few control cycles instead
+        // of restarting the CPU here. Rebooting inline (the old behavior) short-circuited the
+        // control loop: setting motor.enabled = 0 only flips a data flag, and the AK60v3's final
+        // zero-torque CAN frame is emitted by run_side() -> _Motor::send_data() on the NEXT control
+        // cycle. Restarting before that cycle ran left the (still-powered) AK60v3 holding its last
+        // non-zero command through the reboot ("frozen" ankle). Arming reset_pending lets the
+        // superloop (ExoCode.ino) run run_side() so the zero frame goes out, then it closes the SD
+        // log and calls exo_system_reset(). The reset_ack above already went to the Nano, so the
+        // ~few-ms slip is invisible to the Nano/GUI shutdown handshake.
         exo_data->for_each_joint([](JointData* j_data, float* args)
         {
             (void)args;
             j_data->motor.enabled = 0;
+        #if END_TRIAL_CUTS_MOTOR_POWER
+            // Also drop the physical motor-enable pin. `enabled = 0` only stops CAN frames; the
+            // motor stays electrically live, so a bad frame can still be held. is_on is consumed
+            // by _Motor::on_off() (called from run_joint every cycle), which drives the pin on the
+            // is_on edge -- so the pin goes low on the NEXT control cycle, well inside the
+            // reset_pending deferral and after send_data() has already emitted zero frames.
+            // Nothing sets is_on back to true except the first-run init block in ExoCode.ino, so
+            // this is only safe on a path that reboots. Do NOT copy it into motors_off ('w', the
+            // Pause button) -- the motors would stay dead until a power cycle.
+            j_data->motor.is_on = false;
+        #endif
             return;
         });
         exo_data->set_status(status_defs::messages::trial_off);
-        delay(10);
-        exo_system_reset();
+        exo_data->reset_ticks = 0;
+        exo_data->reset_pending = true;
     }
 
 };
@@ -858,9 +959,20 @@ namespace UART_command_utils
 
         //logger::println("UART_command_utils::handle_message->got message: ");
         //UART_msg_t_utils::print_msg(msg);
-		
-		Serial.print("\nmsg.command:");
-		Serial.print(msg.command);
+
+		// ---- Per-message Serial print removed (left here on purpose, see below) ----
+		// Serial.print("\nmsg.command:");
+		// Serial.print(msg.command);
+		//
+		// handle_msg() is called from the 500 Hz control loop on the Teensy and from the coms
+		// loop on the Nano, once per inbound UART message. Normally that is a trickle, but any
+		// condition that spams UART turns it into a torrent - the latched TorqueVarianceError,
+		// for instance, reports every single control cycle, which is ~1000 messages/second and
+		// therefore ~1000 blocking Serial writes/second right inside the control loop.
+		// Kept commented because it is the fastest way to see what the two boards are saying to
+		// each other, but it is not a practical debug channel any time soon: getting serial out
+		// of this hardware means tethering a board that normally runs untethered on battery.
+		// Prefer the BLE/RT stream or a rate-limited one-shot if this needs to be observed.
         switch (msg.command)
         {
         case UART_command_names::empty_msg:

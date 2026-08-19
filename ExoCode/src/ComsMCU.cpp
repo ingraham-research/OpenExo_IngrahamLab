@@ -55,7 +55,15 @@ ComsMCU::ComsMCU(ExoData* data, uint8_t* config_to_send):_data{data}
             break;
     }
 
-    //rt_data::msg_len = rt_data_len
+    //Remember the configured payload length. This used to be computed and then thrown away, and
+    //update_gui() used rt_data::capacity (16) instead - which overran BleMessage::data[10] by six
+    //floats on every packet and put three channels of uninitialised garbage on the BLE stream.
+    //It is only the fallback: poll() returns the length carried by the packet itself.
+    if (rt_data_len > 0 && rt_data_len <= rt_data::capacity)
+    {
+        _rt_len = rt_data_len;
+    }
+
     // logger::print("ComsMCU::ComsMCU->rt_data_len: "); logger::println(rt_data_len);
 }
 
@@ -132,7 +140,11 @@ void ComsMCU::update_UART()
 
         if (msg.command)
         {
-            if (msg.command == UART_command_names::update_controller_param_ack)
+            if (msg.command == UART_command_names::reset_ack)
+            {
+                _reset_ack_received = true;   // Teensy confirmed it got the reset (relayed to GUI)
+            }
+            else if (msg.command == UART_command_names::update_controller_param_ack)
             {
                 _send_param_update_ack(msg);
             }
@@ -159,10 +171,19 @@ void ComsMCU::update_gui()
 
     static Time_Helper* t_helper = Time_Helper::get_instance();
     static float my_mark = _data->mark;
-    static float* rt_floats = new float(rt_data::len);
+    // WAS: `new float(rt_data::len)` -- a single-float allocation, not an array, which
+    // real_time_i2c::poll() then filled with rt_data::len floats. See RealTimeI2C.h.
+    static float rt_floats[rt_data::MAX_LEN];
 
-    //Get real time data from ExoData and send to GUI
-    const bool new_rt_data = real_time_i2c::poll(rt_floats);
+    //Get real time data from ExoData and send to GUI.
+    //poll() reports how many floats it actually wrote; keep that as the authoritative length so
+    //everything downstream (the copy loop, `expecting`, the BLE frame) agrees with the packet.
+    uint8_t rt_len_from_packet = 0;
+    const bool new_rt_data = real_time_i2c::poll(rt_floats, &rt_len_from_packet);
+    if (new_rt_data && rt_len_from_packet > 0)
+    {
+        _rt_len = rt_len_from_packet;
+    }
     static float del_t_no_msg = millis();
 
     if (new_rt_data || rt_data::new_rt_msg)
@@ -176,12 +197,25 @@ void ComsMCU::update_gui()
         _life_pulse();
         rt_data::new_rt_msg = false;
 
+        //Length is the PAYLOAD length, never rt_data::capacity, and it is clamped to what
+        //BleMessage can physically hold. BleMessage::data is _max_size floats; writing past it
+        //corrupts whatever follows the object (here, a stack frame) at ~100 Hz.
+        uint8_t rt_len = _rt_len;
+        if (rt_len > (uint8_t)BleMessage::k_max_data)
+        {
+            rt_len = (uint8_t)BleMessage::k_max_data;
+        }
+        if (rt_len > rt_data::capacity)
+        {
+            rt_len = rt_data::capacity;
+        }
+
         BleMessage rt_data_msg = BleMessage();
         rt_data_msg.command = ble_names::send_real_time_data;
-        rt_data_msg.expecting = rt_data::len;
+        rt_data_msg.expecting = rt_len;
 
-        for (int i = 0; i < rt_data::len; i++)
-        {   
+        for (uint8_t i = 0; i < rt_len; i++)
+        {
             #if REAL_TIME_I2C
                 rt_data_msg.data[i] = rt_floats[i];
             #else
@@ -392,30 +426,84 @@ void ComsMCU::_send_param_update_ack(UART_msg_t msg)
 
 void ComsMCU::_schedule_system_reset()
 {
-    _reset_pending = true;
-    _reset_start_ms = millis();
+    _reset_state = ResetState::PENDING;
+    _reset_step_ms = millis();
+    _reset_ack_received = false;
 }
 
 void ComsMCU::_maybe_system_reset()
 {
-    if (!_reset_pending)
+    switch (_reset_state)
     {
+    case ResetState::IDLE:
         return;
-    }
-    if ((millis() - _reset_start_ms) < _reset_delay_ms)
+
+    case ResetState::PENDING:
+        _send_shutdown_progress(shutdown_progress::RECEIVED);
+        _reset_state = ResetState::SENT;
+        _reset_step_ms = millis();
+        break;
+
+    case ResetState::SENT:
     {
-        return;
+        UARTHandler* uart_handler = UARTHandler::get_instance();
+        UART_msg_t tx_msg;
+        tx_msg.command = UART_command_names::get_system_reset;
+        tx_msg.joint_id = 0;
+        tx_msg.len = 0;
+        uart_handler->UART_msg(tx_msg);
+        _send_shutdown_progress(shutdown_progress::SENT);
+        _reset_ack_received = false;
+        _reset_state = ResetState::WAIT_ACK;
+        _reset_step_ms = millis();
+        break;
     }
 
-    UARTHandler* uart_handler = UARTHandler::get_instance();
-    UART_msg_t tx_msg;
-    tx_msg.command = UART_command_names::get_system_reset;
-    tx_msg.joint_id = 0;
-    tx_msg.len = 0;
-    uart_handler->UART_msg(tx_msg);
-    delay(10);
+    case ResetState::WAIT_ACK:
+        if (_reset_ack_received)
+        {
+            _send_shutdown_progress(shutdown_progress::ACKED);
+            _reset_state = ResetState::SEND_REBOOT;
+            _reset_step_ms = millis();
+        }
+        else if ((millis() - _reset_step_ms) >= _reset_ack_timeout_ms)
+        {
+            _send_shutdown_progress(shutdown_progress::TIMEOUT);
+            _reset_state = ResetState::SEND_REBOOT;
+            _reset_step_ms = millis();
+        }
+        break;
 
-    exo_system_reset();
+    case ResetState::SEND_REBOOT:
+        // Send REBOOTING in a SEPARATE loop iteration from ACKED/TIMEOUT above. Two
+        // writeValue() calls in one iteration queue two notifications before BLE.poll()
+        // pumps them, and under load the first (ACKED/TIMEOUT) gets overwritten/dropped --
+        // which was hiding that step. One notification per iteration lets each be sent.
+        _send_shutdown_progress(shutdown_progress::REBOOTING);
+        _reset_state = ResetState::REBOOTING;
+        _reset_step_ms = millis();
+        break;
+
+    case ResetState::REBOOTING:
+        // Give the final BLE notification time to go out before the radio dies.
+        if ((millis() - _reset_step_ms) >= _reset_flush_ms)
+        {
+            exo_system_reset();
+        }
+        break;
+    }
+}
+
+void ComsMCU::_send_shutdown_progress(uint8_t step)
+{
+    // Nano -> GUI: one end-trial shutdown step (see shutdown_progress:: in ble_commands.h).
+    // Built like the real-time-data message in update_gui(); data[i] is scaled *100 by the
+    // BLE parser, and the GUI divides back by 100.
+    BleMessage msg = BleMessage();
+    msg.command = ble_names::send_shutdown_progress;
+    msg.expecting = 1;
+    msg.data[0] = (float)step;
+    _exo_ble->send_message(msg);
 }
 
 void ComsMCU::_life_pulse()
