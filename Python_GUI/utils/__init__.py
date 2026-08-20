@@ -1,6 +1,6 @@
 """Utilities module for OpenExo Qt GUI."""
 
-from .config import UIConfig, JointConfig, PlotConfig
+from .config import UIConfig, JointConfig, PlotConfig, RemoteConfig
 from .settings_manager import SettingsManager
 from .ui_helpers import (
     load_logo, style_button, style_label, style_combo_box, style_spinbox,
@@ -12,6 +12,7 @@ __all__ = [
     'UIConfig',
     'JointConfig',
     'PlotConfig',
+    'RemoteConfig',
     'SettingsManager',
     'load_logo',
     'style_button',

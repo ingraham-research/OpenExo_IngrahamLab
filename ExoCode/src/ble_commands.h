@@ -100,6 +100,11 @@ namespace ble
         
         //Sending Commands
         {ble_names::send_batt,              1},
+        //NOTE: this table is only consulted by BleParser::_handle_command for INBOUND
+        //(GUI -> firmware) commands, so this entry is inert. The real-time frame length is
+        //dynamic and is set explicitly by ComsMCU::update_gui from the payload the Teensy
+        //actually sent - do NOT treat this 11 as the channel count, that confusion between a
+        //hardcoded length and the real payload length is what silently killed the RT stream.
         {ble_names::send_real_time_data,    11},
         {ble_names::send_error_count,       1},
         {ble_names::send_cal_done,          0},
@@ -163,7 +168,8 @@ namespace ble_handlers
 {
     inline static void start(ExoData* data, BleMessage* msg)
     {
-        //Start the trial (ie Enable motors and begin streaming data). If the joint is used; enable the motor, and set the controller to zero torque
+        //Start the trial (ie Enable motors and begin streaming data). If the joint is used, enable the motor.
+        //Controller selection is governed by the config.ini default / the last GUI selection; this handler does not change the controller.
         data->for_each_joint(
             
             // This is a lamda or anonymous function, see https://www.learncpp.com/cpp-tutorial/introduction-to-lambdas-anonymous-functions/

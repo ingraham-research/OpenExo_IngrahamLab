@@ -19,7 +19,8 @@ from pages import (
     BioFeedbackPage,
 )
 from services import QtExoDeviceManager, RtBridge
-from utils import SettingsManager
+from utils import SettingsManager, RemoteConfig
+from remote.service import RemoteControlService
 from Widgets.ShutdownDialog import ShutdownDialog
 
 
@@ -96,6 +97,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rt_bridge.controllersReceived.connect(self._on_controllers)
         # Receive flattened 2D matrix of controllers and parameters
         self.rt_bridge.controllerMatrixReceived.connect(self._on_controller_matrix)
+        self.rt_bridge.controllerMatrixIncomplete.connect(self._on_controller_matrix_incomplete)
         self.rt_bridge.controllerValuesReceived.connect(self._on_controller_values)
         self.rt_bridge.paramUpdateAckReceived.connect(self._on_param_update_ack)
 
@@ -103,6 +105,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._csv_file = None
         self._csv_writer = None
         self._csv_header_written = False
+        # Channel indices written to the CSV, fixed when the header is written so header and rows
+        # can never disagree. See _csv_channel_indices().
+        self._csv_indices = []
         self._param_names = []
         self._t0 = None
         self._csv_path_last = None
@@ -110,6 +115,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._csv_preamble = ""  # Preamble for CSV filename
         # Store controller -> params 2D matrix
         self._controller_matrix = []
+        # Warning text when the handshake delivered a short controller list ("" = looks fine).
+        self._controller_matrix_warning = ""
         # Store controller values by (joint_id, controller_id)
         self._controller_values = {}
         self._pending_param_updates = {}
@@ -147,6 +154,51 @@ class MainWindow(QtWidgets.QMainWindow):
         log_path = self.qt_dev.get_log_file_path()
         if log_path and log_path != "Log file not available":
             self.logger.info("Device manager log file: %s", log_path)
+
+        # ----- UDP remote control (localhost only; default on) -----
+        self.remote = None
+        if RemoteConfig.ENABLED:
+            try:
+                self.remote = RemoteControlService(parent=self)
+            except Exception as e:
+                self.logger.error(f"Failed to construct remote control service: {e}")
+                self.logger.debug(traceback.format_exc())
+                self.remote = None
+
+        if self.remote is not None and self.remote.is_bound():
+            host, port = self.remote.address()
+            # Inbound: remote commands drive the navigation-free apply path.
+            self.remote.setParamRequested.connect(self._apply_param_update)
+            # Outbound: fan existing BLE-derived signals to subscribers.
+            self.rt_bridge.rtDataUpdated.connect(self.remote.publish_rt)
+            self.rt_bridge.paramUpdateAckReceived.connect(self.remote.publish_ack)
+            self.rt_bridge.controllerMatrixReceived.connect(self.remote.set_controller_matrix)
+            self.rt_bridge.controllerValuesReceived.connect(self.remote.publish_values)
+            self.rt_bridge.parameterNamesReceived.connect(self.remote.set_param_names)
+            self.rt_bridge.shutdownProgressReceived.connect(
+                lambda step: self.remote.publish_status("shutdown_progress", step=int(step)))
+            self.qt_dev.connected.connect(
+                lambda name, addr: self.remote.publish_status("connected", name=name, address=addr))
+            self.qt_dev.disconnected.connect(
+                lambda: self.remote.publish_status("disconnected"))
+            self.qt_dev.deviceErrorReceived.connect(
+                lambda msg: self.remote.publish_status("device_error", message=msg))
+
+            banner = (
+                "\n" + "=" * 60 + "\n"
+                f" REMOTE CONTROL ACTIVE - listening on udp://{host}:{port}\n"
+                " External scripts can change controller parameters.\n"
+                " Localhost only. Disable: utils/config.py RemoteConfig.ENABLED\n"
+                + "=" * 60
+            )
+            print(banner)
+            self.logger.info("Remote control active on udp://%s:%s", host, port)
+        elif RemoteConfig.ENABLED:
+            print("\n" + "=" * 60 + "\n"
+                  " REMOTE CONTROL FAILED TO BIND - continuing without it.\n"
+                  " Another process may hold the port. See the log for details.\n"
+                  + "=" * 60)
+            self.logger.error("Remote control enabled but failed to bind; GUI continues without it.")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -203,11 +255,19 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._csv_writer is not None:
                 if not self._csv_header_written:
                     header = ["epoch", "mark"]
-                    # Only include first 10 parameters (exclude battery and beyond)
+                    # Log EVERY advertised channel except the battery, which has its own readout.
+                    #
+                    # This used to be a hardcoded `[:10]`, which was only ever meant to drop the
+                    # battery (then at index 10). When the payload grew from 11 to 13 channels
+                    # that cap silently discarded the two new ones -- Commanded Torque (L/R), the
+                    # post-PID post-clamp value that actually drives the motor. Selecting by name
+                    # means the CSV follows whatever the firmware advertises, and survived the
+                    # channel renumbering that moved battery to index 12.
+                    self._csv_indices = self._csv_channel_indices(values)
                     if self._param_names:
-                        header.extend(self._param_names[:10])
+                        header.extend(self._param_names[i] for i in self._csv_indices)
                     else:
-                        header.extend([f"data{i}" for i in range(min(10, len(values)))])
+                        header.extend(f"data{i}" for i in self._csv_indices)
                     try:
                         self._csv_writer.writerow(header)
                         self._csv_header_written = True
@@ -216,29 +276,33 @@ class MainWindow(QtWidgets.QMainWindow):
                     except Exception as e:
                         self.logger.error(f"Failed to write CSV header: {e}")
                         self.logger.debug(traceback.format_exc())
-                # Write row - only include first 10 data values
+                # Write row using the same channel selection as the header, so they can never
+                # drift apart (a row shorter/longer than the header silently misaligns columns).
                 epoch_time = time.time()
-                data_values = values[:10] if len(values) > 10 else values
-                row = [f"{epoch_time:.6f}", str(self._mark_counter)] + [f"{v:.6f}" for v in data_values]
+                row = [f"{epoch_time:.6f}", str(self._mark_counter)] + [
+                    f"{values[i]:.6f}" if i < len(values) else "" for i in self._csv_indices]
                 try:
                     self._csv_writer.writerow(row)
                 except Exception as e:
                     self.logger.error(f"Failed to write CSV row: {e}")
                     self.logger.debug(traceback.format_exc())
             
-            # Update battery level (assuming it's in the data somewhere)
+            # Battery and status are located BY NAME, not by a hardcoded index. The channel
+            # layout has been renumbered once already (to put Commanded Torque L/R adjacent) and
+            # a stale literal here silently plots the wrong signal rather than failing.
             try:
-                if len(values) > 10:
-                    battery_voltage = values[10]  # Battery is typically at index 10
+                battery_voltage = self._channel_value(values, "Battery Level (Volts)", 12)
+                if battery_voltage is not None:
                     self.trial_page.update_battery_level(battery_voltage)
             except Exception as e:
                 self.logger.error(f"Failed to update battery level: {e}")
                 self.logger.debug(traceback.format_exc())
 
-            # Update exo status readout from the hijacked RT Channel 8 (firmware status word).
+            # Exo status readout from the hijacked status channel (firmware status word).
             try:
-                if len(values) > 8:
-                    self.trial_page.update_exo_status(values[8])
+                status_value = self._channel_value(values, "Status", 10)
+                if status_value is not None:
+                    self.trial_page.update_exo_status(status_value)
             except Exception as e:
                 self.logger.error(f"Failed to update exo status: {e}")
                 self.logger.debug(traceback.format_exc())
@@ -258,6 +322,37 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.logger.error(f"Failed to update status text for handshake: {e}")
             self.logger.debug(traceback.format_exc())
+
+    # Channels excluded from the CSV. Battery has its own on-screen readout and changes far too
+    # slowly to be worth a column at ~100 Hz. Matched by NAME so adding firmware channels never
+    # silently drops one (see PlottingTitles.h / uart_commands.h get_real_time_data).
+    _CSV_EXCLUDED_CHANNELS = ("Battery Level (Volts)",)
+
+    def _channel_value(self, values, name: str, fallback_index: int):
+        """Look up a real-time channel by its advertised name.
+
+        Falls back to `fallback_index` only when the handshake delivered no names (which also
+        happens when the controller list arrives truncated). Returns None if unavailable.
+        """
+        try:
+            idx = self._param_names.index(name) if self._param_names else fallback_index
+        except ValueError:
+            idx = fallback_index
+        return values[idx] if 0 <= idx < len(values) else None
+
+    def _csv_channel_indices(self, values) -> list:
+        """Which real-time channel indices get written to the CSV.
+
+        Resolved once, when the header is written, and reused for every row so header and data
+        can never misalign.
+        """
+        if self._param_names:
+            return [i for i, name in enumerate(self._param_names)
+                    if name not in self._CSV_EXCLUDED_CHANNELS]
+        # No names from the handshake. RtBridge pads every packet to 16, so len(values) cannot
+        # tell us how many channels the firmware actually sent; fall back to the bilateral_ankle
+        # layout (13 channels, battery LAST at index 12) rather than logging padding zeros.
+        return [i for i in range(min(13, len(values))) if i != 12]
 
     @QtCore.Slot(list)
     def _on_param_names(self, names):
@@ -299,6 +394,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.qt_dev.write(b'$')
         except Exception as e:
             self.logger.error(f"Failed to send ACK for controllers: {e}")
+            self.logger.debug(traceback.format_exc())
+
+    @QtCore.Slot(str)
+    def _on_controller_matrix_incomplete(self, message: str):
+        """Surface a short/garbled controller list instead of letting it fail silently.
+
+        The list is fetched once per BLE connection, so a controller missing here stays
+        missing for the whole session - reconnecting is the fix.
+        """
+        self._controller_matrix_warning = message or ""
+        if not self._controller_matrix_warning:
+            return
+        self.logger.warning(f"Controller list incomplete: {self._controller_matrix_warning}")
+        try:
+            self.settings_page.set_param_update_status(self._controller_matrix_warning, warning=True)
+        except Exception as e:
+            self.logger.error(f"Failed to show controller list warning: {e}")
             self.logger.debug(traceback.format_exc())
 
     @QtCore.Slot(list)
@@ -819,6 +931,15 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 self.logger.error(f"Failed to set controller matrix in settings: {e}")
                 self.logger.debug(traceback.format_exc())
+            # Re-show any incomplete-list warning: the one raised at connect has usually
+            # timed out by now, and this page is where a missing controller is noticed.
+            if self._controller_matrix_warning:
+                try:
+                    self.settings_page.set_param_update_status(
+                        self._controller_matrix_warning, warning=True)
+                except Exception as e:
+                    self.logger.error(f"Failed to re-show controller list warning: {e}")
+                    self.logger.debug(traceback.format_exc())
             self.stack.setCurrentWidget(self.settings_page)
         else:
             self.stack.setCurrentWidget(self.basic_settings_page)
@@ -847,10 +968,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # Placeholder hook
         pass
 
-    @QtCore.Slot(list)
-    def _on_apply_settings(self, payload):
-        # payload: [isBilateral, joint, controller, parameter, value]
-        self.logger.info(f"Applying settings: {payload}")
+    def _apply_param_update(self, payload) -> bool:
+        """Core parameter-update path shared by the GUI Apply button and the UDP
+        remote. Validates, queues the pending ack, and sends over BLE. Does NOT
+        navigate — callers that are GUI buttons handle navigation themselves."""
+        self.logger.info(f"Applying param update: {payload}")
         try:
             updates = QtExoDeviceManager.build_parameter_updates(payload)
             self._queue_pending_param_updates(updates)
@@ -859,14 +981,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.logger.error(f"Invalid parameter update request: {e}")
             self.logger.debug(traceback.format_exc())
             self._show_param_update_status(f"Controller update not sent: {e}", warning=True)
-            return
+            return False
 
         try:
             self.qt_dev.updateTorqueValues(payload)
         except Exception as e:
             self.logger.error(f"Failed to update torque values: {e}")
             self.logger.debug(traceback.format_exc())
-        # Return to trial page
+            return False
+        return True
+
+    @QtCore.Slot(list)
+    def _on_apply_settings(self, payload):
+        # payload: [isBilateral, joint, controller, parameter, value]
+        self._apply_param_update(payload)
+        # Return to trial page (GUI-button behavior only).
         try:
             self.stack.setCurrentWidget(self.trial_page)
         except Exception as e:

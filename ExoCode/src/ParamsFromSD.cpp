@@ -39,8 +39,30 @@
         //logger::println("File Not Found, ");
     }
     
+    // Initialize the SD card ONCE, not on every controller change.
+    //
+    // Each joint branch below used to run SPI.begin() + SD.begin(SD_SELECT) every call. SD.begin()
+    // re-mounts the card (re-runs the card-init handshake), which blocks the 500 Hz control loop for
+    // several ms. Because set_controller_params() runs synchronously inside the loop on every
+    // controller switch, that stall starved the motor of fresh CAN frames -- and the AK60v3 holds
+    // its last torque command when frames stop, so the ankle "froze" during the switch. The card is
+    // already mounted once at boot (ParseIni), and SdLogger treats SD.begin() as init-once too
+    // (see SdLogger::_begin_if_needed). This mirrors that: mount once, cache it, retry only if the
+    // first mount failed (e.g. no card yet).
+    static bool _sd_ready()
+    {
+        static bool mounted = false;
+        if (mounted)
+        {
+            return true;
+        }
+        SPI.begin();
+        mounted = SD.begin(SD_SELECT);
+        return mounted;
+    }
+
     uint8_t set_controller_params(uint8_t joint_id, uint8_t controller_id, uint8_t set_num, ExoData* exo_data)
-    {   
+    {
         //SD inherits from stream which has a lot more useful methods that we will use.
         File param_file;
         std::string filename;
@@ -65,7 +87,7 @@
                     logger::println("set_controller_params : SPI Begin");
                 #endif
 
-                if (!SD.begin(SD_SELECT))
+                if (!_sd_ready())
                 {
                     error_type = utils::update_bit((uint8_t)config_defs::joint_id::hip, 1, param_error::SD_not_found_idx);
                     
@@ -261,7 +283,7 @@
                     logger::println("set_controller_params : SPI Begin");
                 #endif
 
-                if (!SD.begin(SD_SELECT))
+                if (!_sd_ready())
                 {
                     error_type = utils::update_bit((uint8_t)config_defs::joint_id::knee, 1, param_error::SD_not_found_idx);
 
@@ -457,7 +479,7 @@
                     logger::println("set_controller_params : SPI Begin");
                 #endif
 
-                if (!SD.begin(SD_SELECT))
+                if (!_sd_ready())
                 {
                     error_type = utils::update_bit((uint8_t)config_defs::joint_id::ankle, 1, param_error::SD_not_found_idx);
 
@@ -656,7 +678,7 @@
                     logger::println("set_controller_params : SPI Begin");
                 #endif
 
-                if (!SD.begin(SD_SELECT))
+                if (!_sd_ready())
                 {
                     error_type = utils::update_bit((uint8_t)config_defs::joint_id::elbow, 1, param_error::SD_not_found_idx);
 
@@ -845,7 +867,7 @@
             {
                 SPI.begin();
 
-                if (!SD.begin(SD_SELECT))
+                if (!_sd_ready())
                 {
                     error_type = utils::update_bit((uint8_t)config_defs::joint_id::arm_1, 1, param_error::SD_not_found_idx);
                     return error_type;
@@ -930,7 +952,7 @@
             {
                 SPI.begin();
 
-                if (!SD.begin(SD_SELECT))
+                if (!_sd_ready())
                 {
                     error_type = utils::update_bit((uint8_t)config_defs::joint_id::arm_2, 1, param_error::SD_not_found_idx);
                     return error_type;

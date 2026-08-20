@@ -55,7 +55,15 @@ ComsMCU::ComsMCU(ExoData* data, uint8_t* config_to_send):_data{data}
             break;
     }
 
-    //rt_data::msg_len = rt_data_len
+    //Remember the configured payload length. This used to be computed and then thrown away, and
+    //update_gui() used rt_data::capacity (16) instead - which overran BleMessage::data[10] by six
+    //floats on every packet and put three channels of uninitialised garbage on the BLE stream.
+    //It is only the fallback: poll() returns the length carried by the packet itself.
+    if (rt_data_len > 0 && rt_data_len <= rt_data::capacity)
+    {
+        _rt_len = rt_data_len;
+    }
+
     // logger::print("ComsMCU::ComsMCU->rt_data_len: "); logger::println(rt_data_len);
 }
 
@@ -163,10 +171,19 @@ void ComsMCU::update_gui()
 
     static Time_Helper* t_helper = Time_Helper::get_instance();
     static float my_mark = _data->mark;
-    static float* rt_floats = new float(rt_data::len);
+    // WAS: `new float(rt_data::len)` -- a single-float allocation, not an array, which
+    // real_time_i2c::poll() then filled with rt_data::len floats. See RealTimeI2C.h.
+    static float rt_floats[rt_data::MAX_LEN];
 
-    //Get real time data from ExoData and send to GUI
-    const bool new_rt_data = real_time_i2c::poll(rt_floats);
+    //Get real time data from ExoData and send to GUI.
+    //poll() reports how many floats it actually wrote; keep that as the authoritative length so
+    //everything downstream (the copy loop, `expecting`, the BLE frame) agrees with the packet.
+    uint8_t rt_len_from_packet = 0;
+    const bool new_rt_data = real_time_i2c::poll(rt_floats, &rt_len_from_packet);
+    if (new_rt_data && rt_len_from_packet > 0)
+    {
+        _rt_len = rt_len_from_packet;
+    }
     static float del_t_no_msg = millis();
 
     if (new_rt_data || rt_data::new_rt_msg)
@@ -180,12 +197,25 @@ void ComsMCU::update_gui()
         _life_pulse();
         rt_data::new_rt_msg = false;
 
+        //Length is the PAYLOAD length, never rt_data::capacity, and it is clamped to what
+        //BleMessage can physically hold. BleMessage::data is _max_size floats; writing past it
+        //corrupts whatever follows the object (here, a stack frame) at ~100 Hz.
+        uint8_t rt_len = _rt_len;
+        if (rt_len > (uint8_t)BleMessage::k_max_data)
+        {
+            rt_len = (uint8_t)BleMessage::k_max_data;
+        }
+        if (rt_len > rt_data::capacity)
+        {
+            rt_len = rt_data::capacity;
+        }
+
         BleMessage rt_data_msg = BleMessage();
         rt_data_msg.command = ble_names::send_real_time_data;
-        rt_data_msg.expecting = rt_data::len;
+        rt_data_msg.expecting = rt_len;
 
-        for (int i = 0; i < rt_data::len; i++)
-        {   
+        for (uint8_t i = 0; i < rt_len; i++)
+        {
             #if REAL_TIME_I2C
                 rt_data_msg.data[i] = rt_floats[i];
             #else
