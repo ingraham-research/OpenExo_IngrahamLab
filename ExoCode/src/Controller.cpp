@@ -875,7 +875,7 @@ float Spline::calc_motor_cmd()
         _controller_data->parameters[controller_defs::spline::node12_y_idx],
     };
 
-    float torque_cmd = _spline_interpolate(x, y, percent_gait);
+    float torque_cmd = _pchip_interpolate(x, y, percent_gait);
     if (torque_cmd > 15.0f)
     {
         torque_cmd = 15.0f;
@@ -974,6 +974,95 @@ float Spline::_spline_interpolate(const float* x, const float* y, float percent_
 
     return (a * y[k]) + (b * y[k + 1])
         + (((a * a * a) - a) * y2[k] + ((b * b * b) - b) * y2[k + 1]) * (h * h) / 6.0f;
+}
+
+float Spline::_pchip_edge_tangent(float h0, float h1, float m0, float m1)
+{
+    float d = ((2.0f * h0 + h1) * m0 - h0 * m1) / (h0 + h1);
+    const bool sign_d = d >= 0.0f;
+    const bool sign_m0 = m0 >= 0.0f;
+    if (sign_d != sign_m0)
+    {
+        return 0.0f;
+    }
+    const bool sign_m1 = m1 >= 0.0f;
+    if (sign_m0 != sign_m1 && fabsf(d) > 3.0f * fabsf(m0))
+    {
+        return 3.0f * m0;
+    }
+    return d;
+}
+
+float Spline::_pchip_interpolate(const float* x, const float* y, float percent_gait)
+{
+    const int n = 12;
+
+    for (int i = 1; i < n; ++i)
+    {
+        if (x[i] <= x[i - 1])
+        {
+            return 0.0f;
+        }
+    }
+
+    if (percent_gait <= x[0])
+    {
+        return y[0];
+    }
+    if (percent_gait >= x[n - 1])
+    {
+        return y[n - 1];
+    }
+
+    float h[n - 1];
+    float secant[n - 1];
+    for (int i = 0; i < n - 1; ++i)
+    {
+        h[i] = x[i + 1] - x[i];
+        secant[i] = (y[i + 1] - y[i]) / h[i];
+    }
+
+    float m[n];
+    for (int i = 1; i < n - 1; ++i)
+    {
+        const float m0 = secant[i - 1];
+        const float m1 = secant[i];
+        if (m0 == 0.0f || m1 == 0.0f || (m0 > 0.0f) != (m1 > 0.0f))
+        {
+            m[i] = 0.0f;
+        }
+        else
+        {
+            const float w1 = 2.0f * h[i] + h[i - 1];
+            const float w2 = h[i] + 2.0f * h[i - 1];
+            m[i] = (w1 + w2) / (w1 / m0 + w2 / m1);
+        }
+    }
+    m[0] = _pchip_edge_tangent(h[0], h[1], secant[0], secant[1]);
+    m[n - 1] = _pchip_edge_tangent(h[n - 2], h[n - 3], secant[n - 2], secant[n - 3]);
+
+    int k = 0;
+    for (int i = 0; i < n - 1; ++i)
+    {
+        if (percent_gait >= x[i] && percent_gait <= x[i + 1])
+        {
+            k = i;
+            break;
+        }
+    }
+
+    const float h_k = x[k + 1] - x[k];
+    const float s = (percent_gait - x[k]) / h_k;
+    const float s2 = s * s;
+    const float s3 = s2 * s;
+
+    const float h00 = 2.0f * s3 - 3.0f * s2 + 1.0f;
+    const float h10 = s3 - 2.0f * s2 + s;
+    const float h01 = -2.0f * s3 + 3.0f * s2;
+    const float h11 = s3 - s2;
+
+    return h00 * y[k] + h10 * h_k * m[k]
+         + h01 * y[k + 1] + h11 * h_k * m[k + 1];
 }
 
 
