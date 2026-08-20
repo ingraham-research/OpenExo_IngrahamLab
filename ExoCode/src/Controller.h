@@ -234,6 +234,8 @@ class Spline: public _Controller
 
     private:
         float _spline_interpolate(const float* x, const float* y, float percent_gait);
+        float _pchip_interpolate(const float* x, const float* y, float percent_gait);
+        static float _pchip_edge_tangent(float h0, float h1, float m0, float m1);
 };
 
 /**
