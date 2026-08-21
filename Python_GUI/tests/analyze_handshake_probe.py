@@ -1,115 +1,107 @@
 """Score the Tier 0 / Tier 1 handshake experiment.
 
 TEMPORARY — companion to services/HandshakeProbe.py, for the `fix_nano_GUI_handshaking`
-investigation. See `Modification log with claude/Nano-GUI-Handshake-Audit.md` §7.
+investigation. See `Modification log with claude/Nano-GUI-Handshake-Audit.md` sec 7.
 
 Usage (from Python_GUI/):
 
     python tests/analyze_handshake_probe.py
     python tests/analyze_handshake_probe.py --dir Saved_Data/logs/handshake_probe
+    python tests/analyze_handshake_probe.py --holes     # list every hole individually
 
 What it does:
 
 * Reads every per-connection chunk log written by HandshakeProbe.
-* Picks the **modal payload** — the byte string seen most often — as the reference "clean" payload.
-  This self-calibrates from the data, so no model of the SD card CSVs is needed and no assumption
-  about which controllers should be present.
-* Diffs every other payload against it. The expected damage is a *contiguous deletion*, so a
-  common-prefix / common-suffix decomposition recovers the hole exactly. Anything that does not
-  decompose that way is reported as such, which is itself a finding.
-* Reports, per damaged connection: hole offset, hole size, whether the size is a multiple of the
-  19-byte chunk, and whether the hole is aligned to a chunk boundary measured from the start of
-  the payload body (i.e. after the `n,<rows>|` header, which is sent as its own notification).
-* Summarises pass/fail per arm.
+* Picks the **modal payload** as the reference "clean" payload. Self-calibrating, so no model of
+  the SD card CSVs is needed. (Damage is random, so N identical payloads are the undamaged one.)
+* Diffs each connection against it with difflib, which finds **all** holes — the first version
+  assumed a single contiguous deletion, and real captures routinely have 10-30 separate holes.
+* For every hole: size, whether it is a multiple of the 19-byte notification, and whether it is
+  aligned to a chunk boundary measured from the start of the payload body (the `n,<rows>|` header
+  is sent as its own notification, so alignment is measured after it).
+* Classifies three outcomes: clean / damaged / truncated-tail.
 
-Scoring uses the payload diff, NOT the GUI's own completeness warning: §3.2 of the audit showed a
-within-row loss can leave all four completeness checks silent, so warning-based scoring would
-undercount failures in every arm equally and blunt the comparison.
+Scoring uses the payload diff, NOT the GUI's own completeness warning: a real capture had a
+connection lose 133 bytes across 5 holes while the GUI reported "CLEAN entries=20".
+
+**Alignment caveat:** difflib reports a minimal edit, and when the bytes bordering a hole match the
+bytes ending it the reported offset can slide by a byte or two. Holes reported as off-by-1 or -2
+from a boundary (rel%19 of 17 or 18) are alignment artefacts, not genuine misalignment. Only treat
+a hole as unaligned if it is far from a boundary.
 """
 
 import argparse
 import ast
+import difflib
 import os
 import re
 from collections import Counter, defaultdict
 
-CHUNK_SIZE = 19  # ExoBLE.cpp kHandshakeChunkSize
+CHUNK = 19  # ExoBLE.cpp kHandshakeChunkSize
 HEADER_RE = re.compile(r"^n,\d+\|")
 
 
 def parse_log(path):
-    """Return a dict describing one connection, or None if it carried no payload."""
-    rec = {
-        "path": path,
-        "arm": "?",
-        "payload": None,
-        "tail": "",
-        "chunks": [],
-        "marks": [],
-        "verdict": "",
-    }
+    rec = {"path": path, "arm": "?", "condition": "unlabelled", "payload": None, "tail": "",
+           "chunks": [], "marks": [], "verdict": ""}
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.rstrip("\n")
             if line.startswith("# arm="):
                 rec["arm"] = line.split("=", 1)[1].strip()
+            elif line.startswith("# condition="):
+                rec["condition"] = line.split("=", 1)[1].strip() or "unlabelled"
             elif line.startswith("PAYLOAD\t"):
-                _, _n, blob = line.split("\t", 2)
                 try:
-                    rec["payload"] = ast.literal_eval(blob)
+                    rec["payload"] = ast.literal_eval(line.split("\t", 2)[2])
                 except Exception:
                     pass
             elif line.startswith("DISCARDED_TAIL\t"):
-                _, _n, blob = line.split("\t", 2)
                 try:
-                    rec["tail"] = ast.literal_eval(blob)
+                    rec["tail"] = ast.literal_eval(line.split("\t", 2)[2])
                 except Exception:
                     pass
             elif line.startswith("CHUNK\t"):
-                parts = line.split("\t")
-                if len(parts) >= 6:
+                f = line.split("\t")
+                if len(f) >= 6:
                     try:
-                        rec["chunks"].append(
-                            {"t_ms": float(parts[1]), "idx": int(parts[2]),
-                             "off": int(parts[3]), "len": int(parts[4])}
-                        )
-                    except ValueError:
+                        rec["chunks"].append((float(f[1]), int(f[3]), int(f[4]),
+                                              ast.literal_eval(f[5])))
+                    except Exception:
                         pass
             elif line.startswith("MARK\t"):
-                parts = line.split("\t")
-                if len(parts) >= 4:
-                    rec["marks"].append((float(parts[1]), parts[2], parts[3] if len(parts) > 3 else ""))
-                    if parts[2] == "VERDICT":
-                        rec["verdict"] = parts[3] if len(parts) > 3 else ""
-    # A record with no payload is NOT noise - it is the "payload never arrived" failure mode
-    # (Nano sends READY, then has nothing to send because the Teensy->Nano UART transfer failed;
-    # audit §5.4). Seen in the wild on 2026-08-12 17:01:49, which produced a trial CSV headed
-    # data0..data11. Keep it and count it.
+                f = line.split("\t")
+                if len(f) >= 3:
+                    detail = f[3] if len(f) > 3 else ""
+                    rec["marks"].append((float(f[1]), f[2], detail))
+                    if f[2] == "VERDICT":
+                        rec["verdict"] = detail
     return rec
 
 
-def diff_contiguous(ref, got):
-    """Decompose `got` as `ref` with one contiguous run deleted.
+def received_text(rec):
+    """What actually arrived. Falls back to concatenated chunks when the terminating newline
+    was lost, in which case the GUI parser never fired and discarded everything."""
+    if rec["payload"] is not None:
+        return rec["payload"], False
+    return "".join(c[3] for c in rec["chunks"]), True
 
-    Returns (offset, size) or None if it is not a simple contiguous deletion.
-    """
-    if got == ref:
-        return (0, 0)
-    if len(got) >= len(ref):
-        return None
-    p = 0
-    while p < len(got) and got[p] == ref[p]:
-        p += 1
-    s = 0
-    while s < (len(got) - p) and got[len(got) - 1 - s] == ref[len(ref) - 1 - s]:
-        s += 1
-    if p + s != len(got):
-        return None
-    return (p, len(ref) - len(got))
+
+def holes_of(ref, got):
+    sm = difflib.SequenceMatcher(None, ref, got, autojunk=False)
+    holes, inserted = [], 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "delete":
+            holes.append((i1, i2 - i1))
+        elif tag == "replace":
+            holes.append((i1, i2 - i1))
+            inserted += j2 - j1
+        elif tag == "insert":
+            inserted += j2 - j1
+    return holes, inserted
 
 
 def body_start(payload):
-    """Byte offset where the chunked body begins (the `n,<rows>|` header is its own notification)."""
     m = HEADER_RE.match(payload)
     return m.end() if m else 0
 
@@ -118,96 +110,111 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "Saved_Data", "logs", "handshake_probe"))
+    ap.add_argument("--holes", action="store_true", help="list every hole individually")
     args = ap.parse_args()
 
     if not os.path.isdir(args.dir):
         print(f"No probe directory at {args.dir}")
         return
 
-    allrecs = []
-    for name in sorted(os.listdir(args.dir)):
-        if not name.endswith(".log"):
-            continue
-        r = parse_log(os.path.join(args.dir, name))
-        if r:
-            allrecs.append(r)
-
-    recs = [r for r in allrecs if r["payload"]]
-    nopayload = [r for r in allrecs if not r["payload"]]
-
+    recs = [parse_log(os.path.join(args.dir, n))
+            for n in sorted(os.listdir(args.dir)) if n.endswith(".log")]
+    recs = [r for r in recs if r["chunks"] or r["payload"]]
     if not recs:
-        print(f"No connections with a payload found in {args.dir}")
-        if nopayload:
-            print(f"({len(nopayload)} connection(s) received no payload at all.)")
+        print(f"No usable connection logs in {args.dir}")
         return
 
-    counts = Counter(r["payload"] for r in recs)
+    full = [r["payload"] for r in recs if r["payload"]]
+    if not full:
+        print("No connection completed a payload; cannot establish a reference.")
+        return
+    counts = Counter(full)
     ref, ref_n = counts.most_common(1)[0]
-    print(f"Connections with a payload: {len(recs)}")
-    print(f"Reference payload: {len(ref)} bytes, seen {ref_n}/{len(recs)} times, "
-          f"{len(set(counts))} distinct payload(s) overall")
-    if ref_n <= len(recs) // 2:
-        print("  !! WARNING: the modal payload is not a clear majority. Either the exo's controller "
-              "set changed mid-session, or damage is more common than the reference assumption. "
-              "Check the distinct payloads before trusting the per-arm numbers.")
+    hdr = body_start(ref)
+
+    print(f"Connections: {len(recs)}   reference payload: {len(ref)} bytes "
+          f"(seen {ref_n}x, {len(counts)} distinct)   header: {hdr} bytes")
+    if ref_n < 2:
+        print("  !! Only one connection produced this payload. With no repeat there is no "
+              "independent confirmation it is the undamaged one - treat results as provisional.")
     print()
 
-    per_arm = defaultdict(lambda: {"n": 0, "bad": 0, "none": 0})
-    rows = []
-    for r in nopayload:
-        per_arm[r["arm"]]["n"] += 1
-        per_arm[r["arm"]]["none"] += 1
-        saw_ready = any(m[1] == "READY" for m in r["marks"])
-        rows.append((os.path.basename(r["path"]), r["arm"],
-                     "NO PAYLOAD AT ALL (READY seen: %s, chunks: %d) - Nano had nothing to send, "
-                     "or the link died mid-handshake" % ("yes" if saw_ready else "no", len(r["chunks"])),
-                     r["verdict"]))
-    for r in recs:
-        arm = r["arm"]
-        per_arm[arm]["n"] += 1
-        d = diff_contiguous(ref, r["payload"])
-        if d == (0, 0):
-            status = "clean"
-        else:
-            per_arm[arm]["bad"] += 1
-            if d is None:
-                status = "DAMAGED (not a simple contiguous deletion)"
-            else:
-                off, size = d
-                bs = body_start(ref)
-                rel = off - bs
-                mult = "yes" if size % CHUNK_SIZE == 0 else f"NO ({size} bytes)"
-                if rel >= 0:
-                    aligned = "yes" if rel % CHUNK_SIZE == 0 else f"NO (rel={rel}, rel%19={rel % CHUNK_SIZE})"
-                else:
-                    aligned = "n/a (hole is inside the header)"
-                status = (f"DAMAGED off={off} size={size} "
-                          f"multiple_of_19={mult} chunk_aligned={aligned}")
-        if r["tail"]:
-            status += f" | DISCARDED TAIL {len(r['tail'])} bytes"
-        rows.append((os.path.basename(r["path"]), arm, status, r["verdict"]))
+    per_arm = defaultdict(lambda: {"n": 0, "bad": 0, "trunc": 0, "lost": 0})
+    per_cond = defaultdict(lambda: {"n": 0, "bad": 0, "trunc": 0, "lost": 0, "holes": 0})
+    tot_holes = aligned = mult19 = 0
 
-    for name, arm, status, verdict in rows:
-        flag = "   " if status == "clean" else ">> "
-        print(f"{flag}{name}  arm={arm}  {status}")
-        if status != "clean" and verdict:
-            print(f"      GUI verdict: {verdict}")
+    for r in recs:
+        got, truncated = received_text(r)
+        hs, inserted = holes_of(ref, got)
+        arm = r["arm"]
+        st = per_arm[arm]
+        st["n"] += 1
+        missing = len(ref) - len(got)
+        st["lost"] += max(0, missing)
+        cst = per_cond[r["condition"]]
+        cst["n"] += 1
+        cst["lost"] += max(0, missing)
+        cst["holes"] += len(hs)
+
+        if not hs and not inserted and not truncated:
+            print(f"    {os.path.basename(r['path'])}  arm={arm}  clean")
+            continue
+        cst["bad" if not truncated else "trunc"] += 1
+
+        if truncated:
+            st["trunc"] += 1
+            kind = (f"TRUNCATED - {len(r['chunks'])} chunks arrived but the terminating newline "
+                    f"never did, so the GUI parser never fired and discarded ALL of it")
+        else:
+            st["bad"] += 1
+            kind = "DAMAGED"
+
+        for _off, sz in hs:
+            tot_holes += 1
+            if sz % CHUNK == 0:
+                mult19 += 1
+        for off, _sz in hs:
+            rel = (off - hdr) % CHUNK
+            if rel in (0, 1, CHUNK - 1, CHUNK - 2):  # allow difflib's 1-2 byte slide
+                aligned += 1
+
+        print(f" >> {os.path.basename(r['path'])}  arm={arm}  {kind}")
+        print(f"      {len(hs)} hole(s), {missing} bytes missing"
+              + (f", {inserted} inserted/replaced (NOT a pure deletion)" if inserted else ""))
+        if r["verdict"]:
+            print(f"      GUI verdict: {r['verdict']}")
+        if args.holes:
+            for off, sz in hs:
+                rel = off - hdr
+                print(f"        off={off} (rel {rel}) size={sz} "
+                      f"{'x19' if sz % CHUNK == 0 else 'NOT-x19'} "
+                      f"{'aligned' if rel % CHUNK in (0, 1, CHUNK-1, CHUNK-2) else 'UNALIGNED(%d)' % (rel % CHUNK)}")
 
     print()
     print("Per-arm summary (scored on payload diff, not the GUI warning):")
-    print(f"  {'arm':<5}{'n':>5}{'damaged':>9}{'no-payld':>10}{'bad rate':>10}")
+    print(f"  {'arm':<5}{'n':>4}{'damaged':>9}{'truncated':>11}{'bytes lost':>12}{'fail rate':>11}")
     for arm in sorted(per_arm):
         st = per_arm[arm]
-        rate = ((st["bad"] + st["none"]) / st["n"] * 100.0) if st["n"] else 0.0
-        print(f"  {arm:<5}{st['n']:>5}{st['bad']:>9}{st['none']:>10}{rate:>9.1f}%")
-    print()
-    print("'no-payld' is a separate failure mode (audit sec 5.4): the payload never arrived at")
-    print("all, so the GUI shows no controller list and names CSV columns data0..dataN. It is")
-    print("upstream of chunk loss - do not mix it into the chunk-loss comparison.")
-    print()
-    print("Reading it: arm A is the control. If A shows damage and B and C do not, the inbound")
-    print("CCCD write landing mid-payload is implicated (audit sec 3.3.1). If a hole is ever NOT")
-    print("a multiple of 19 or NOT chunk-aligned, the credit-race hypothesis is dead.")
+        rate = ((st["bad"] + st["trunc"]) / st["n"] * 100.0) if st["n"] else 0.0
+        print(f"  {arm:<5}{st['n']:>4}{st['bad']:>9}{st['trunc']:>11}{st['lost']:>12}{rate:>10.1f}%")
+
+    if len(per_cond) > 1 or "unlabelled" not in per_cond:
+        print()
+        print("Per-CONDITION summary (set via CONDITION.txt in the probe dir):")
+        print(f"  {'condition':<24}{'n':>4}{'damaged':>9}{'truncated':>11}{'holes':>8}{'bytes lost':>12}{'fail rate':>11}")
+        for c in sorted(per_cond):
+            st = per_cond[c]
+            rate = ((st["bad"] + st["trunc"]) / st["n"] * 100.0) if st["n"] else 0.0
+            print(f"  {c[:23]:<24}{st['n']:>4}{st['bad']:>9}{st['trunc']:>11}{st['holes']:>8}{st['lost']:>12}{rate:>10.1f}%")
+
+    if tot_holes:
+        print()
+        print(f"Hole quantum across ALL connections: {tot_holes} holes, "
+              f"{mult19} ({100*mult19//tot_holes}%) an exact multiple of {CHUNK} bytes, "
+              f"{aligned} ({100*aligned//tot_holes}%) on a chunk boundary.")
+        print("Near-100% on both is the signature of whole BLE notifications going missing.")
+        print("Holes that are neither are usually the lost TAIL of a truncated capture, not a")
+        print("mid-stream hole - check with --holes before concluding anything from them.")
 
 
 if __name__ == "__main__":

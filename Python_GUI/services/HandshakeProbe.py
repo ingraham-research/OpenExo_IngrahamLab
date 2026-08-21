@@ -94,11 +94,32 @@ def begin_connection(address: str = "") -> None:
         try:
             _fh = open(path, "w", encoding="utf-8")
             _fh.write(f"# arm={_current_arm}\n")
+            _fh.write(f"# condition={_read_condition()}\n")
             _fh.write(f"# address={address}\n")
             _fh.write(f"# started={datetime.now().isoformat()}\n")
             _fh.flush()
         except Exception:
             _fh = None
+
+
+def _read_condition() -> str:
+    """Free-text label for the current experimental condition, e.g. "treadmill-on".
+
+    Read fresh at every connection from CONDITION.txt in the probe log directory, so the operator
+    can change it between blocks by editing that one file - no GUI restart, which matters because
+    restarting resets the arm rotation. Falls back to the EXO_HANDSHAKE_CONDITION env var, then
+    "unlabelled".
+    """
+    try:
+        p = os.path.join(_log_dir(), "CONDITION.txt")
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                txt = f.read().strip().splitlines()
+            if txt and txt[0].strip():
+                return txt[0].strip()[:80]
+    except Exception:
+        pass
+    return (os.environ.get("EXO_HANDSHAKE_CONDITION", "") or "unlabelled").strip()[:80]
 
 
 def mark(label: str, detail: str = "") -> None:

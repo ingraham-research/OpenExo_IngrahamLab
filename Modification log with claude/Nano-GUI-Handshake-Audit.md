@@ -261,6 +261,11 @@ farther away you are.
 
 ### 3.3.1 The specific defect: a credit-accounting race in `HCI::sendAclPkt`
 
+> **STATUS: REFUTED by the 2026-08-20 experiment — see §7.6.** The mechanism described below is
+> real code and the race is genuinely possible, but it is **not** what is causing the loss here.
+> The section is kept because ruling it out was informative and because the re-entrancy is still a
+> latent hazard worth knowing about. The 19-byte quantum it was built to explain **was confirmed**.
+
 `Libraries/ArduinoBLE/src/utility/HCI.cpp:416`:
 
 ```cpp
@@ -749,6 +754,116 @@ the warning banner.
 **Caveat on arm balance:** the arm advances per *connection attempt*, so a failed attempt that gets
 far enough to subscribe will consume an arm. The analyzer prints `n` per arm, so any imbalance is
 visible; ignore it unless the arms end up badly uneven.
+
+---
+
+## 7.6 RESULTS — first experimental run, 2026-08-20
+
+15 connections (arms A/B/C rotating), real hardware, trials run between connections.
+
+### P1 — the 19-byte quantum: **CONFIRMED**
+
+```
+121 holes across all connections
+119 (98%) an exact multiple of 19 bytes
+120 (99%) on a chunk boundary
+```
+
+The two exceptions are the lost *tails* of truncated captures, not mid-stream holes. This is now
+measured prospectively rather than reconstructed, across ~120 independent events. **Whole BLE
+notifications go missing; nothing else does.** Every chunk that arrives is exactly 19 bytes
+(plus the 5-byte header and 14-byte final chunk) — no coalescing, no corruption, no partial chunks.
+
+### P3 / P4 — the CCCD write as trigger: **REFUTED**
+
+Two independent lines kill it:
+
+1. **The inbound request is never dispatched mid-payload.** `ERROR_SUBSCRIBE_DONE` (when the Write
+   Response reaches the host) lands at 3874–4228 ms, always *after* the payload span of
+   3749–4006 ms. So on every connection — including the damaged ones — the Nano only serviced that
+   CCCD write after finishing the payload. The race in §3.3.1 needs it dispatched *during*.
+2. **Arm C, which defers the subscribe entirely, still loses chunks** (1, 18, 9, 15 holes). And a
+   single connection had **33 holes** — there is only ever *one* inbound CCCD write, so it cannot
+   account for 33 dropped notifications.
+
+The hypothesis was wrong. The quantum it was built to explain survives; the trigger does not.
+
+### The arm comparison itself: **VOID for this run** (saturated and confounded)
+
+| arm | n | damaged | truncated | fail rate |
+|---|---|---|---|---|
+| A | 6 | 4 | 0 | 67% |
+| B | 5 | 2 | 1 | 60% |
+| C | 4 | 3 | 1 | 100% |
+
+Two problems, both methodological:
+
+- **Saturation.** This ran at ~60–100% failure with up to 33 holes and 868 bytes lost per
+  connection, against a historical ~20% single-hole regime. Well past where an arm effect could
+  show.
+- **A monotonic session trend swamps everything.** In connection order the hole counts are
+  `0, 0, 0, 1, 1, 11, 18, 5, 33, 9, 11, 16, 15` — the first three connections are perfectly clean
+  and then every arm degrades together over ~14 minutes. That trend, not the treatment, explains
+  the table.
+
+A re-run needs a **milder position** (target ~20–30% failure, mostly single-hole) and a stable link
+across the session.
+
+### Weak stall correlation
+
+Holes preceded by a >60 ms inter-chunk gap: 19%, against a 9% baseline — about 2× enrichment, so
+congestion matters somewhat, but most holes are *not* at a stall (median gap before a hole 22 ms vs
+21 ms baseline). Not a mechanism on its own.
+
+### NEW — losing the tail discards the entire payload
+
+Two connections received **136 and 154 chunks** — nearly the whole list — but the terminating
+newline never arrived. `RtBridge` only parses when `"\n" in self._handshake_payload_buf`, so the
+buffer was never parsed and **100% of a 96%-complete payload was silently thrown away.** The GUI
+shows no controller list at all.
+
+This is distinct from §5.4 (where the Nano genuinely has nothing to send) and it is trivially
+fixable GUI-side: parse on a short idle timeout after chunks stop arriving, instead of requiring a
+byte that may never come.
+
+### NEW — damaged handshakes silently MISLABEL trial data ⚠️ **worst practical consequence found**
+
+The channel titles ride the same payload. `MainWindow._csv_channel_indices` builds CSV columns as
+positions in `_param_names`, but the real-time `values` array is indexed by the **firmware's** fixed
+channel numbering. Lose a chunk from the `t` row and the two indexings silently diverge.
+
+From this run, `trial_20260820_155929.csv`:
+
+```
+epoch,mark,Desired Torque (L),Measured Torque (L),Desired Torque (R),Measured Torque (R),
+Toe FSR (L),In Stance (L),rque (L),Commanded Torque (R),Status,Exoskeleton time (seconds)
+                          ^^^^^^^^ "Toe FSR (R),In Stance (R),Commanded To" deleted
+```
+
+Header and data both have 12 columns, so **nothing looks wrong**. But every column from index 6 on
+carries the wrong channel. Verified against the data:
+
+| file | last column, labelled `Exoskeleton time (seconds)` |
+|---|---|
+| `trial_20260820_155800.csv` (clean) | `41.79, 41.81, 41.81, 41.83` — monotonic time ✔ |
+| `trial_20260820_155929.csv` (damaged) | `0.00, -4.96, -4.78, -5.21` — **torque** |
+| `trial_20260820_155855.csv` (damaged) | `0.00, 0.00, 0.00, 0.00` — **In Stance** |
+
+`trial_20260820_155855.csv` lost four channel names, so it has 10 columns instead of 14: Commanded
+Torque L/R, Status and the exo clock are **absent**, while their labels sit on FSR data.
+
+**Three trial CSVs from 2026-08-20 are affected** (`155703` has the `Econds)` corruption, `155855`
+and `155929` are mislabeled). Any analysis of those files is wrong, and nothing in the GUI or the
+file says so. This alone justifies a validity check on `_param_names` before a trial is allowed to
+start.
+
+### Where this leaves the root cause
+
+Confirmed: loss is **notification-granular**, contiguous, uncorrupted, and scales with link quality.
+Refuted: the CCCD-write trigger. Still open: whether the drop happens in the nRF52 controller, in
+ArduinoBLE below `writeValue`, or in the Windows/Bleak host stack. That is exactly what **Tier 2**
+was designed to separate, and it is now the next step — but the robustness fixes above are worth
+doing regardless of how it resolves.
 
 ---
 
