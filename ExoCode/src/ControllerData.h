@@ -76,13 +76,27 @@ namespace controller_defs                   /**< Stores the parameter indexes fo
         const uint8_t node4_y_idx = 7;                          //Torque for node 4 in Nm
         const uint8_t node5_x_idx = 8;                          //Percent gait for node 5
         const uint8_t node5_y_idx = 9;                          //Torque for node 5 in Nm
-        const uint8_t sim_gait_idx = 10;                        //Flag to simulate percent gait
-        const uint8_t use_percent_gait_idx = 11;                //0 = use percent stance (legacy), 1 = use percent gait
-        const uint8_t use_pid_idx = 12;                         //Flag to use PID control
-        const uint8_t p_gain_idx = 13;                          //Value of P Gain for PID control
-        const uint8_t i_gain_idx = 14;                          //Value of I Gain for PID control
-        const uint8_t d_gain_idx = 15;                          //Value of D Gain for PID control
-        const uint8_t num_parameter = 16;
+        const uint8_t node6_x_idx = 10;                         //Percent gait for node 6
+        const uint8_t node6_y_idx = 11;                         //Torque for node 6 in Nm
+        const uint8_t node7_x_idx = 12;                         //Percent gait for node 7
+        const uint8_t node7_y_idx = 13;                         //Torque for node 7 in Nm
+        const uint8_t node8_x_idx = 14;                         //Percent gait for node 8
+        const uint8_t node8_y_idx = 15;                         //Torque for node 8 in Nm
+        const uint8_t node9_x_idx = 16;                         //Percent gait for node 9
+        const uint8_t node9_y_idx = 17;                         //Torque for node 9 in Nm
+        const uint8_t node10_x_idx = 18;                        //Percent gait for node 10
+        const uint8_t node10_y_idx = 19;                        //Torque for node 10 in Nm
+        const uint8_t node11_x_idx = 20;                        //Percent gait for node 11
+        const uint8_t node11_y_idx = 21;                        //Torque for node 11 in Nm
+        const uint8_t node12_x_idx = 22;                        //Percent gait for node 12
+        const uint8_t node12_y_idx = 23;                        //Torque for node 12 in Nm
+        const uint8_t sim_gait_idx = 24;                        //Flag to simulate percent gait
+        const uint8_t use_percent_gait_idx = 25;                //0 = use percent stance (legacy), 1 = use percent gait
+        const uint8_t use_pid_idx = 26;                         //Flag to use PID control
+        const uint8_t p_gain_idx = 27;                          //Value of P Gain for PID control
+        const uint8_t i_gain_idx = 28;                          //Value of I Gain for PID control
+        const uint8_t d_gain_idx = 29;                          //Value of D Gain for PID control
+        const uint8_t num_parameter = 30;
     }
 
     namespace franks_collins_hip
@@ -241,7 +255,7 @@ namespace controller_defs                   /**< Stores the parameter indexes fo
         const uint8_t num_parameter = 17;
     }
 
-    const uint8_t max_parameters = spv2::num_parameter;         //This should be the largest of all the num_parameters
+    const uint8_t max_parameters = spline::num_parameter;         //This should be the largest of all the num_parameters
 }
 
 /**
