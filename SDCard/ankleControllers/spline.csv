@@ -3,4 +3,4 @@
 ,Parameter list for the  spline controller,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 ,Parameter order:,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 Node1_x,Node1_y,Node2_x,Node2_y,Node3_x,Node3_y,Node4_x,Node4_y,Node5_x,Node5_y,Node6_x,Node6_y,Node7_x,Node7_y,Node8_x,Node8_y,Node9_x,Node9_y,Node10_x,Node10_y,Node11_x,Node11_y,Node12_x,Node12_y,1=sim %gait,1=%gait 0=%stance,PID Flag,P Gain,I Gain,D Gain
-5,-8,10,-12,20,0,20.1,0,20.2,0,20.3,0,20.4,0,20.5,0,20.6,0,20.7,0,20.8,0,20.9,0,0,1,1,6,0,0.03
+0,0,5,-8,10,-12,20,0,20.1,0,20.2,0,20.3,0,20.4,0,20.5,0,20.6,0,20.7,0,20.8,0,0,1,1,6,0,0.03
