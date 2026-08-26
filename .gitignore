@@ -11,3 +11,8 @@ Libraries/ArduinoBLE/extras/arduino-ble-parser.py
 
 # superpowers subagent-driven-development scratch workspace
 .superpowers/
+
+# Python build/test artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
