@@ -1,4 +1,5 @@
 import logging
+import re
 
 try:
     from PySide6 import QtCore, QtWidgets
@@ -9,8 +10,15 @@ from utils import (
     UIConfig, JointConfig, SettingsManager,
     style_button, style_combo_box, style_spinbox
 )
+from Widgets.SplineNodeEditor import SplineNodeEditor
 
 _logger = logging.getLogger(__name__)
+
+# Matches parameter names like "node1_x" / "Node12_y" as reported by the
+# device's controller matrix. Node count varies by joint (e.g. ankle
+# currently has 12 nodes, hip/arm still have 5), so it's detected from the
+# reported parameter names rather than assumed fixed.
+_NODE_PARAM_RE = re.compile(r"^node(\d+)_(x|y)$", re.IGNORECASE)
 
 
 class ActiveTrialSettingsPage(QtWidgets.QWidget):
@@ -32,6 +40,14 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
         self._controller_values: dict[tuple[str, str], list[str]] = {}
         self._joint_controllers: dict = {}  # Maps joint name to list of controller indices
         self._bilateral_state = False  # Store bilateral state
+        # Maps combo_param's on-screen position -> actual firmware parameter
+        # index. Usually the identity mapping, except when the spline node
+        # editor is showing (node params are filtered out of combo_param).
+        self._param_global_indices: list[int] = []
+        # {node_number: {"x": global_param_idx, "y": global_param_idx}} for
+        # the currently selected controller, populated only when it's a
+        # spline controller with detected node parameters.
+        self._spline_node_global_indices: dict[int, dict[str, int]] = {}
         self._last_selection = {
             "bilateral": False,
             "joint": None,
@@ -63,7 +79,8 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
         joint_selector_layout.addWidget(self.combo_joint, 1)
         layout.addLayout(joint_selector_layout)
 
-        # Controller/parameter matrix viewer
+        # Controller/parameter matrix viewer, swapped out for a live spline
+        # plot + node editor when the selected controller is "spline".
         self.table = QtWidgets.QTableWidget()
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -73,7 +90,13 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
         self.table.horizontalHeader().setDefaultSectionSize(UIConfig.TABLE_COL_WIDTH)
         # Auto-populate controller/parameter on selection
         self.table.cellClicked.connect(self._on_cell_clicked)
-        layout.addWidget(self.table, 1)
+
+        self.spline_editor = SplineNodeEditor()
+
+        self.top_stack = QtWidgets.QStackedWidget()
+        self.top_stack.addWidget(self.table)          # index 0
+        self.top_stack.addWidget(self.spline_editor)   # index 1
+        layout.addWidget(self.top_stack, 1)
 
         # Controls area
         form = QtWidgets.QGridLayout()
@@ -182,6 +205,7 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
             self._controller_values = dict(values_db) if values_db else {}
             if not self._restore_last_value_if_current():
                 self._refresh_value_from_db()
+            self._refresh_spline_nodes_from_db()
         except Exception as e:
             _logger.warning("Error setting controller values: %s", e)
 
@@ -224,6 +248,8 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
             self.spin_value.blockSignals(True)
             self.spin_value.setValue(0.0)
             self.spin_value.blockSignals(False)
+            if self.spline_editor.node_count():
+                self.spline_editor.configure(self.spline_editor.node_count())
         except Exception as e:
             _logger.warning("Error clearing device prefs UI: %s", e)
 
@@ -463,9 +489,31 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
                         else:
                             _logger.warning("Row too short (len=%s), cannot read controller ID from row[3]", len(row))
                         
-                        # Use the actual joint_id_raw (like 65, 68) not the mapped joint_num
-                        payload = [is_bilateral, joint_id_raw, controller_id, parameter_idx, value]
-                        
+                        # combo_param's on-screen position isn't always the firmware
+                        # parameter index (node params are filtered out of it for
+                        # spline controllers), so map back to the real index.
+                        global_parameter_idx = parameter_idx
+                        if 0 <= parameter_idx < len(self._param_global_indices):
+                            global_parameter_idx = self._param_global_indices[parameter_idx]
+
+                        # Spline node edits are local-preview-only until Apply: send
+                        # every node's current (x, y) as individual parameter updates,
+                        # reusing the existing one-value-at-a-time protocol.
+                        if self._spline_node_global_indices:
+                            x_nodes, y_nodes = self.spline_editor.get_nodes()
+                            for position, axes in self._spline_node_global_indices.items():
+                                i = position - 1
+                                x_idx = axes.get("x")
+                                y_idx = axes.get("y")
+                                if x_idx is not None and i < len(x_nodes):
+                                    self.applyRequested.emit(
+                                        [is_bilateral, joint_id_raw, controller_id, x_idx, float(x_nodes[i])]
+                                    )
+                                if y_idx is not None and i < len(y_nodes):
+                                    self.applyRequested.emit(
+                                        [is_bilateral, joint_id_raw, controller_id, y_idx, float(y_nodes[i])]
+                                    )
+
                         # Save last selection for next time
                         self._last_selection = {
                             "bilateral": is_bilateral,
@@ -475,8 +523,11 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
                             "value": value,
                         }
                         self._save_settings()
-                        
-                        self.applyRequested.emit(payload)
+
+                        if global_parameter_idx >= 0:
+                            # Use the actual joint_id_raw (like 65, 68) not the mapped joint_num
+                            payload = [is_bilateral, joint_id_raw, controller_id, global_parameter_idx, value]
+                            self.applyRequested.emit(payload)
                         return
             
             # Fallback if something goes wrong
@@ -569,26 +620,78 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
                 self.table.setRowCount(0)
                 self.table.setColumnCount(2)
                 self.table.setHorizontalHeaderLabels(["Controller", "Parameters"])
-                
+                self._spline_node_global_indices = {}
+                self._param_global_indices = []
+                self.top_stack.setCurrentWidget(self.table)
+
                 self.combo_controller.blockSignals(True)
                 self.combo_controller.clear()
                 self.combo_controller.addItem("(none)")
                 self.combo_controller.blockSignals(False)
-                
+
         except Exception as e:
             _logger.warning("Error in _on_joint_changed: %s", e)
 
+    def _split_spline_params(self, controller_name: str, params: list):
+        """Split a controller's reported parameter names into spline node
+        parameters vs. everything else.
+
+        Returns (spline_node_map, non_node_names, non_node_global_indices):
+          - spline_node_map: {display_node_number (1-based): {"x": global_param_idx, "y": global_param_idx}},
+            empty unless controller_name is "spline" and complete (x, y)
+            node pairs were found. Node count is however many complete pairs
+            were reported, not a hardcoded number, since joints currently
+            differ (e.g. ankle has 12 nodes, hip/arm still have 5).
+          - non_node_names / non_node_global_indices: parallel lists of the
+            parameter names/indices to show in combo_param. All params
+            unless this is a spline controller with node params detected, in
+            which case the node params are excluded (edited via the node
+            editor instead).
+        """
+        is_spline = controller_name.strip().lower() == "spline"
+        node_map_by_number: dict = {}
+        non_node = []  # list of (global_idx, name)
+
+        for global_idx, name in enumerate(params):
+            match = _NODE_PARAM_RE.match(str(name).strip())
+            if is_spline and match:
+                node_num = int(match.group(1))
+                axis = match.group(2).lower()
+                node_map_by_number.setdefault(node_num, {})[axis] = global_idx
+            else:
+                non_node.append((global_idx, name))
+
+        complete_nodes = sorted(
+            n for n, axes in node_map_by_number.items() if "x" in axes and "y" in axes
+        )
+        spline_node_map = {i + 1: node_map_by_number[n] for i, n in enumerate(complete_nodes)}
+
+        if is_spline and not spline_node_map:
+            # No usable node pairs found (e.g. malformed names) - fall back
+            # to treating this like a regular controller so nothing silently
+            # disappears from the parameter list.
+            non_node = list(enumerate(params))
+
+        non_node_names = [str(name) for _, name in non_node]
+        non_node_global_indices = [idx for idx, _ in non_node]
+        return spline_node_map, non_node_names, non_node_global_indices
+
     @QtCore.Slot(int)
     def _on_controller_changed(self, idx: int):
-        """Populate parameters combo from selected controller."""
+        """Populate parameters combo from selected controller. Shows the
+        spline node editor instead of the generic table when the selected
+        controller is "spline" and reports node parameters."""
+        self._spline_node_global_indices = {}
+        self._param_global_indices = []
+        show_spline_editor = False
         try:
             self.combo_param.blockSignals(True)
             self.combo_param.clear()
-            
+
             # Get the current joint
             joint_idx = self.combo_joint.currentIndex()
             joint_name = self.combo_joint.itemText(joint_idx)
-            
+
             if joint_name in self._joint_controllers:
                 controller_indices = self._joint_controllers[joint_name]
                 if idx < len(controller_indices):
@@ -597,10 +700,18 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
                         row = self._controller_matrix[matrix_idx]
                         # Matrix format: [Joint(ID), JointID, ControllerName, ControllerID, Param1, Param2, ...]
                         # Parameters start at index 4
+                        controller_name = row[2] if len(row) > 2 else ""
                         params = row[4:] if len(row) > 4 else []
-                        if not params:
-                            params = ["(no params)"]
-                        self.combo_param.addItems([str(p) for p in params])
+                        if params:
+                            node_map, names, global_indices = self._split_spline_params(controller_name, params)
+                            self._param_global_indices = global_indices
+                            self.combo_param.addItems(names)
+                            if node_map:
+                                self._spline_node_global_indices = node_map
+                                show_spline_editor = True
+                                self.spline_editor.configure(len(node_map))
+                        else:
+                            self.combo_param.addItem("(no params)")
                     else:
                         self.combo_param.addItem("(no params)")
                 else:
@@ -614,8 +725,12 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
                 self.combo_param.blockSignals(False)
             except Exception:
                 pass
+
+        self.top_stack.setCurrentWidget(self.spline_editor if show_spline_editor else self.table)
+
         if not self._restore_last_value_if_current():
             self._refresh_value_from_db()
+        self._refresh_spline_nodes_from_db()
 
     @QtCore.Slot(int)
     def _on_param_changed(self, _idx: int):
@@ -647,10 +762,13 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
             if joint_id is None or controller_id is None:
                 return
             values = self._controller_values.get((joint_id, controller_id), [])
-            param_idx = self.combo_param.currentIndex()
-            if param_idx < 0 or param_idx >= len(values):
+            combo_idx = self.combo_param.currentIndex()
+            if combo_idx < 0 or combo_idx >= len(self._param_global_indices):
                 return
-            raw = values[param_idx]
+            global_idx = self._param_global_indices[combo_idx]
+            if global_idx < 0 or global_idx >= len(values):
+                return
+            raw = values[global_idx]
             try:
                 val = float(raw)
             except Exception:
@@ -660,4 +778,38 @@ class ActiveTrialSettingsPage(QtWidgets.QWidget):
             self.spin_value.blockSignals(False)
         except Exception as e:
             _logger.warning("Error refreshing value from DB: %s", e)
+
+    def _refresh_spline_nodes_from_db(self):
+        """Seed the spline node editor's spinboxes from the device's last
+        reported values for the currently selected controller."""
+        if not self._spline_node_global_indices:
+            return
+        try:
+            joint_id, controller_id = self._current_jid_cid()
+            if joint_id is None or controller_id is None:
+                return
+            values = self._controller_values.get((joint_id, controller_id), [])
+            if not values:
+                return
+
+            node_count = len(self._spline_node_global_indices)
+            x_nodes = [0.0] * node_count
+            y_nodes = [0.0] * node_count
+            for position, axes in self._spline_node_global_indices.items():
+                i = position - 1
+                x_idx = axes.get("x")
+                y_idx = axes.get("y")
+                if x_idx is not None and x_idx < len(values):
+                    try:
+                        x_nodes[i] = float(values[x_idx])
+                    except Exception:
+                        pass
+                if y_idx is not None and y_idx < len(values):
+                    try:
+                        y_nodes[i] = float(values[y_idx])
+                    except Exception:
+                        pass
+            self.spline_editor.configure(node_count, x_nodes=x_nodes, y_nodes=y_nodes)
+        except Exception as e:
+            _logger.warning("Error refreshing spline nodes from DB: %s", e)
 
