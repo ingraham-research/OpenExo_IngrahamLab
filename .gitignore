@@ -8,3 +8,6 @@ ExoCode/src/.vs
 ExoCode/.vscode
 */.vs
 Libraries/ArduinoBLE/extras/arduino-ble-parser.py
+
+# superpowers subagent-driven-development scratch workspace
+.superpowers/
