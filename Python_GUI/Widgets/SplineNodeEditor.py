@@ -7,9 +7,12 @@ except Exception as e:
 from utils import UIConfig, style_spinbox, create_section_label
 from utils.spline_math import pchip_curve, NODE_X_BOUNDS, NODE_Y_BOUNDS
 
-# Fixed plot display range, independent of the nodes' own (wider) value bounds.
+# Fixed X display range (percent gait cycle is always 0-100%).
+# Y range is recomputed on every redraw from the current node/curve values instead.
 PLOT_X_RANGE = (0.0, 100.0)   # percent gait cycle
-PLOT_Y_RANGE = (0.0, 20.0)    # Nm
+_DEFAULT_Y_RANGE = (-10.0, 10.0)  # Nm, shown before any nodes are configured
+_Y_RANGE_PADDING_FRACTION = 0.1
+_MIN_Y_SPAN = 4.0  # Nm, keeps the range from collapsing when all values are equal
 
 _CURVE_SAMPLE_COUNT = 200
 
@@ -43,7 +46,7 @@ class SplineNodeEditor(QtWidgets.QWidget):
         self.plot.setLabel("bottom", "Percent Gait Cycle", units="%")
         self.plot.setLabel("left", "Torque", units="Nm")
         self.plot.setXRange(*PLOT_X_RANGE, padding=0)
-        self.plot.setYRange(*PLOT_Y_RANGE, padding=0)
+        self.plot.setYRange(*_DEFAULT_Y_RANGE, padding=0)
         self.plot.setMouseEnabled(x=False, y=False)
         self.curve = self.plot.plot(pen=pg.mkPen(color="#0078D4", width=2))
         self.node_scatter = pg.ScatterPlotItem(
@@ -148,11 +151,27 @@ class SplineNodeEditor(QtWidgets.QWidget):
         self._redraw()
         self.nodesChanged.emit()
 
+    def _update_y_range(self, y_values):
+        """Rescale the plot's Y axis to fit y_values, padded and centered on
+        the data so negative torques are shown as readily as positive ones.
+        """
+        if not y_values:
+            self.plot.setYRange(*_DEFAULT_Y_RANGE, padding=0)
+            return
+
+        y_min, y_max = min(y_values), max(y_values)
+        span = max(y_max - y_min, _MIN_Y_SPAN)
+        pad = span * _Y_RANGE_PADDING_FRACTION
+        mid = (y_min + y_max) / 2.0
+        half = span / 2.0 + pad
+        self.plot.setYRange(mid - half, mid + half, padding=0)
+
     def _redraw(self):
         if not self._x_nodes:
             self.curve.setData([], [])
             self.node_scatter.setData([], [])
             self.lbl_warning.setText("")
+            self._update_y_range([])
             return
 
         samples_x = [
@@ -162,6 +181,7 @@ class SplineNodeEditor(QtWidgets.QWidget):
         samples_y, valid = pchip_curve(self._x_nodes, self._y_nodes, samples_x)
         self.curve.setData(samples_x, samples_y)
         self.node_scatter.setData(self._x_nodes, self._y_nodes)
+        self._update_y_range(samples_y + self._y_nodes)
 
         if not valid:
             self.lbl_warning.setText(
