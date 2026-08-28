@@ -223,6 +223,15 @@ class ZhangCollins: public _Controller
  * Applies a spline curve defined by five (percent gait, torque) nodes.
  *
  * See ControllerData.h for details on the parameters used.
+ *
+ * !! SISTER CONTROLLER: SplineAlt (below) !!
+ * SplineAlt was copied from this class and deliberately duplicates its command path -- the +/-15 Nm
+ * feed-forward clamp, the torque_alpha = 1.0 filter, the near-zero gain scheduler with its
+ * hard-coded KP_ZERO/KI_ZERO/KD_ZERO, the uncalibrated-sensor guard, and its own copy of the
+ * PCHIP math. It differs ONLY in how the nodes are produced (lobe shape parameters instead of 12
+ * explicit nodes) and in that its spline is periodic across the 0/100 percent gait seam.
+ * ANY FIX OR BEHAVIOUR CHANGE MADE HERE MUST BE MIRRORED IN SplineAlt::calc_motor_cmd(), and vice
+ * versa. There is no shared code to keep them honest, so the two files will silently diverge.
  */
 class Spline: public _Controller
 {
@@ -235,6 +244,35 @@ class Spline: public _Controller
     private:
         float _spline_interpolate(const float* x, const float* y, float percent_gait);
         float _pchip_interpolate(const float* x, const float* y, float percent_gait);
+        static float _pchip_edge_tangent(float h0, float h1, float m0, float m1);
+};
+
+/**
+ * @brief SplineAlt Controller (ankle)
+ *
+ * Same torque command path as Spline, but the profile is described by SHAPE rather than by 12
+ * explicit nodes. Two lobes -- plantarflexion (applied negative) and dorsiflexion (applied
+ * positive) -- each defined by peak time, rise, dwell, fall and magnitude, plus one overall
+ * 0-100 percent scale. This is what makes the profile retunable from the GUI's Update Controller
+ * box or the UDP remote without editing node pairs one at a time.
+ *
+ * See ControllerData.h (namespace spline_alt) for the parameter list.
+ */
+class SplineAlt: public _Controller
+{
+    public:
+        SplineAlt(config_defs::joint_id id, ExoData* exo_data);
+        ~SplineAlt(){};
+
+        float calc_motor_cmd();
+
+        // Largest node count the builder can emit: 2 lobes x 4 nodes, plus the 2+2 wrap-around
+        // copies added by the periodic extension.
+        static const int max_nodes = 12;
+
+    private:
+        int _build_nodes(float* x, float* y);
+        float _pchip_interpolate(const float* x, const float* y, int n, float percent_gait);
         static float _pchip_edge_tangent(float h0, float h1, float m0, float m1);
 };
 

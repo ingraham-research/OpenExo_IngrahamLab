@@ -183,14 +183,19 @@ namespace config_defs
         pjmc = 3,
         zhang_collins = 4,
         constant_torque = 5,
-        trec = 6,
+        // 6 = trec  -- unwired from the ankle 2026-08-27, ID left as a gap ON PURPOSE
 		calibr_manager = 7,
         chirp = 8,
         step = 9,
-		spv2 = 10,
+        // 10 = spv2 -- unwired from the ankle 2026-08-27, ID left as a gap ON PURPOSE
 		pjmc_plus = 11,
         spline = 12,
-		
+        spline_alt = 13,
+
+        // DO NOT renumber to close the gaps above. These values ARE the controller IDs on the wire:
+        // they go out in the BLE handshake and the Python UDP remote can address a controller by
+        // number (see Python_GUI/examples/remote_console.py, which documents spline as id 12).
+        // Renumbering would silently repoint any saved script at a different controller.
 		Count //Leave this at the end of the enum class. Count can be used to get the total number of controllers defined for this joint.
     };
 
@@ -516,14 +521,17 @@ namespace config_defs
             {"PJMC", (uint8_t)config_defs::ankle_controllers::pjmc},
             {"zhangCollins", (uint8_t)config_defs::ankle_controllers::zhang_collins},
             {"constantTorque", (uint8_t)config_defs::ankle_controllers::constant_torque},
-            {"TREC", (uint8_t)config_defs::ankle_controllers::trec},
 			{"calibrManager", (uint8_t)config_defs::ankle_controllers::calibr_manager},
             {"chirp", (uint8_t)config_defs::ankle_controllers::chirp},
             {"step", (uint8_t)config_defs::ankle_controllers::step},
-			{"SPV2", (uint8_t)config_defs::ankle_controllers::spv2},
 			{"PJMC_PLUS", (uint8_t)config_defs::ankle_controllers::pjmc_plus},
             {"spline", (uint8_t)config_defs::ankle_controllers::spline},
-        };  
+            // Keep this key at 9 characters or fewer. ListCtrlParams copies the controller name
+            // into a MAX_STRING_LENGTH (10) cell with strncpy(..., maxLen - 1), so a longer name is
+            // truncated in the BLE handshake -- and the Python UDP remote addresses controllers by
+            // exactly that truncated string. "spline_alt" would arrive as "spline_al".
+            {"splineAlt", (uint8_t)config_defs::ankle_controllers::spline_alt},
+        };
 
         const IniKeyCode elbow_controllers
         {

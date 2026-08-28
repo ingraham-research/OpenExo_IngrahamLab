@@ -99,6 +99,39 @@ namespace controller_defs                   /**< Stores the parameter indexes fo
         const uint8_t num_parameter = 30;
     }
 
+    /**
+     * Parameters for the SplineAlt controller (see class SplineAlt in Controller.h).
+     *
+     * Same output behaviour as `spline` above, but the curve is described by lobe SHAPE instead
+     * of 12 explicit nodes, so it can be reshaped from the GUI / UDP remote without moving nodes
+     * one at a time. Two lobes (plantarflexion and dorsiflexion), each built from
+     * peak time + rise + dwell + fall + magnitude, plus one overall scale.
+     *
+     * Torque magnitudes are entered as POSITIVE numbers; the sign is applied internally
+     * (plantarflexion negative, dorsiflexion positive) to match SDCard/ankleControllers/spline.csv.
+     */
+    namespace spline_alt
+    {
+        const uint8_t max_plantar_torque_idx = 0;               //Peak plantarflexion torque magnitude in Nm (applied as NEGATIVE)
+        const uint8_t max_dorsi_torque_idx = 1;                 //Peak dorsiflexion torque magnitude in Nm (applied as POSITIVE)
+        const uint8_t peak_plantar_time_idx = 2;                //Percent gait at which plantarflexion torque first reaches its peak
+        const uint8_t peak_dorsi_time_idx = 3;                  //Percent gait at which dorsiflexion torque first reaches its peak
+        const uint8_t plantar_rise_time_idx = 4;                //Percent gait spent rising from 0 to peak plantarflexion
+        const uint8_t plantar_dwell_time_idx = 5;               //Percent gait held AT peak plantarflexion (0 = no plateau)
+        const uint8_t plantar_fall_time_idx = 6;                //Percent gait spent falling from peak plantarflexion back to 0
+        const uint8_t dorsi_rise_time_idx = 7;                  //Percent gait spent rising from 0 to peak dorsiflexion
+        const uint8_t dorsi_dwell_time_idx = 8;                 //Percent gait held AT peak dorsiflexion (0 = no plateau)
+        const uint8_t dorsi_fall_time_idx = 9;                  //Percent gait spent falling from peak dorsiflexion back to 0
+        const uint8_t torque_scale_idx = 10;                    //Overall scale 0-100 percent, applied to BOTH lobes
+        const uint8_t sim_gait_idx = 11;                        //Flag to simulate percent gait
+        const uint8_t use_percent_gait_idx = 12;                //0 = use percent stance (legacy), 1 = use percent gait
+        const uint8_t use_pid_idx = 13;                         //Flag to use PID control
+        const uint8_t p_gain_idx = 14;                          //Value of P Gain for PID control
+        const uint8_t i_gain_idx = 15;                          //Value of I Gain for PID control
+        const uint8_t d_gain_idx = 16;                          //Value of D Gain for PID control
+        const uint8_t num_parameter = 17;
+    }
+
     namespace franks_collins_hip
     {
         const uint8_t mass_idx = 0;                             //Mass of the User in kg

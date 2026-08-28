@@ -70,11 +70,12 @@
             {(uint8_t)config_defs::ankle_controllers::pjmc,"ankleControllers/PJMC.csv"},
             {(uint8_t)config_defs::ankle_controllers::zhang_collins,"ankleControllers/zhangCollins.csv"},
             {(uint8_t)config_defs::ankle_controllers::spline,"ankleControllers/spline.csv"},
+            // The FILENAME (not the ParseIni key) is what retrieveJointAndController() reports as
+            // the controller name in the BLE handshake, so it must stay <= 9 chars before ".csv".
+            {(uint8_t)config_defs::ankle_controllers::spline_alt,"ankleControllers/splineAlt.csv"},
             {(uint8_t)config_defs::ankle_controllers::constant_torque, "ankleControllers/constantTorque.csv"},
-            {(uint8_t)config_defs::ankle_controllers::trec,"ankleControllers/trec.csv"},
             {(uint8_t)config_defs::ankle_controllers::chirp,"ankleControllers/chirp.csv"},
             {(uint8_t)config_defs::ankle_controllers::step,"ankleControllers/step.csv"},
-			{(uint8_t)config_defs::ankle_controllers::spv2,"ankleControllers/spv2.csv"},
 			{(uint8_t)config_defs::ankle_controllers::pjmc_plus,"ankleControllers/pjmc_plus.csv"},
         };
 

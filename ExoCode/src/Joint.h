@@ -233,13 +233,16 @@ class AnkleJoint : public _Joint
         ProportionalJointMoment _proportional_joint_moment;     /**< Proportional joint moment controller */
         ZhangCollins _zhang_collins;                            /**< Zhang Collins controller */
         Spline _spline;                                         /**< Spline controller */
+        SplineAlt _spline_alt;                                  /**< Spline controller parameterised by lobe shape */
         ConstantTorque _constant_torque;                        /**< Constant torque controller*/
-        TREC _trec;                                             /**< TREC */
 		CalibrManager _calibr_manager;                          /**< Calibration Manager "Controller" */
         Chirp _chirp;                                           /**< Chirp Controller for Device Characterization */
         Step _step;                                             /**< Step Controller for Device Characterization */
-        SPV2 _spv2;												/**< SPV2 */
 		PJMC_PLUS _pjmc_plus;									/**< The new proportional joint moment controller */
+        // TREC and SPV2 were unwired from the ankle on 2026-08-27 to shrink the BLE handshake.
+        // Their classes still exist in Controller.h/.cpp but are no longer instantiated anywhere,
+        // and their enum IDs (6 and 10) are left as gaps so surviving controller IDs did not shift.
+        // See "Modification log with claude/SplineAlt-Shape-Parameterised-Controller.md".
 };
 
 /**
