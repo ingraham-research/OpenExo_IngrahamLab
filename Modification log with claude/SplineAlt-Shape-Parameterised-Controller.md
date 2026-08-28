@@ -161,17 +161,22 @@ scheduler holds the tuned `3 / 0 / 0.001` gains for the whole stride.
 
 `SDCard/ankleControllers/splineAlt.csv` was fitted to the **updated** (2026-08-26) `spline.csv` by
 differential evolution over the six timing parameters, with the magnitudes pinned to the real profile's
-−15 / +5:
+−15 / +5, then **re-solved over the integer grid** (see
+[Node precision](#node-precision-cleanup) below):
 
 ```
-PlantarNm 15   PlantarPk 49.7   PlantRise 25.3   PlantDwel 0.5   PlantFall 16.2
-DorsiNm    5   DorsiPk   94.6   DorsiRise 10.1   DorsiDwel 0     DorsiFall 10
+PlantarNm 15   PlantarPk 50   PlantRise 26   PlantDwel 0   PlantFall 17
+DorsiNm    5   DorsiPk   95   DorsiRise 11   DorsiDwel 0   DorsiFall  9
 TorqScale 100  sim 0  %gait 1  PID 1  P 3  I 0  D 0.01
 ```
 
-**RMS 0.44 Nm, max 1.9 Nm.** The dorsi lobe matches to ~0.07 Nm and the plantar peak and fall to
-~0.2 Nm. The error concentrates at **30–35 % gait**, where the real profile holds near zero and then
-drops steeply — see the limitation below.
+**RMS 0.45 Nm, max 2.0 Nm** (the non-integer fit was rms 0.4416 — the integer constraint costs
+0.013 Nm, i.e. nothing). The dorsi lobe matches closely; the error concentrates at **30–35 % gait**,
+where the real profile holds near zero and then drops steeply — see the limitation below.
+
+Run through the **compiled firmware code**, these parameters build 10 nodes
+`(4,0) (24,0) (50,−15) (67,0) (84,0) (95,5)` plus the four wrap copies, giving +2.09 Nm at 0 % gait,
+−15.00 at 50 %, +5.00 at 95 %.
 
 ## Known limitations
 
@@ -350,6 +355,66 @@ most expensive row in the handshake.
 `MAX_SNAPSHOTS` does **not** shrink (it is derived from the enum `Count`s, and `Count` is unchanged),
 so Teensy RAM is unaffected — only payload and handshake time.
 
+---
+
+## Node precision cleanup
+
+**Date:** 2026-08-27, same change set.
+
+The 2026-08-26 `spline.csv` edit stored values like `4.94366` and `0.0451984`, which made it by far
+the most expensive handshake row (880 B). ZJ's point: that precision is *"WAY beyond the bandwidth of
+the pulley system."*
+
+**That argument is correct for x but does not transfer to y.** Timing precision below 1 % gait
+(~12 ms at a 1.2 s stride, ~80 Hz) is far beyond what the Bowden/pulley transmission can track. The
+y digits are an *amplitude* resolution question instead, and both the torque sensor and the motor
+resolve well below 1 Nm. Measured deviation from the pre-rounding curve:
+
+| | max dev | rms | values row |
+|---|---|---|---|
+| current (pre-rounding) | – | – | 344 B |
+| x 2dp, y 2dp | 0.0072 Nm | 0.0022 | 270 B |
+| **x 1dp, y 2dp — CHOSEN** | **0.0332 Nm** | **0.0127** | **250 B** |
+| x 1dp, y 1dp | 0.0714 Nm | 0.0256 | 236 B |
+| x integer, y 2dp | 0.4209 Nm | 0.1255 | 210 B |
+| x integer, y 1dp | 0.399 Nm | 0.131 | 196 B |
+| x, y both integer | 0.848 Nm | 0.193 | 180 B |
+
+**The decisive figure: dropping y from 2 decimals to integer saves only ~40 bytes (~2
+notifications) but costs 25× the deviation** — 0.848 vs 0.033 Nm. For scale,
+`spline-node-count-branches` treats 0.14–0.44 Nm profile changes as worth analysing, and at
+`p_gain = 3` a feed-forward shift reaches the command at roughly 4×.
+
+Final: **x to 1 decimal, y to 2 decimals.** The timing digits — the ones the bandwidth argument
+actually covers — are cut hard, while the torque values keep enough resolution that the profile is
+indistinguishable from the one that was tuned (0.033 Nm peak deviation, 0.2 % of the −15 Nm peak).
+Peak stays exactly −15.00 / +5.00, and the rounded x values remain strictly increasing
+(`0, 4.9, 29.8, 33.8, 39.7, 51.2, 56.7, 59.8, 66.1, 84.7, 94.7, 100`) so there is no silent-zero risk.
+
+```
+0,2, 4.9,0, 29.8,0.05, 33.8,-6.11, 39.7,-9.84, 51.2,-15,
+56.7,-9.5, 59.8,-5.36, 66.1,0, 84.7,0.09, 94.7,5, 100,2
+```
+
+`splineAlt.csv` **was** rounded to all-integer timings, because its parameters are shape knobs rather
+than a hand-tuned curve — and re-solving the fit over the integer grid costs only 0.013 Nm rms. Note
+the fitted `PlantDwel = 0.5` rounds to **0, not 1**: 0 fits better (rms 0.486 vs 0.554) and is an
+explicitly supported path (the lobe collapses to 3 nodes).
+
+### Handshake, final
+
+```
+session start             3508 B   185 notifications   3.69 s
+after splineAlt added     4068 B   214 notifications   4.28 s
+after trec + spv2 removed 3267 B   172 notifications   3.44 s
+after precision cleanup   3147 B   166 notifications   3.31 s
+                          --------------------------------------
+net vs session start      -361 B   -19 notifications  -0.38 s
+```
+
+`spline.csv` drops 880 → 786 B; `splineAlt.csv` is 452 B. Net: a new controller was added and the
+handshake still shrank by 10 %.
+
 ### If TREC or SPV2 is ever wanted back
 
 Restore the five wiring points and the CSV. The classes, namespaces and bounds *values* are all still
@@ -364,5 +429,5 @@ in git history at this commit's parent; the bounds arrays would need to be re-ad
 2. Bench-validate before any walking trial. Nothing has been run on the motors.
 3. If the curve feels wrong at 30–35 %, add a shoulder node per lobe (limitation 1). Columns are free:
    21 of 34 used.
-4. Consider shrinking `spline.csv`'s stored precision — it is now the single most expensive handshake
-   row at 880 B, and the extra decimals are well below the resolution the controller can act on.
+4. ~~Consider shrinking `spline.csv`'s stored precision.~~ **Done 2026-08-27** — see
+   [Node precision cleanup](#node-precision-cleanup).
