@@ -209,19 +209,6 @@ namespace
         param_bound(false, 0.0f, 100.0f, false),    // 13 FiltStrength
     };
 
-    const ParameterBoundConfig trec_bounds[controller_defs::trec::num_parameter] =
-    {
-        param_bound(false, 0.0f, 100.0f, false),    // 0 plantar_scaling
-        param_bound(false, 0.0f, 100.0f, false),    // 1 dorsi_scaling
-        param_bound(false, 0.0f, 100.0f, false),    // 2 timing_threshold
-        param_bound(false, 0.0f, 10000.0f, false),  // 3 spring_stiffness
-        param_bound(false, -180.0f, 180.0f, false), // 4 neutral_angle
-        param_bound(false, 0.0f, 10000.0f, false),  // 5 damping
-        param_bound(false, 0.0f, 10000.0f, false),  // 6 propulsive_gain
-        param_bound(false, 0.0f, 10000.0f, false),  // 7 kp
-        param_bound(false, 0.0f, 10000.0f, false),  // 8 kd
-        param_bound(false, 0.0f, 1.0f, true),       // 9 turn_on_peak_limiter
-    };
 
     const ParameterBoundConfig chirp_bounds[controller_defs::chirp::num_parameter] =
     {
@@ -260,31 +247,6 @@ namespace
         param_bound(false, 0.0f, 1.0f, true),       // 0 calibr_cmd
     };
 
-    const ParameterBoundConfig spv2_bounds[controller_defs::spv2::num_parameter] =
-    {
-        param_bound(false, 0.0f, 100.0f, false),    // 0 plantar_scaling
-        param_bound(false, 0.0f, 100.0f, false),    // 1 dorsi_scaling
-        param_bound(false, 0.0f, 100.0f, false),    // 2 timing_threshold
-        param_bound(false, 0.0f, 10000.0f, false),  // 3 spring_stiffness_adj_factor
-        param_bound(false, 0.0f, 180.0f, false),    // 4 neutral_angle
-        param_bound(false, 0.0f, 180.0f, false),    // 5 min_angle
-        param_bound(false, 0.0f, 180.0f, false),    // 6 max_angle
-        param_bound(false, 0.0f, 10000.0f, false),  // 7 kp
-        param_bound(false, 0.0f, 10000.0f, false),  // 8 kd
-        param_bound(false, 0.0f, 1.0f, true),       // 9 turn_on_peak_limiter
-        param_bound(false, 0.0f, 1.0f, true),       // 10 do_update_stiffness
-        param_bound(false, 0.0f, 10000.0f, false),  // 11 ki
-        param_bound(false, 0.0f, 1.0f, true),       // 12 do_use_servo
-        param_bound(false, 0.0f, 100.0f, false),    // 13 fsr_servo_threshold
-        param_bound(false, 0.0f, 180.0f, false),    // 14 servo_origin
-        param_bound(false, 0.0f, 180.0f, false),    // 15 servo_terminal
-        param_bound(false, 1.0f, 10000.0f, true),   // 16 motor_current_calc_win
-        param_bound(false, 0.0f, 10000.0f, false),  // 17 spring_stiffness
-        param_bound(false, 0.0f, 10000.0f, false),  // 18 damping
-        param_bound(false, 0.0f, 1.0f, true),       // 19 soft_or_stiff
-        param_bound(false, 0.0f, 180.0f, false),    // 20 servo_angle_soft
-        param_bound(false, 0.0f, 180.0f, false),    // 21 servo_angle_stiff
-    };
 
     const ParameterBoundConfig pjmc_plus_bounds[controller_defs::pjmc_plus::num_parameter] =
     {
@@ -347,10 +309,6 @@ namespace
         return read_parameter_bound(elbow_min_max_bounds, PARAM_BOUND_COUNT(elbow_min_max_bounds), parameter_index, min_out, max_out, integer_only_out);
     }
 
-    bool bounds_for_trec(uint8_t parameter_index, float* min_out, float* max_out, bool* integer_only_out)
-    {
-        return read_parameter_bound(trec_bounds, PARAM_BOUND_COUNT(trec_bounds), parameter_index, min_out, max_out, integer_only_out);
-    }
 
     bool bounds_for_chirp(uint8_t parameter_index, float* min_out, float* max_out, bool* integer_only_out)
     {
@@ -372,10 +330,6 @@ namespace
         return read_parameter_bound(calibr_manager_bounds, PARAM_BOUND_COUNT(calibr_manager_bounds), parameter_index, min_out, max_out, integer_only_out);
     }
 
-    bool bounds_for_spv2(uint8_t parameter_index, float* min_out, float* max_out, bool* integer_only_out)
-    {
-        return read_parameter_bound(spv2_bounds, PARAM_BOUND_COUNT(spv2_bounds), parameter_index, min_out, max_out, integer_only_out);
-    }
 
     bool bounds_for_pjmc_plus(uint8_t parameter_index, float* min_out, float* max_out, bool* integer_only_out)
     {
@@ -555,16 +509,12 @@ uint8_t ControllerData::get_parameter_length_for(config_defs::JointType joint, u
                     return controller_defs::zhang_collins::num_parameter;
                 case (uint8_t)config_defs::ankle_controllers::constant_torque:
                     return controller_defs::constant_torque::num_parameter;
-                case (uint8_t)config_defs::ankle_controllers::trec:
-                    return controller_defs::trec::num_parameter;
                 case (uint8_t)config_defs::ankle_controllers::calibr_manager:
                     return controller_defs::calibr_manager::num_parameter;
                 case (uint8_t)config_defs::ankle_controllers::chirp:
                     return controller_defs::chirp::num_parameter;
                 case (uint8_t)config_defs::ankle_controllers::step:
                     return controller_defs::step::num_parameter;
-                case (uint8_t)config_defs::ankle_controllers::spv2:
-                    return controller_defs::spv2::num_parameter;
                 case (uint8_t)config_defs::ankle_controllers::pjmc_plus:
                     return controller_defs::pjmc_plus::num_parameter;
                 case (uint8_t)config_defs::ankle_controllers::spline:
@@ -696,16 +646,12 @@ bool ControllerData::get_parameter_bounds_for(
                     return bounds_for_zhang_collins(parameter_index, min_value, max_value, integer_only);
                 case (uint8_t)config_defs::ankle_controllers::constant_torque:
                     return bounds_for_constant_torque(parameter_index, min_value, max_value, integer_only);
-                case (uint8_t)config_defs::ankle_controllers::trec:
-                    return bounds_for_trec(parameter_index, min_value, max_value, integer_only);
                 case (uint8_t)config_defs::ankle_controllers::calibr_manager:
                     return bounds_for_calibr_manager(parameter_index, min_value, max_value, integer_only);
                 case (uint8_t)config_defs::ankle_controllers::chirp:
                     return bounds_for_chirp(parameter_index, min_value, max_value, integer_only);
                 case (uint8_t)config_defs::ankle_controllers::step:
                     return bounds_for_step(parameter_index, min_value, max_value, integer_only);
-                case (uint8_t)config_defs::ankle_controllers::spv2:
-                    return bounds_for_spv2(parameter_index, min_value, max_value, integer_only);
                 case (uint8_t)config_defs::ankle_controllers::pjmc_plus:
                     return bounds_for_pjmc_plus(parameter_index, min_value, max_value, integer_only);
                 case (uint8_t)config_defs::ankle_controllers::spline:

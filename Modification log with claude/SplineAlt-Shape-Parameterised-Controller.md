@@ -4,6 +4,8 @@
 **Scope:** Teensy 4.1 firmware (`ExoCode/src/Controller.{h,cpp}`, `ControllerData.{h,cpp}`,
 `Joint.{h,cpp}`, `ParseIni.h`, `ParamsFromSD.h`) and the SD card
 (`SDCard/ankleControllers/splineAlt.csv`, `SDCard/config.ini`). Ankle only.
+**Also covers:** unwiring the **TREC** and **SPV2** controllers from the ankle — see
+[Removing TREC and SPV2](#removing-trec-and-spv2-from-the-ankle) at the end.
 **Status:** Implemented on branch `add_new_spline_parameters`, **uncommitted at time of writing**.
 **Host-verified only — never compiled for Teensy, never flashed, never run on hardware.** The node
 builder and the PCHIP interpolator were extracted from `Controller.cpp` verbatim, compiled with
@@ -276,10 +278,91 @@ the payload is worthwhile independently of this change.
 
 `Spline`'s executable code is **byte-identical** to before; only its class comment changed.
 
+---
+
+## Removing TREC and SPV2 from the ankle
+
+**Date:** 2026-08-27, same branch, same uncommitted change set.
+
+ZJ asked to drop `chirp`, `step`, `trec` and `spv2` as unused. After checking what each one is, the
+scope was narrowed to **TREC and SPV2 only**:
+
+| | Joints | What it is | Outcome |
+|---|---|---|---|
+| **TREC** | ankle only | Terrain Responsive Exoskeleton Controller, from Cuddeback's NAU thesis | **removed** |
+| **SPV2** | ankle only | Header says *"STILL UNDER DEVELOPMENT"* | **removed** |
+| **Chirp** | hip, knee, ankle, elbow | Sine sweep, *"used for hardware performance validation"* | **kept** |
+| **Step** | hip, knee, ankle, elbow | Step response, *"used for hardware performance validation"* | **kept** |
+
+Chirp and Step were kept because they are actuator-characterisation tools, and a chirp sweep is
+precisely how you would measure the ankle's frequency response — the open question behind
+`Jitter-Round-3-Both-Branches-PJMC-PID.md` and the mechanical-resonance finding that followed it.
+
+### What was done — "unwire", not "delete"
+
+The `TREC` and `SPV2` **classes still exist** in `Controller.h` / `Controller.cpp`, and their
+`controller_defs::trec` / `controller_defs::spv2` namespaces and their `ControllerData` state fields
+(`setpoint2use_spv2`, `wasStance_spv2`, …) remain, because the class bodies reference them. They are
+simply **no longer instantiated or reachable**:
+
+- `ParseIni.h` — enum entries and `{"TREC", …}` / `{"SPV2", …}` name-map entries removed
+- `ParamsFromSD.h` — ankle CSV-path entries removed
+- `ControllerData.cpp` — the two ankle switch cases in each of `get_parameter_length_for` and
+  `get_parameter_bounds_for`, plus `trec_bounds[]`, `spv2_bounds[]`, `bounds_for_trec`,
+  `bounds_for_spv2` (those four live in the **anonymous namespace** at line 8, so leaving them with
+  no call site would produce unused-function/variable warnings)
+- `Joint.h` / `Joint.cpp` — `_trec` and `_spv2` members, their ctor-init entries, and their switch cases
+- `SDCard/ankleControllers/trec.csv` and `spv2.csv` deleted
+
+Verified afterwards: no dangling `ankle_controllers::trec` / `::spv2` / `_trec` / `_spv2` references
+anywhere, and `ControllerData.cpp` braces balance.
+
+### Enum IDs were deliberately NOT renumbered
+
+`trec = 6` and `spv2 = 10` are left as **gaps**, with a comment in `ParseIni.h` saying so. These
+values are the controller IDs on the wire: they ship in the BLE handshake, and the Python UDP remote
+can address a controller by number (`Python_GUI/examples/remote_console.py` documents spline as
+id 12). Closing the gaps would silently repoint any saved script at a different controller.
+`Count` is unaffected — it still follows `spline_alt = 13`, so it stays 14.
+
+### Handshake result
+
+```
+before this session       ~3508 B   185 notifications   3.69 s
+after splineAlt added     ~4068 B   214 notifications   4.28 s
+after trec+spv2 removed   ~3267 B   172 notifications   3.44 s
+                          --------------------------------------
+net vs session start       -241 B   -13 notifications  -0.25 s
+```
+
+So the handshake ends up **smaller than before a whole new controller was added**. Current per-controller
+costs (both sides, names + values):
+
+```
+spline 880 | splineAlt 478 | pjmc_plus 460 | PJMC 320 | zhangCollins 294
+chirp 250 | step 242 | constantTorque 200 | zeroTorque 138
+```
+
+Note `spline.csv` now costs **880 B**, not the 722 B measured before 2026-08-26 — that edit
+introduced long decimals (`4.94366`, `0.0451984`) which inflate its values row. It is now by far the
+most expensive row in the handshake.
+
+`MAX_SNAPSHOTS` does **not** shrink (it is derived from the enum `Count`s, and `Count` is unchanged),
+so Teensy RAM is unaffected — only payload and handshake time.
+
+### If TREC or SPV2 is ever wanted back
+
+Restore the five wiring points and the CSV. The classes, namespaces and bounds *values* are all still
+in git history at this commit's parent; the bounds arrays would need to be re-added to
+`ControllerData.cpp`.
+
+---
+
 ## Next steps
 
 1. Compile for Teensy and flash — neither has been done.
 2. Bench-validate before any walking trial. Nothing has been run on the motors.
 3. If the curve feels wrong at 30–35 %, add a shoulder node per lobe (limitation 1). Columns are free:
    21 of 34 used.
-4. Drop unused controllers from `ParseIni.h` and the SD card (planned separately).
+4. Consider shrinking `spline.csv`'s stored precision — it is now the single most expensive handshake
+   row at 880 B, and the extra decimals are well below the resolution the controller can act on.

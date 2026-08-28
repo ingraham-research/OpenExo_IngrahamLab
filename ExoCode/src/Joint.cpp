@@ -964,11 +964,9 @@ AnkleJoint::AnkleJoint(config_defs::joint_id id, ExoData* exo_data)
 , _spline(id, exo_data)
 , _spline_alt(id, exo_data)
 , _constant_torque(id, exo_data)
-, _trec(id, exo_data)
 , _calibr_manager(id, exo_data)
 , _chirp(id, exo_data)
 , _step(id, exo_data)
-, _spv2(id, exo_data)
 , _pjmc_plus(id, exo_data)
 {
     #ifdef JOINT_DEBUG
@@ -1188,9 +1186,6 @@ void AnkleJoint::set_controller(uint8_t controller_id)  //Changes the high level
         case (uint8_t)config_defs::ankle_controllers::constant_torque:
             _controller = &_constant_torque;
             break;
-        case (uint8_t)config_defs::ankle_controllers::trec:
-            _controller = &_trec;
-            break;
 		case (uint8_t)config_defs::ankle_controllers::calibr_manager:
             _controller = &_calibr_manager;
             break;
@@ -1199,9 +1194,6 @@ void AnkleJoint::set_controller(uint8_t controller_id)  //Changes the high level
             break;
         case (uint8_t)config_defs::ankle_controllers::step:
             _controller = &_step;
-            break;
-		case (uint8_t)config_defs::ankle_controllers::spv2:
-            _controller = &_spv2;
             break;
 		case (uint8_t)config_defs::ankle_controllers::pjmc_plus:
             _controller = &_pjmc_plus;
