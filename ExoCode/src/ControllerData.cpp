@@ -135,6 +135,32 @@ namespace
         param_bound(false, 0.0f, 10000.0f, false),  // 29 d_gain
     };
 
+    // Deliberately LOOSE. These bounds are hard-coded and a change means a reflash, so they are set
+    // wide enough that ordinary retuning never has to touch them. They are a sanity envelope, not a
+    // safety limit -- the real torque limit is MAX_JOINT_TORQUE_NM in Config.h, enforced in
+    // Motor.cpp, plus SplineAlt's own +/-15 Nm feed-forward clamp (see SplineAlt::calc_motor_cmd).
+    // Consequence to remember: a magnitude above 15 is accepted here and then silently clamped.
+    const ParameterBoundConfig spline_alt_bounds[controller_defs::spline_alt::num_parameter] =
+    {
+        param_bound(false, -50.0f, 50.0f, false),   // 0  max_plantar_torque
+        param_bound(false, -50.0f, 50.0f, false),   // 1  max_dorsi_torque
+        param_bound(false, 0.0f, 100.0f, false),    // 2  peak_plantar_time
+        param_bound(false, 0.0f, 100.0f, false),    // 3  peak_dorsi_time
+        param_bound(false, 0.0f, 100.0f, false),    // 4  plantar_rise_time
+        param_bound(false, 0.0f, 100.0f, false),    // 5  plantar_dwell_time
+        param_bound(false, 0.0f, 100.0f, false),    // 6  plantar_fall_time
+        param_bound(false, 0.0f, 100.0f, false),    // 7  dorsi_rise_time
+        param_bound(false, 0.0f, 100.0f, false),    // 8  dorsi_dwell_time
+        param_bound(false, 0.0f, 100.0f, false),    // 9  dorsi_fall_time
+        param_bound(false, 0.0f, 100.0f, false),    // 10 torque_scale
+        param_bound(false, 0.0f, 1.0f, true),       // 11 sim_gait
+        param_bound(false, 0.0f, 1.0f, true),       // 12 use_percent_gait
+        param_bound(false, 0.0f, 1.0f, true),       // 13 use_pid
+        param_bound(false, 0.0f, 10000.0f, false),  // 14 p_gain
+        param_bound(false, 0.0f, 10000.0f, false),  // 15 i_gain
+        param_bound(false, 0.0f, 10000.0f, false),  // 16 d_gain
+    };
+
     const ParameterBoundConfig franks_collins_hip_bounds[controller_defs::franks_collins_hip::num_parameter] =
     {
         param_bound(false, 0.0f, 300.0f, false),    // 0 mass
@@ -299,6 +325,11 @@ namespace
     bool bounds_for_spline(uint8_t parameter_index, float* min_out, float* max_out, bool* integer_only_out)
     {
         return read_parameter_bound(spline_bounds, PARAM_BOUND_COUNT(spline_bounds), parameter_index, min_out, max_out, integer_only_out);
+    }
+
+    bool bounds_for_spline_alt(uint8_t parameter_index, float* min_out, float* max_out, bool* integer_only_out)
+    {
+        return read_parameter_bound(spline_alt_bounds, PARAM_BOUND_COUNT(spline_alt_bounds), parameter_index, min_out, max_out, integer_only_out);
     }
 
     bool bounds_for_franks_collins_hip(uint8_t parameter_index, float* min_out, float* max_out, bool* integer_only_out)
@@ -538,6 +569,8 @@ uint8_t ControllerData::get_parameter_length_for(config_defs::JointType joint, u
                     return controller_defs::pjmc_plus::num_parameter;
                 case (uint8_t)config_defs::ankle_controllers::spline:
                     return controller_defs::spline::num_parameter;
+                case (uint8_t)config_defs::ankle_controllers::spline_alt:
+                    return controller_defs::spline_alt::num_parameter;
                 default:
                     return 0;
             }
@@ -677,6 +710,8 @@ bool ControllerData::get_parameter_bounds_for(
                     return bounds_for_pjmc_plus(parameter_index, min_value, max_value, integer_only);
                 case (uint8_t)config_defs::ankle_controllers::spline:
                     return bounds_for_spline(parameter_index, min_value, max_value, integer_only);
+                case (uint8_t)config_defs::ankle_controllers::spline_alt:
+                    return bounds_for_spline_alt(parameter_index, min_value, max_value, integer_only);
                 default:
                     return false;
             }

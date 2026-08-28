@@ -190,7 +190,8 @@ namespace config_defs
 		spv2 = 10,
 		pjmc_plus = 11,
         spline = 12,
-		
+        spline_alt = 13,
+
 		Count //Leave this at the end of the enum class. Count can be used to get the total number of controllers defined for this joint.
     };
 
@@ -523,7 +524,12 @@ namespace config_defs
 			{"SPV2", (uint8_t)config_defs::ankle_controllers::spv2},
 			{"PJMC_PLUS", (uint8_t)config_defs::ankle_controllers::pjmc_plus},
             {"spline", (uint8_t)config_defs::ankle_controllers::spline},
-        };  
+            // Keep this key at 9 characters or fewer. ListCtrlParams copies the controller name
+            // into a MAX_STRING_LENGTH (10) cell with strncpy(..., maxLen - 1), so a longer name is
+            // truncated in the BLE handshake -- and the Python UDP remote addresses controllers by
+            // exactly that truncated string. "spline_alt" would arrive as "spline_al".
+            {"splineAlt", (uint8_t)config_defs::ankle_controllers::spline_alt},
+        };
 
         const IniKeyCode elbow_controllers
         {

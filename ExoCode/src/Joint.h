@@ -233,6 +233,7 @@ class AnkleJoint : public _Joint
         ProportionalJointMoment _proportional_joint_moment;     /**< Proportional joint moment controller */
         ZhangCollins _zhang_collins;                            /**< Zhang Collins controller */
         Spline _spline;                                         /**< Spline controller */
+        SplineAlt _spline_alt;                                  /**< Spline controller parameterised by lobe shape */
         ConstantTorque _constant_torque;                        /**< Constant torque controller*/
         TREC _trec;                                             /**< TREC */
 		CalibrManager _calibr_manager;                          /**< Calibration Manager "Controller" */

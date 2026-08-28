@@ -1161,6 +1161,410 @@ float Spline::_pchip_interpolate(const float* x, const float* y, float percent_g
 
 //****************************************************
 
+/*
+ * SplineAlt - shape-parameterised sibling of Spline.
+ *
+ * !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ * !! THIS CONTROLLER IS A DELIBERATE COPY OF Spline, BUGS INCLUDED.                             !!
+ * !!                                                                                            !!
+ * !! Everything below the node construction -- the +/-15 Nm feed-forward clamp, the             !!
+ * !! torque_alpha = 1.0f filter, the near-zero gain scheduler with its hard-coded               !!
+ * !! KP_ZERO/KI_ZERO/KD_ZERO, and the uncalibrated-torque-sensor guard -- was copied verbatim   !!
+ * !! from Spline::calc_motor_cmd(), along with a second copy of the PCHIP math. That includes    !!
+ * !! the known warts documented there: the hard-coded transparency gains that cannot be reached  !!
+ * !! from the GUI or SD card, and the TODOs about promoting torque_alpha to a real parameter and !!
+ * !! reading the zero gains from ZeroTorque instead of duplicating them.                         !!
+ * !!                                                                                            !!
+ * !! IF YOU FIX ANYTHING IN Spline::calc_motor_cmd(), FIX IT HERE TOO. IF YOU FIX ANYTHING HERE, !!
+ * !! FIX IT IN Spline. Nothing in the build will warn you when these two drift apart.            !!
+ * !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ *
+ * What genuinely differs from Spline:
+ *
+ *  1. Nodes are BUILT from lobe shape parameters instead of being read as 12 (x, y) pairs.
+ *  2. The spline is PERIODIC across the 0/100 percent gait seam, so a lobe may wrap around the
+ *     end of the gait cycle (the dorsiflexion lobe in the current ankle profile does exactly
+ *     this: it peaks near 95 percent and decays through 0 into the next stride). Spline instead
+ *     clamps at its end nodes, which leaves a slope discontinuity at the stride boundary.
+ *
+ * The math is otherwise identical, and was verified against scipy.interpolate.PchipInterpolator:
+ * agreement to 1.4e-14 across the 12-node profile and every wrapped/unwrapped node set the
+ * builder can emit.
+ */
+
+SplineAlt::SplineAlt(config_defs::joint_id id, ExoData* exo_data)
+: _Controller(id, exo_data)
+{
+    #ifdef CONTROLLER_DEBUG
+        logger::println("SplineAlt::Constructor");
+    #endif
+};
+
+/*
+ * Build the node set from the shape parameters.
+ *
+ * Each lobe contributes:
+ *      (peak - rise, 0)   (peak, amplitude)   (peak + dwell, amplitude)   (peak + dwell + fall, 0)
+ *
+ * Then all nodes are reduced modulo 100, sorted, and extended periodically by TWO nodes on each
+ * side. Two rather than one so every real node gets a genuine interior tangent computed from its
+ * true periodic neighbours, instead of the endpoint approximation from _pchip_edge_tangent.
+ *
+ * Returns the number of nodes written to x[] / y[] (up to max_nodes), or 0 if the profile is
+ * degenerate. Returning 0 makes calc_motor_cmd() command zero torque.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * DELIBERATE ASYMMETRY - dwell == 0 is tolerated, rise == 0 and fall == 0 are NOT.
+ *
+ * The PCHIP monotonicity guard rejects x[i] <= x[i-1], so EQUAL x values are just as fatal as
+ * out-of-order ones, and the failure is all-or-nothing: the whole profile goes to zero, not just
+ * the offending segment.
+ *
+ *   - dwell == 0 is the normal case ("no plateau"), and would otherwise duplicate the peak node.
+ *     So a zero dwell COLLAPSES the lobe to 3 nodes and everything keeps working.
+ *
+ *   - rise == 0 or fall == 0 means an instantaneous jump between zero and peak torque. That is
+ *     not physically realisable and it is not silently repaired here: the duplicate x trips the
+ *     guard and the controller commands zero. This is intentional. The alternative -- dropping
+ *     the zero-valued boundary node -- would leave the peak node as an endpoint, and the
+ *     interpolator holds y[0] for everything below x[0], so a zero rise time would apply FULL
+ *     PEAK TORQUE from 0 percent gait onward. Silence is the safe failure; full torque is not.
+ *
+ * A lobe whose magnitude is exactly 0 contributes no nodes at all, which is how a direction is
+ * disabled without its timing parameters colliding with the other lobe.
+ * ---------------------------------------------------------------------------------------------
+ */
+int SplineAlt::_build_nodes(float* x, float* y)
+{
+    const float scale = _controller_data->parameters[controller_defs::spline_alt::torque_scale_idx] / 100.0f;
+
+    // Magnitudes are entered positive; plantarflexion is applied negative to match the sign
+    // convention in SDCard/ankleControllers/spline.csv.
+    const float amp[2] =
+    {
+        -_controller_data->parameters[controller_defs::spline_alt::max_plantar_torque_idx] * scale,
+         _controller_data->parameters[controller_defs::spline_alt::max_dorsi_torque_idx] * scale,
+    };
+    const float peak[2] =
+    {
+        _controller_data->parameters[controller_defs::spline_alt::peak_plantar_time_idx],
+        _controller_data->parameters[controller_defs::spline_alt::peak_dorsi_time_idx],
+    };
+    const float rise[2] =
+    {
+        _controller_data->parameters[controller_defs::spline_alt::plantar_rise_time_idx],
+        _controller_data->parameters[controller_defs::spline_alt::dorsi_rise_time_idx],
+    };
+    const float dwell[2] =
+    {
+        _controller_data->parameters[controller_defs::spline_alt::plantar_dwell_time_idx],
+        _controller_data->parameters[controller_defs::spline_alt::dorsi_dwell_time_idx],
+    };
+    const float fall[2] =
+    {
+        _controller_data->parameters[controller_defs::spline_alt::plantar_fall_time_idx],
+        _controller_data->parameters[controller_defs::spline_alt::dorsi_fall_time_idx],
+    };
+
+    // Raw nodes, before wrapping and sorting. 2 lobes x 4 nodes.
+    float nx[8];
+    float ny[8];
+    int n = 0;
+
+    for (int lobe = 0; lobe < 2; ++lobe)
+    {
+        if (amp[lobe] == 0.0f)
+        {
+            continue;   // direction disabled - contributes nothing, cannot collide
+        }
+
+        nx[n] = peak[lobe] - rise[lobe];   ny[n] = 0.0f;        ++n;
+        nx[n] = peak[lobe];                ny[n] = amp[lobe];   ++n;
+        if (dwell[lobe] > 0.0f)
+        {
+            nx[n] = peak[lobe] + dwell[lobe];  ny[n] = amp[lobe];  ++n;
+        }
+        nx[n] = peak[lobe] + dwell[lobe] + fall[lobe];  ny[n] = 0.0f;  ++n;
+    }
+
+    // Fewer than 3 nodes cannot support the three-point end-tangent formula, and n == 0 is the
+    // "both directions disabled" case (including torque_scale = 0).
+    if (n < 3)
+    {
+        return 0;
+    }
+
+    // Wrap into [0, 100). This is what lets a lobe straddle the end of the gait cycle.
+    for (int i = 0; i < n; ++i)
+    {
+        nx[i] = fmodf(nx[i], 100.0f);
+        if (nx[i] < 0.0f)
+        {
+            nx[i] += 100.0f;
+        }
+    }
+
+    // Insertion sort by x. Also removes any dependence on which lobe was emitted first, so
+    // dorsiflexion peaking before plantarflexion is expressible rather than fatal.
+    for (int i = 1; i < n; ++i)
+    {
+        const float kx = nx[i];
+        const float ky = ny[i];
+        int j = i - 1;
+        while (j >= 0 && nx[j] > kx)
+        {
+            nx[j + 1] = nx[j];
+            ny[j + 1] = ny[j];
+            --j;
+        }
+        nx[j + 1] = kx;
+        ny[j + 1] = ky;
+    }
+
+    // Overlapping lobes, a lobe longer than a full gait cycle, or a zero rise/fall all land here.
+    for (int i = 1; i < n; ++i)
+    {
+        if (nx[i] <= nx[i - 1])
+        {
+            return 0;
+        }
+    }
+
+    // Periodic extension: two copies of the tail before the start, two copies of the head after
+    // the end. Always strictly increasing because every nx is in [0, 100).
+    x[0] = nx[n - 2] - 100.0f;   y[0] = ny[n - 2];
+    x[1] = nx[n - 1] - 100.0f;   y[1] = ny[n - 1];
+    for (int i = 0; i < n; ++i)
+    {
+        x[2 + i] = nx[i];
+        y[2 + i] = ny[i];
+    }
+    x[2 + n] = nx[0] + 100.0f;   y[2 + n] = ny[0];
+    x[3 + n] = nx[1] + 100.0f;   y[3 + n] = ny[1];
+
+    return n + 4;
+}
+
+float SplineAlt::calc_motor_cmd()
+{
+    const bool simulate_gait = _controller_data->parameters[controller_defs::spline_alt::sim_gait_idx] > 0.0f;
+    const bool use_percent_gait = _controller_data->parameters[controller_defs::spline_alt::use_percent_gait_idx] > 0.0f;
+    float percent_gait = 0.0f;
+    if (simulate_gait)
+    {
+        percent_gait = _get_percent_gait(true);
+    }
+    else
+    {
+        percent_gait = use_percent_gait ? _side_data->percent_gait : _side_data->percent_stance;
+    }
+
+    float torque_cmd = 0.0f;
+
+    // Side::_calc_percent_gait() returns -1 until the expected step duration is established.
+    // Spline gets away with never checking because its first node sits at x = 0 and the
+    // interpolator clamps below x[0]; the periodic node set here has no such natural floor, so
+    // the guard has to be explicit.
+    if (percent_gait >= 0.0f)
+    {
+        // Fold onto the periodic domain. 100 maps to 0, which is the same point on the curve.
+        percent_gait = fmodf(percent_gait, 100.0f);
+
+        float x[SplineAlt::max_nodes];
+        float y[SplineAlt::max_nodes];
+        const int n = _build_nodes(x, y);
+        if (n >= 3)
+        {
+            torque_cmd = _pchip_interpolate(x, y, n, percent_gait);
+        }
+    }
+
+    if (torque_cmd > 15.0f)
+    {
+        torque_cmd = 15.0f;
+    }
+    else if (torque_cmd < -15.0f)
+    {
+        torque_cmd = -15.0f;
+    }
+
+    _controller_data->ff_setpoint = torque_cmd;
+
+    // Copied from Spline. See the note there: PJMC runs its torque reading unfiltered
+    // (torque_alpha = 1 in SDCard/ankleControllers/PJMC.csv) and the low-pass that used to sit
+    // here added phase lag inside the feedback loop. 1.0f keeps this identical to PJMC and to
+    // Spline. TODO (mirrors Spline's): promote to a real parameter instead of a constant.
+    _controller_data->filtered_torque_reading = utils::ewma(_joint_data->torque_reading, _controller_data->filtered_torque_reading, 1.0f);
+
+    float cmd = 0.0f;
+    if (_controller_data->parameters[controller_defs::spline_alt::use_pid_idx] > 0.0f)
+    {
+        // --------------------------- Gain scheduling (near-zero torque) ------------------------------
+        // Copied verbatim from Spline::calc_motor_cmd, which in turn mirrors PJMC's scheduler.
+        //
+        // !! These near-zero gains are HARD CODED and CANNOT be modified from the GUI or the SD card. !!
+        // Only the nominal p/i/d below are read from the controller parameters. The values here match
+        // SDCard/ankleControllers/zeroTorque.csv (3 / 0 / 0.001) and PJMC's kp_zero/ki_zero/kd_zero.
+        // TODO (mirrors Spline's): read the ZeroTorque controller's parameters instead of hard-coding
+        // them, so the transparency gains are tuned in exactly one place.
+        const float KP_ZERO = 3.0f;
+        const float KI_ZERO = 0.0f;
+        const float KD_ZERO = 0.001f;
+
+        // Nominal gains. These DO come from the parameters, so the GUI can still change them.
+        float kp_use = _controller_data->parameters[controller_defs::spline_alt::p_gain_idx];
+        float ki_use = _controller_data->parameters[controller_defs::spline_alt::i_gain_idx];
+        float kd_use = _controller_data->parameters[controller_defs::spline_alt::d_gain_idx];
+
+        // Conditions for "near zero", same bands as PJMC and Spline.
+        // Note this is also what makes torque_scale = 0 a usable transparency mode: every node
+        // collapses to zero, so the scheduler holds the tuned zero-torque gains all stride.
+        const float ZERO_SETPOINT_BAND_NM = 0.5f;
+        const float ZERO_ERROR_BAND_NM = 3.5f;
+        const float torque_error = torque_cmd - _controller_data->filtered_torque_reading;
+        const bool near_zero_setpoint = (fabsf(torque_cmd) <= ZERO_SETPOINT_BAND_NM);
+        const bool near_zero_error = (fabsf(torque_error) <= ZERO_ERROR_BAND_NM);
+
+        if (near_zero_setpoint && near_zero_error)
+        {
+            kp_use = KP_ZERO;
+            ki_use = KI_ZERO;
+            kd_use = KD_ZERO;
+        }
+        // End of gain scheduling
+
+        // Uncalibrated-torque-sensor guard, copied from Spline. _pid() returns its SETPOINT
+        // argument (not a PID contribution) when torque_offset_reading == 0, so without this
+        // `torque_cmd + _pid(torque_cmd, ...)` would command EXACTLY DOUBLE the intended
+        // feed-forward while the GUI's "Desired Torque" channel still read the single value.
+        // Fallback behaviour matches PJMC: drop to open-loop feed-forward rather than doubling it.
+        if (_joint_data->torque_offset_reading == 0)
+        {
+            cmd = torque_cmd;
+        }
+        else
+        {
+            cmd = torque_cmd + _pid(torque_cmd,
+                                    _controller_data->filtered_torque_reading,
+                                    kp_use,
+                                    ki_use,
+                                    kd_use);
+        }
+    }
+    else
+    {
+        cmd = torque_cmd;
+    }
+
+    _controller_data->previous_cmd = cmd;
+    _controller_data->desired_torque = torque_cmd;
+
+    return cmd;
+}
+
+// Identical to Spline::_pchip_edge_tangent. Duplicated rather than shared so that Spline's file
+// stays untouched - see the sister-controller warning at the top of this block.
+float SplineAlt::_pchip_edge_tangent(float h0, float h1, float m0, float m1)
+{
+    float d = ((2.0f * h0 + h1) * m0 - h0 * m1) / (h0 + h1);
+    const bool sign_d = d >= 0.0f;
+    const bool sign_m0 = m0 >= 0.0f;
+    if (sign_d != sign_m0)
+    {
+        return 0.0f;
+    }
+    const bool sign_m1 = m1 >= 0.0f;
+    if (sign_m0 != sign_m1 && fabsf(d) > 3.0f * fabsf(m0))
+    {
+        return 3.0f * m0;
+    }
+    return d;
+}
+
+// Same Fritsch-Carlson PCHIP as Spline::_pchip_interpolate, but with the node count passed in
+// instead of hard-coded to 12, because the builder emits between 7 and 12 nodes depending on how
+// many lobes are active and whether they have a dwell. Verified equal to
+// scipy.interpolate.PchipInterpolator to 1.4e-14 for every n the builder can produce.
+float SplineAlt::_pchip_interpolate(const float* x, const float* y, int n, float percent_gait)
+{
+    if (n < 3 || n > SplineAlt::max_nodes)
+    {
+        return 0.0f;
+    }
+
+    for (int i = 1; i < n; ++i)
+    {
+        if (x[i] <= x[i - 1])
+        {
+            return 0.0f;
+        }
+    }
+
+    // With the periodic extension in place percent_gait is always strictly inside the node range,
+    // so these two are defensive only.
+    if (percent_gait <= x[0])
+    {
+        return y[0];
+    }
+    if (percent_gait >= x[n - 1])
+    {
+        return y[n - 1];
+    }
+
+    float h[SplineAlt::max_nodes - 1];
+    float secant[SplineAlt::max_nodes - 1];
+    for (int i = 0; i < n - 1; ++i)
+    {
+        h[i] = x[i + 1] - x[i];
+        secant[i] = (y[i + 1] - y[i]) / h[i];
+    }
+
+    float m[SplineAlt::max_nodes];
+    for (int i = 1; i < n - 1; ++i)
+    {
+        const float m0 = secant[i - 1];
+        const float m1 = secant[i];
+        if (m0 == 0.0f || m1 == 0.0f || (m0 > 0.0f) != (m1 > 0.0f))
+        {
+            m[i] = 0.0f;
+        }
+        else
+        {
+            const float w1 = 2.0f * h[i] + h[i - 1];
+            const float w2 = h[i] + 2.0f * h[i - 1];
+            m[i] = (w1 + w2) / (w1 / m0 + w2 / m1);
+        }
+    }
+    m[0] = _pchip_edge_tangent(h[0], h[1], secant[0], secant[1]);
+    m[n - 1] = _pchip_edge_tangent(h[n - 2], h[n - 3], secant[n - 2], secant[n - 3]);
+
+    int k = 0;
+    for (int i = 0; i < n - 1; ++i)
+    {
+        if (percent_gait >= x[i] && percent_gait <= x[i + 1])
+        {
+            k = i;
+            break;
+        }
+    }
+
+    const float h_k = x[k + 1] - x[k];
+    const float s = (percent_gait - x[k]) / h_k;
+    const float s2 = s * s;
+    const float s3 = s2 * s;
+
+    const float h00 = 2.0f * s3 - 3.0f * s2 + 1.0f;
+    const float h10 = s3 - 2.0f * s2 + s;
+    const float h01 = -2.0f * s3 + 3.0f * s2;
+    const float h11 = s3 - s2;
+
+    return h00 * y[k] + h10 * h_k * m[k]
+         + h01 * y[k + 1] + h11 * h_k * m[k + 1];
+}
+
+
+//****************************************************
+
 FranksCollinsHip::FranksCollinsHip(config_defs::joint_id id, ExoData* exo_data)
 : _Controller(id, exo_data)
 {
