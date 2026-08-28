@@ -11,6 +11,7 @@ from PySide6 import QtWidgets
 import pyqtgraph as pg
 
 from node_state import NodeState
+from spline_alt_designer import SplineAltDesignerWindow
 from spline_csv import NUM_NODES, load_spline_csv, save_spline_csv
 from spline_math import NODE_X_BOUNDS, NODE_Y_BOUNDS
 
@@ -224,8 +225,16 @@ class SplineDesignerWindow(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    window = SplineDesignerWindow()
-    window.show()
+    # Two designers behind a tab bar: the original 12-node Spline designer and
+    # the shape-parameterised SplineAlt designer. SplineDesignerWindow is a
+    # QMainWindow, which nests fine as a tab page; its own window title/size are
+    # simply ignored while embedded.
+    tabs = QtWidgets.QTabWidget()
+    tabs.setWindowTitle("Ankle Spline Designer")
+    tabs.resize(1150, 700)
+    tabs.addTab(SplineDesignerWindow(), "Spline (12 nodes)")
+    tabs.addTab(SplineAltDesignerWindow(), "SplineAlt (shape)")
+    tabs.show()
     sys.exit(app.exec())
 
 
