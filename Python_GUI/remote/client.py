@@ -71,6 +71,8 @@ class ExoRemote:
             if "names" in msg:
                 self._names = msg["names"]
         elif stream == "ack":
+            # Also reached from _command's wait loop, so a fast ack can be captured
+            # here rather than by a later stream("ack"). See last_ack().
             self._last_ack = msg
 
     def _command(self, obj):
@@ -150,6 +152,37 @@ class ExoRemote:
         return out
 
     def last_ack(self):
+        """Most recent firmware ack seen on any recv, or None.
+
+        Check this BEFORE falling back to `stream("ack")`. `_command` absorbs
+        stream frames while waiting for its own ok/error reply, so an ack that
+        arrives inside that window lands here and is never re-delivered by
+        `stream`. A `stream("ack")` loop started after `set_param` can therefore
+        block until timeout on an update the exo already acknowledged.
+
+        Snapshot before the set, then check both sources:
+
+            before = exo.last_ack()
+            exo.set_param(...)                       # raises on bad names
+            ack = exo.last_ack() if exo.last_ack() is not before else None
+            if ack is None:
+                for ack in exo.stream("ack", timeout=5):
+                    break
+
+        Interpreting the result:
+
+        * `ack is None` means no ack arrived at all - the BLE write never
+          landed. Silence is the only failure signal; a dropped write produces
+          no negative ack. The GUI itself treats 5s of silence as failure.
+        * The `ok: true` reply to set_param only means the GUI queued a BLE
+          write. It is returned even when no exo is connected. Only the ack
+          means the firmware actually stored the value.
+        * Bilateral updates ack twice, once per side, and either side can be
+          rejected independently.
+        * Acks carry no request id and do not echo the value - only
+          joint_id / controller_id / param_index / accepted / reason. Match
+          concurrent updates yourself on that id triple.
+        """
         return self._last_ack
 
     def stream(self, which, timeout=None):
