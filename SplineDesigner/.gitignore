@@ -1,0 +1,13 @@
+# Byte-compiled Python. These were tracked by accident (one .pyc per interpreter
+# version, so they churn on every run and conflict between machines); untracked
+# in the same commit that added this file. The .py sources are still tracked.
+__pycache__/
+*.py[cod]
+
+# pytest
+.pytest_cache/
+
+# Local virtualenvs
+.venv/
+venv/
+env/
