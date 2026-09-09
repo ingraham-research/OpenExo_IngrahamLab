@@ -183,26 +183,72 @@ Two things to remember rather than worry about: `RESETREAS` is write-1-to-clear 
 boot, and the reason lives in `ErrorChar` only until the first runtime error overwrites it (the GUI
 already prints a clear message for that case).
 
-## Deferred — raising max plantar torque to 20 or 25 Nm
+## Max plantar torque raised to 25 Nm — IMPLEMENTED 2026-09-09
 
-Investigated, **not implemented, left as a TODO.** The finding worth carrying forward:
+Was deferred; the user took the decision on 2026-09-09. **Three constants changed, compiled for both
+boards, never flashed and never run on motors.**
 
-**The gate is not the parameter bounds.** `PlantarNm` is already bounds-checked at ±50 Nm
-(`ControllerData.cpp:145`), so 20 or 25 is accepted and then **silently truncated** by a hard **±15 Nm
-feed-forward clamp** at `Controller.cpp:1382-1389` — duplicated verbatim in `Spline` at `898-904`. So
-`PlantarNm = 25` produces exactly the same profile as `PlantarNm = 15`, with no warning.
+| Where | Was | Now |
+|---|---|---|
+| `Config.h:44` `MAX_JOINT_TORQUE_NM` | `25.0f` | `30.0f` |
+| `Controller.cpp` `Spline::calc_motor_cmd()` feed-forward clamp | `±15.0f` | `±25.0f` |
+| `Controller.cpp` `SplineAlt::calc_motor_cmd()` feed-forward clamp | `±15.0f` | `±25.0f` |
 
-Hardware is not the constraint (`_I_MAX` 10.3 A × `Kt` 1.11 × gearing 4.5 ⇒ 51.4 Nm ceiling). **PID
-headroom is.** `MAX_JOINT_TORQUE_NM = 25` (`Config.h:44`) is the clamp that closed the 51 Nm saturation
-path in `Fresh-Torque-Path-Safety-Audit.md`; that audit shows a 6.6 Nm tracking error was enough to
-saturate at a 12 Nm feed-forward, and tracking errors "routinely reach ±15–20 Nm". So:
+**The user's rationale, which is the thing to preserve:** the feed-forward alone consistently
+*under*-delivers measured torque, and the PID is what brings the measured value up to the prescribed
+profile. So the feed-forward must be allowed to ask for the full profile value, and the ceiling must
+sit above it — clipping at the peak is exactly what you do not want. The user also explicitly set
+aside the ×1.165 packing question: it has not shown up in the measured torque, and measured torque is
+what was actually delivered.
 
-- **20 Nm** leaves 5 Nm of headroom — reachable by raising both clamps (`±15` → new value, and
-  `MAX_JOINT_TORQUE_NM` to ~30–32 to keep the current headroom ratio).
-- **25 Nm** leaves **zero** headroom; the command would sit pinned against the clamp through every peak.
-  That is a safety-envelope decision, not a parameter change.
+**Why 30 and not more.** The gate was never the parameter bounds — `PlantarNm` has always been
+bounds-checked at ±50 Nm (`ControllerData.cpp:145`), so 20 or 25 was accepted and then silently
+truncated by the ±15 feed-forward clamp. `PlantarNm = 25` produced exactly the same profile as 15,
+with no warning. That is now fixed.
 
-Settle the ×1.165 `t_ff` packing factor first (`Motor.cpp:820-834`): the net error is **+5 % if the ±12.0
-field is N·m but −15 % if it is amps**, and the source says to resolve it with the blocked-joint static
-test before touching `_I_MAX` or `Kt`. That ambiguity matters far more when operating near the clamp than
-it did at 15 Nm with headroom to spare.
+**PID authority is the quantity being spent.** The feed-forward clamp bounds only the profile; the PID
+correction is added on top of it and has no limit of its own, so `MAX_JOINT_TORQUE_NM` is what
+truncates the sum. The gap between the two is what the PID has to work with:
+
+| Feed-forward | Ceiling | PID authority | Tracking error that clips, at `p_gain` 3 |
+|---|---|---|---|
+| 15 (old) | 25 (old) | 10 Nm | 3.3 Nm |
+| 15 (unchanged profile) | **30 (new)** | **15 Nm** | **5.0 Nm** |
+| **25 (new peak)** | **30 (new)** | **5 Nm** | **1.7 Nm** |
+
+Note the middle row: **at the profiles currently on the SD card (`PlantarNm 15`) this change is
+strictly safer than before**, because the ceiling moved up and the feed-forward did not. Authority only
+tightens if `PlantarNm` is actually raised toward 25.
+
+**Verified for this change (2026-09-09):**
+
+- `MAX_JOINT_TORQUE_NM` has exactly one definition (`Config.h:44`) and exactly one enforcement site
+  (`Motor.cpp:259`, the final gate in `_CANMotor::send_data()`). No second copy anywhere.
+- The ±15 clamp existed in exactly the two spline controllers and nowhere else. No other controller
+  has a feed-forward clamp of its own.
+- The `_I_MAX` current saturation (`Motor.cpp:327`) does **not** engage: 30 Nm ÷ 4.5 gearing ÷ 1.11 Kt
+  = 6.0 A against a 10.3 A full scale (58 %). `_I_MAX` binds at 51.4 Nm, so `MAX_JOINT_TORQUE_NM`
+  remains the thing that actually stops a runaway.
+- The 12-bit `t_ff` quantisation is 0.025 Nm at the joint, unchanged by this edit.
+- The int16 ×100 real-time stream does not wrap: 30 Nm → 3000, against a ±32767 field.
+- The Python GUI has no hard-coded torque ceiling of its own — nothing to keep in sync.
+- Only the ankle is enabled in `SDCard/config.ini` (`ankle = AK60v3`, gear 4.5; hip/knee/elbow/arm all
+  `0`), so the global define currently reaches the ankles only.
+- Compiles clean, exit 0, both `teensy:avr:teensy41` and `arduino:mbed_nano:nano33ble`.
+
+**Three things to watch on the bench:**
+
+1. **The define is global.** It is the only absolute torque ceiling in the system and it applies to
+   every joint and every controller. Raising it also raised the worst case for PJMC, chirp, step and
+   for any PID runaway — from 25 Nm to 30 (from 26.2 to 34.9 with the ×1.165 packing). Nothing else
+   stands behind it except `_I_MAX` at 51.4 Nm.
+2. **The D term is the most likely thing to hit the new clamp,** not the profile. `d_gain` 0.01 at
+   500 Hz multiplies a sample-to-sample torque jump by 5, so once `PlantarNm` is at 25 a **1.0 Nm
+   single-sample jump** on the torque reading is enough to clip on its own (it took 2.0 Nm before).
+   Spline runs the **raw, unfiltered** torque reading (`torque_alpha` hard-set to 1.0), and the
+   gain scheduler does *not* protect the peak — it only engages near zero setpoint. Swing phase is
+   still covered by `KD_ZERO` 0.001.
+3. **Clipping is visible and cheap.** `Motor.cpp:278-296` prints a rate-limited (1/s) `TORQUE CLAMP:`
+   line giving the joint-Nm asked for, and clamps. It does not fault or cut out. Watch for that line
+   over USB when first running a 25 Nm profile — it is the direct evidence of whether 5 Nm of PID
+   authority is enough.

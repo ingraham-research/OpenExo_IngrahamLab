@@ -818,8 +818,9 @@ _CANMotor(id, exo_data, enable_pin)
     //
     //     every command we send arrives 12.0/10.3 = 1.165x larger than intended.
     //
-    // Side effect to remember: MAX_JOINT_TORQUE_NM = 25 therefore really clamps at 26.2 Nm, and
-    // the unguarded enable()/zero() slam is 54.0 Nm.
+    // Side effect to remember: MAX_JOINT_TORQUE_NM = 30 therefore really clamps at 34.9 Nm, and
+    // the unguarded enable()/zero() slam is 54.0 Nm. (The define was 25 -> 26.2 Nm before
+    // 2026-09-09; the slam figure is independent of it.)
     //
     // UNRESOLVED: whether that +-12.0 is N.m or IQ amps. The manual contradicts itself -- the
     // sec 4.2 table header says "Motor torque (N.M)", but the sec 4.4.1 command examples label the

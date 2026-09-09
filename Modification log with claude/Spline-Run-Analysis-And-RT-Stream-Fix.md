@@ -134,7 +134,8 @@ much smaller residual. Note the same function still contains the genuine hang ri
 `cmd = ff + Kp·(ff − measured)`, so the feed-forward is effectively multiplied by **(1 + Kp) = 7**
 during any tracking error. With FF slewing at ~155 Nm/s and a series-elastic ankle that cannot
 follow instantly, ~30 ms of lag is ~4.6 Nm of error → ~28 Nm commanded → clipped by
-`MAX_JOINT_TORQUE_NM = 25` (`Motor.cpp:257`). The clamp reports via a bare `Serial.print`
+`MAX_JOINT_TORQUE_NM = 25` (`Motor.cpp:257`) — **raised to 30 on 2026-09-09, after this document was
+written**. The clamp reports via a bare `Serial.print`
 (deliberately, because `logger` is gated to Release) — **invisible on a battery-powered trial**.
 
 Also `AK60v3::_I_MAX = 10.3` vs the motor's ±12.0 field scale (`Motor.cpp:806-830`): every command

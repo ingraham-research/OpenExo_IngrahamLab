@@ -34,7 +34,7 @@ controller with its own, much smaller parameter list sidesteps the limit entirel
 ## What it is
 
 `SplineAlt` (ankle controller id **13**, name **`splineAlt`**) produces its curve from **17
-parameters** instead of 30. Its command path — the ±15 Nm feed-forward clamp, the `torque_alpha = 1.0`
+parameters** instead of 30. Its command path — the ±25 Nm feed-forward clamp, the `torque_alpha = 1.0`
 filter, the near-zero gain scheduler, the uncalibrated-sensor guard, the PID — is a **deliberate,
 line-for-line copy of `Spline::calc_motor_cmd()`**, so the two controllers should feel identical when
 given the same curve.
@@ -189,10 +189,12 @@ Run through the **compiled firmware code**, these parameters build 10 nodes
 2. **Interleaved lobes do not silent-zero.** Only an *exact* x collision does. Lobes overlapping in
    time but with distinct node x's (plantar 30–70, dorsi 35–75) build a valid but strange curve. Not
    a bug — just not caught.
-3. **Magnitudes above 15 Nm are silently clamped.** The bounds table allows ±50 (deliberately loose so
-   the hard-coded table need not be reflashed), but `SplineAlt` keeps `Spline`'s ±15 Nm feed-forward
-   clamp. The separate joint-level limit is `MAX_JOINT_TORQUE_NM = 25.0f` in `Config.h`, enforced in
-   `Motor.cpp` at the motor shaft (`25 / gearing`) with a rate-limited Serial report.
+3. **Magnitudes above 25 Nm are silently clamped.** The bounds table allows ±50 (deliberately loose so
+   the hard-coded table need not be reflashed), but `SplineAlt` keeps `Spline`'s ±25 Nm feed-forward
+   clamp. The separate joint-level limit is `MAX_JOINT_TORQUE_NM = 30.0f` in `Config.h`, enforced in
+   `Motor.cpp` at the motor shaft (`30 / gearing`) with a rate-limited Serial report.
+   *(Raised 2026-09-09 from ±15 and 25 — see "Max plantar torque raised to 25 Nm" in
+   `External-Control-Orchestrator.md` for the reasoning and the bench checks.)*
 4. **Ankle only.** Not wired into hip, knee, elbow or arm.
 
 ---
