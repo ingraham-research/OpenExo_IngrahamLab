@@ -3,7 +3,7 @@
 **Date:** 2026-07-14
 **Branch:** `fix_zerotorque_pid`
 Running list of diagnosed issues and to-dos from the zero-torque transparency work. See
-`docs/superpowers/specs/2026-07-10-*` for the shipped designs.
+`Modification log with claude/specs/2026-07-10-*` for the shipped designs.
 
 ## Done / working
 

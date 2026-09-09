@@ -13,7 +13,7 @@ residual cost is milliseconds of SD I/O, which suggests fix A below was the subs
 `Spline-Run-Analysis-And-RT-Stream-Fix.md` §F1.
 **Read alongside:** `Modification log with claude/SD-Card-Logging-and-End-Trial-Reset.md` (the
 end-trial reset/shutdown handshake this builds on — if the reset misbehaves, cross-check both),
-and `docs/superpowers/specs/2026-07-07-end-trial-shutdown-progress-design.md`.
+and `Modification log with claude/specs/2026-07-07-end-trial-shutdown-progress-design.md`.
 
 ---
 

@@ -6,8 +6,10 @@
 (`SDCard/ankleControllers/splineAlt.csv`, `SDCard/config.ini`). Ankle only.
 **Also covers:** unwiring the **TREC** and **SPV2** controllers from the ankle — see
 [Removing TREC and SPV2](#removing-trec-and-spv2-from-the-ankle) at the end.
-**Status:** Implemented on branch `add_new_spline_parameters`, **uncommitted at time of writing**.
-**Host-verified only — never compiled for Teensy, never flashed, never run on hardware.** The node
+**Status:** Implemented, flashed, and **validated on hardware** — works well (user confirmed
+2026-09-08). Originally written on branch `add_new_spline_parameters`; now on the working branch.
+The original status line below described the state at time of writing and is kept for the record:
+*"Host-verified only — never compiled for Teensy, never flashed, never run on hardware."* The node
 builder and the PCHIP interpolator were extracted from `Controller.cpp` verbatim, compiled with
 `g++ -Wall -Wextra`, and checked numerically against `scipy.interpolate.PchipInterpolator`;
 `calc_motor_cmd()` was reviewed but not executed.

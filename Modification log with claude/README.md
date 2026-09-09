@@ -1,7 +1,7 @@
 # Modification log — index
 
 Human-readable "what / why / how to modify" write-ups for changes made in this repo, one file per
-investigation. Deeper design specs and implementation plans live in `docs/superpowers/`.
+investigation. Deeper design specs and implementation plans live in `Modification log with claude/`.
 
 **Last audited: 2026-08-12.** Every status line below was checked against the code and git history
 on that date. If you add a document, add a row here.

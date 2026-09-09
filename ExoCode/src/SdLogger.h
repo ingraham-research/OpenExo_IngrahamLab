@@ -60,7 +60,7 @@
  * decimated motor rows (~100 Hz) and per-ground-strike step rows are written, and
  * files are flushed on a staggered cadence so no single 500 Hz control cycle stalls.
  *
- * Design: docs/superpowers/specs/2026-07-06-teensy-sd-logging-design.md
+ * Design: Modification log with claude/specs/2026-07-06-teensy-sd-logging-design.md
  */
 
 #ifndef SDLOGGER_H
