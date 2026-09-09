@@ -57,7 +57,7 @@ class OpenExoLink:
     ack_timeout: how long we wait for the EXO's acknowledgement of a parameter write
     max_retries: how many times we resend a write that was met with silence
     verbose: if 1, print every write and every ack to the terminal
-    logfile: an already-open, line-buffered file to mirror the write/ack history into. Optional
+    logfile: an already-open (by main_external_control), line-buffered file to mirror the write/ack history into. Optional
     """
 
     def __init__(self, host="127.0.0.1", port=9750, timeout=2.0, ack_timeout=DEFAULT_ACK_TIMEOUT,

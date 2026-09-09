@@ -263,7 +263,7 @@ def main():
     #Build the action map. This resolves every parameter address up front, so a name mismatch fails here
     #rather than half way through an experiment
     try:
-        action_map = SplineAlt_action_map(OpenExo_link, body_mass_standard, joints=joints_to_drive, controller=controller_name, m_max=max_torque_scaling, verbose=1)
+        action_map = SplineAlt_action_map(OpenExo_link, body_mass_standard, joints=joints_to_drive, controller=controller_name, torque_percentage_max=max_torque_scaling, verbose=1)
     except OpenExoLinkError as e:
         print(f"Could not resolve the controller parameters: {e}")
         input("Check the controller name against the printed matrix, then restart - hit enter to exit.\n")
@@ -278,8 +278,9 @@ def main():
     input("Press enter to engage the controller, or Ctrl-C to abort:\n")
 
     try:
-        #Order matters here. See engage_controller_safely for why the scale must be written FIRST
+        #Call engage safety to overwrite any pre-existing torque scale on CSV to 0, so we start at zero torque
         action_map.engage_controller_safely()
+        #Apply scaling. This is the ONLY place we call apply_torque_magnitude. Anywhere else, it's apply_machine_action
         scaling = action_map.apply_torque_magnitudes(plantar_nm, dorsi_nm, body_mass=body_mass_participant)
         if peak_timing_value is not None and timing_lobe is not None:
             action_map.apply_peak_timing(timing_lobe, peak_timing_value)
@@ -438,7 +439,7 @@ def main():
             if new_torque_percentage is not None:
                 print(f"Applying torque percentage: {new_torque_percentage:.2f}%")
                 try:
-                    applied = action_map.apply_machine_action(new_torque_percentage)
+                    applied = action_map.apply_torque_percentage(new_torque_percentage)
                 except OpenExoLinkError as e:
                     #A half-applied action means the two legs are assisting differently. Stop rather than
                     #carry on with an unknown state on the exo
