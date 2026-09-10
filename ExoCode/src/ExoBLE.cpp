@@ -8,6 +8,7 @@
 #include "error_codes.h"
 #include "Logger.h"
 #include "GetBulkChar.h"
+#include "SystemReset.h"
 
 #define EXOBLE_DEBUG 0
 
@@ -215,6 +216,25 @@ bool ExoBLE::setup()
     _gatt_db.PCBChar.writeValue(pcb_char);
     _gatt_db.DeviceChar.writeValue(device_char);
     send_error(0, 0);
+
+    //Park the last reset reason in ErrorChar so the GUI can READ it once, right after connecting.
+    //
+    //Read rather than notify on purpose: nobody is subscribed at boot, and the notify path would
+    //have to fire during the connect handshake, which is exactly the burst that already loses
+    //controller rows. A stored value costs the GUI one idle round trip before notifications start.
+    //
+    //Reusing ErrorChar rather than adding a characteristic is also deliberate: Windows caches the
+    //GATT table per device, so a new characteristic can be served stale from that cache and read
+    //back as missing. Nothing about the table changes here.
+    //
+    //send_error() above is a no-op at this point (it early-returns while _connected is 0), so this
+    //write is what ErrorChar actually holds until the first runtime error overwrites it.
+    {
+        String reset_reason = exo_reset_reason_string();
+        char reset_char[reset_reason.length() + 1];
+        reset_reason.toCharArray(reset_char, reset_reason.length() + 1);
+        _gatt_db.ErrorChar.writeValue(reset_char);
+    }
 
     //Configure services and advertising data
     BLE.setAdvertisedService(_gatt_db.UARTService);

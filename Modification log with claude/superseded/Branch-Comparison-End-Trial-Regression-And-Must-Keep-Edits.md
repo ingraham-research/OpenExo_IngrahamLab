@@ -358,7 +358,7 @@ remove the failure mode rather than re-tuning a race — then re-enable the shut
 - **GUI plotting fixes** — `RtBridge.py` int16 ×100 handling and exo-time wrap,
   `ActiveTrialPage._x_for_sample()` (`6322e17`). Cosmetic; fixes the ~300 s plot glitch.
 - **`last_step_duration`** — `SideData.{h,cpp}`. Logging support only.
-- **Docs and test logs** — `Modification log with claude/`, `docs/superpowers/`,
+- **Docs and test logs** — `Modification log with claude/`, `Modification log with claude/`,
   `Test results/Motor logs/0009/`. Zero runtime effect; the 0009 logs are the evidence base for the
   measurements in Part 1 — keep them.
 

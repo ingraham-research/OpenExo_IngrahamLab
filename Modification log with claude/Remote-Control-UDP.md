@@ -11,8 +11,8 @@ pre-written commands to test the remote. Tested on exo and confirm that they wor
 Localhost-only, so the exposure is small, but it is a live actuation path — disable it if you do not
 want that.
 **Detailed design/plan (deeper reference):**
-`docs/superpowers/specs/2026-07-17-udp-remote-control-design.md`,
-`docs/superpowers/plans/2026-07-18-udp-remote-control.md`
+`Modification log with claude/specs/2026-07-17-udp-remote-control-design.md`,
+`Modification log with claude/plans/2026-07-18-udp-remote-control.md`
 
 This document is the high-level "what / why / how to modify" summary.
 
@@ -116,4 +116,4 @@ No changes to `ExoCode/`, `services/RtBridge.py`, or `services/QtExoDeviceManage
 
 The `torque_scale` controller parameter (a global torque magnitude knob) is designed to be driven by
 this remote for programmatic sweeps. Findings and injection-point analysis are in
-`docs/superpowers/2026-07-14-control-loop-and-transparency-backlog.md`.
+`Modification log with claude/2026-07-14-control-loop-and-transparency-backlog.md`.

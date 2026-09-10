@@ -138,8 +138,9 @@ namespace
     // Deliberately LOOSE. These bounds are hard-coded and a change means a reflash, so they are set
     // wide enough that ordinary retuning never has to touch them. They are a sanity envelope, not a
     // safety limit -- the real torque limit is MAX_JOINT_TORQUE_NM in Config.h, enforced in
-    // Motor.cpp, plus SplineAlt's own +/-15 Nm feed-forward clamp (see SplineAlt::calc_motor_cmd).
-    // Consequence to remember: a magnitude above 15 is accepted here and then silently clamped.
+    // Motor.cpp, plus SplineAlt's own +/-25 Nm feed-forward clamp (see SplineAlt::calc_motor_cmd).
+    // Consequence to remember: a magnitude above 25 is accepted here and then silently clamped.
+    // (Both of those were raised on 2026-09-09, from 25 and 15 respectively.)
     const ParameterBoundConfig spline_alt_bounds[controller_defs::spline_alt::num_parameter] =
     {
         param_bound(false, -50.0f, 50.0f, false),   // 0  max_plantar_torque

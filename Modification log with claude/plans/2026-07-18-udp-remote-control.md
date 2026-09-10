@@ -1487,7 +1487,7 @@ Create `Modification log with claude/Remote-Control-UDP.md` documenting:
 - **How to use it:** run `GUI.py` (banner confirms the port), then a script using `remote/client.py` — reference `examples/sweep_example.py`. Include the JSON message table (`set_param`, `subscribe`, `unsubscribe`, `get_matrix`, `ping`) and the four streams (`rt`, `ack`, `matrix`, `status`).
 - **Key behaviors:** command reply means "GUI transmitted it"; firmware accept/reject arrives on the `ack` stream; names resolve against the handshake matrix; raw integer ids work before handshake; a command reply never navigates the GUI.
 - **How to disable:** `utils/config.py` -> `RemoteConfig.ENABLED = False`.
-- **Design/rationale:** link to `docs/superpowers/specs/2026-07-17-udp-remote-control-design.md`.
+- **Design/rationale:** link to `Modification log with claude/specs/2026-07-17-udp-remote-control-design.md`.
 - **Safety notes:** localhost only; firmware bounds-checks every write (`ParamUpdateValidation.h`); send scope is parameters only (no motor/trial control).
 
 Reference the existing files in `Modification log with claude/` for tone and structure.

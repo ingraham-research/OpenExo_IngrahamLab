@@ -6,8 +6,10 @@
 (`SDCard/ankleControllers/splineAlt.csv`, `SDCard/config.ini`). Ankle only.
 **Also covers:** unwiring the **TREC** and **SPV2** controllers from the ankle — see
 [Removing TREC and SPV2](#removing-trec-and-spv2-from-the-ankle) at the end.
-**Status:** Implemented on branch `add_new_spline_parameters`, **uncommitted at time of writing**.
-**Host-verified only — never compiled for Teensy, never flashed, never run on hardware.** The node
+**Status:** Implemented, flashed, and **validated on hardware** — works well (user confirmed
+2026-09-08). Originally written on branch `add_new_spline_parameters`; now on the working branch.
+The original status line below described the state at time of writing and is kept for the record:
+*"Host-verified only — never compiled for Teensy, never flashed, never run on hardware."* The node
 builder and the PCHIP interpolator were extracted from `Controller.cpp` verbatim, compiled with
 `g++ -Wall -Wextra`, and checked numerically against `scipy.interpolate.PchipInterpolator`;
 `calc_motor_cmd()` was reviewed but not executed.
@@ -32,7 +34,7 @@ controller with its own, much smaller parameter list sidesteps the limit entirel
 ## What it is
 
 `SplineAlt` (ankle controller id **13**, name **`splineAlt`**) produces its curve from **17
-parameters** instead of 30. Its command path — the ±15 Nm feed-forward clamp, the `torque_alpha = 1.0`
+parameters** instead of 30. Its command path — the ±25 Nm feed-forward clamp, the `torque_alpha = 1.0`
 filter, the near-zero gain scheduler, the uncalibrated-sensor guard, the PID — is a **deliberate,
 line-for-line copy of `Spline::calc_motor_cmd()`**, so the two controllers should feel identical when
 given the same curve.
@@ -187,10 +189,12 @@ Run through the **compiled firmware code**, these parameters build 10 nodes
 2. **Interleaved lobes do not silent-zero.** Only an *exact* x collision does. Lobes overlapping in
    time but with distinct node x's (plantar 30–70, dorsi 35–75) build a valid but strange curve. Not
    a bug — just not caught.
-3. **Magnitudes above 15 Nm are silently clamped.** The bounds table allows ±50 (deliberately loose so
-   the hard-coded table need not be reflashed), but `SplineAlt` keeps `Spline`'s ±15 Nm feed-forward
-   clamp. The separate joint-level limit is `MAX_JOINT_TORQUE_NM = 25.0f` in `Config.h`, enforced in
-   `Motor.cpp` at the motor shaft (`25 / gearing`) with a rate-limited Serial report.
+3. **Magnitudes above 25 Nm are silently clamped.** The bounds table allows ±50 (deliberately loose so
+   the hard-coded table need not be reflashed), but `SplineAlt` keeps `Spline`'s ±25 Nm feed-forward
+   clamp. The separate joint-level limit is `MAX_JOINT_TORQUE_NM = 30.0f` in `Config.h`, enforced in
+   `Motor.cpp` at the motor shaft (`30 / gearing`) with a rate-limited Serial report.
+   *(Raised 2026-09-09 from ±15 and 25 — see "Max plantar torque raised to 25 Nm" in
+   `External-Control-Orchestrator.md` for the reasoning and the bench checks.)*
 4. **Ankle only.** Not wired into hip, knee, elbow or arm.
 
 ---

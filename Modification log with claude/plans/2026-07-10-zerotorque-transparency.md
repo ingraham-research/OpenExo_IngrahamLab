@@ -51,7 +51,7 @@ In `ZeroTorque::calc_motor_cmd()`, after the PID block and before `return cmd;`,
 ```cpp
     //Report the measured torque for GUI streaming and SD logging.
     //No filtering here: mirrors PJMC-0's low-gain regime (raw torque), which is the
-    //behavior being reproduced. (See docs/superpowers/specs/2026-07-10-zerotorque-transparency-design.md)
+    //behavior being reproduced. (See Modification log with claude/specs/2026-07-10-zerotorque-transparency-design.md)
     _controller_data->filtered_torque_reading = _joint_data->torque_reading;
 ```
 

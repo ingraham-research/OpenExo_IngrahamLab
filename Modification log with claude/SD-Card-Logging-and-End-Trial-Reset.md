@@ -4,10 +4,10 @@
 **Scope:** Teensy 4.1 firmware (`ExoCode/`), Nano 33 BLE firmware (`ExoCode/` Nano branch), Python GUI (`Python_GUI/`)
 **Status:** Working and validated on-device (benchtop + worn, back-to-back trials, reconnect verified).
 **Detailed design/plan (deeper reference):**
-`docs/superpowers/specs/2026-07-06-teensy-sd-logging-design.md`,
-`docs/superpowers/plans/2026-07-06-teensy-sd-logging.md`,
-`docs/superpowers/specs/2026-07-07-end-trial-shutdown-progress-design.md`,
-`docs/superpowers/plans/2026-07-07-end-trial-shutdown-progress.md`
+`Modification log with claude/specs/2026-07-06-teensy-sd-logging-design.md`,
+`Modification log with claude/plans/2026-07-06-teensy-sd-logging.md`,
+`Modification log with claude/specs/2026-07-07-end-trial-shutdown-progress-design.md`,
+`Modification log with claude/plans/2026-07-07-end-trial-shutdown-progress.md`
 
 This document is the high-level "what / why / how to modify" summary. It covers two intertwined
 pieces of work: (A) the onboard SD data logger, and (B) the end-trial reset/shutdown fixes that

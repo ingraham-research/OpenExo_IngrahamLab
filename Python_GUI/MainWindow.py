@@ -139,6 +139,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.qt_dev.error.connect(self._on_dev_error)
         self.qt_dev.connected.connect(self._on_dev_connected)
         self.qt_dev.disconnected.connect(self._on_dev_disconnected)
+        self.qt_dev.resetReasonReceived.connect(self._on_reset_reason)
 
         # Settings page wiring
         self.settings_page.applyRequested.connect(self._on_apply_settings)
@@ -1110,6 +1111,56 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.settings_page.set_controller_values(self._controller_values)
         except Exception as e:
             self.logger.error(f"Failed to sync settings page after connect: {e}")
+            self.logger.debug(traceback.format_exc())
+
+    # Bits are nRF52840 POWER->RESETREAS; the firmware sends the names, this maps them to what
+    # each one means for the mid-trial freeze investigation. See ExoCode/src/SystemReset.h.
+    _RESET_REASON_MEANING = {
+        "PORBOR":   "power-on or BROWNOUT. No crash was recorded. If nobody power-cycled it,\n"
+                    "             this is a power event - or a hang that needed a manual cycle.",
+        "LOCKUP":   "CPU LOCKUP - a hard fault escalated. This is a firmware crash.",
+        "SREQ":     "software reset (NVIC_SystemReset). Expected right after an End Trial 'Z';\n"
+                    "             unexpected otherwise - could be an Mbed fault handler reboot.",
+        "DOG":      "watchdog timeout - but this firmware configures no watchdog. Investigate.",
+        "RESETPIN": "reset pin - the button was pressed, or the board was re-flashed.",
+        "VBUS":     "USB VBUS detected - board woke on USB power being applied.",
+    }
+
+    @QtCore.Slot(str)
+    def _on_reset_reason(self, reason: str):
+        """Print why the Nano last reset, at connect time, before the user touches anything.
+
+        This is the discriminator for the mid-trial freeze: the GUI's "unexpectedly disconnected"
+        is a BLE supervision timeout ~9.6 s after the Nano stops transmitting, and this says
+        whether the Nano crashed, was reset, or lost power underneath it.
+        """
+        try:
+            self.logger.warning("Nano last reset reason: %s", reason)
+
+            if not reason.startswith("RST:"):
+                # ErrorChar holds a runtime error report ("<code>:<joint>") instead - a device
+                # error landed after boot and overwrote the parked value.
+                body = (f" Raw value: {reason}\n"
+                        " Not a reset code - a device error overwrote it after boot.")
+            elif reason == "RST:UNAVAILABLE":
+                body = " RESETREAS is not reachable on this core build."
+            else:
+                parts = reason.split(":")
+                code = parts[1] if len(parts) > 1 else "?"
+                names = parts[2] if len(parts) > 2 else ""
+                lines = [f" RESETREAS = {code}  ({names})"]
+                for name in [n for n in names.split(",") if n]:
+                    meaning = self._RESET_REASON_MEANING.get(name)
+                    if meaning:
+                        lines.append(f"   {name}: {meaning}")
+                body = "\n".join(lines)
+
+            print("\n" + "=" * 68 + "\n"
+                  " NANO LAST RESET REASON\n"
+                  + body + "\n"
+                  + "=" * 68 + "\n")
+        except Exception as e:
+            self.logger.error(f"Failed to report reset reason: {e}")
             self.logger.debug(traceback.format_exc())
 
     def _show_disconnect_warning(self):

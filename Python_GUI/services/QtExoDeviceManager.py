@@ -40,6 +40,7 @@ class QtExoDeviceManager(QtCore.QObject):
     log = QtCore.Signal(str)
     dataReceived = QtCore.Signal(bytes)     # raw bytes from UART RX notify
     deviceErrorReceived = QtCore.Signal(str)  # error messages from ErrorChar notify
+    resetReasonReceived = QtCore.Signal(str)  # "RST:0x…:NAMES" read from ErrorChar at connect
     scanResults = QtCore.Signal(list)       # list[(name, address)]
     scanProgress = QtCore.Signal(int)       # scan progress percentage (0-100)
     connectScanProgress = QtCore.Signal(int) # scanning phase during connection (0-100)
@@ -350,6 +351,21 @@ class QtExoDeviceManager(QtCore.QObject):
                     # Touch services to populate cache
                     self.connectionProgress.emit(65)
                     _ = client.services
+
+                    # Why the Nano last reset, parked in ErrorChar at boot (see SystemReset.h).
+                    # Read HERE, before start_notify: the link is idle in this window, so the round
+                    # trip cannot contend with the handshake payload burst that follows (that burst
+                    # already drops controller rows on ~20% of connections - do not add to it).
+                    # Never fatal: a device on older firmware just has nothing useful to return.
+                    try:
+                        raw = await asyncio.wait_for(
+                            client.read_gatt_char(ERROR_CHAR_UUID), timeout=3.0)
+                        reason = bytes(raw).decode("utf-8", errors="ignore").strip("\x00").strip()
+                        self.logger.info("Reset reason characteristic read: %r", reason)
+                        if reason:
+                            self.resetReasonReceived.emit(reason)
+                    except Exception as ex:
+                        self.logger.warning("Could not read reset reason: %s", ex)
 
                     def _on_rx(sender, data: bytearray):
                         try:
