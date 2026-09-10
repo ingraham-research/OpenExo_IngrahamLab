@@ -179,6 +179,11 @@ inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out);
 //Watchdog boot-loop guard. Shares GPREGRET with the crash trap below, distinguished by magic:
 //0xC0 = "a trapped mbed fault happened", 0xD0 = "consecutive watchdog reboots". Both are cleared by
 //exo_crash_mark_healthy() once the GUI actually subscribes, which is the definition of "recovered".
+//0xE0 = "the BLE link went dead while we still thought we were connected, so we reset ourselves".
+//This is the ONLY marker that positively confirms the link-stall diagnosis: it is written by our own
+//code on a deliberate warm reset, so seeing it in the banner means the detector fired, not a guess.
+#define EXO_STALL_MAGIC           0xE0u
+
 #define EXO_WDT_MAGIC             0xD0u
 #define EXO_WDT_MAX_AUTO_RESETS   3u
 
@@ -282,6 +287,52 @@ inline uint8_t exo_wdt_boot_count()
 #endif
 }
 
+//How long the GUI may be silent before we call the link dead. The GUI pings every 2 s, so this is
+//four missed pings. Deliberately under the ~9.6 s host-side supervision timeout: when this works we
+//are already rebooting before the host even declares the link gone.
+#define EXO_BLE_STALL_MS          8000ul
+
+/**
+ * @brief Record "the BLE link stalled" and warm-reset. Called from ExoBLE::handle_updates().
+ *
+ * WHY A WARM RESET: NVIC_SystemReset keeps GPREGRET, so the marker written here survives into the
+ * next boot and is reported in the banner. That is the whole point - it turns "we think the link
+ * stalls" into a message from the device saying it did.
+ */
+inline void exo_ble_stall_reset()
+{
+#if defined(EXO_HAVE_WDT)
+    const uint8_t marker = (uint8_t)NRF_POWER->GPREGRET;
+    const uint8_t count = ((marker & EXO_CRASH_MAGIC_MASK) == EXO_STALL_MAGIC)
+                          ? (uint8_t)(marker & EXO_CRASH_COUNT_MASK) : 0u;
+    NRF_POWER->GPREGRET = (uint32_t)(EXO_STALL_MAGIC | ((count + 1u) & EXO_CRASH_COUNT_MASK));
+#endif
+    exo_system_reset();
+}
+
+/**
+ * @brief Latched stall marker from the previous boot: count, or 0 if the last reset was not a stall.
+ */
+inline uint8_t exo_stall_record()
+{
+#if defined(EXO_HAVE_WDT)
+    static bool captured = false;
+    static uint8_t count = 0;
+    if (!captured)
+    {
+        captured = true;
+        const uint8_t marker = (uint8_t)NRF_POWER->GPREGRET;
+        if ((marker & EXO_CRASH_MAGIC_MASK) == EXO_STALL_MAGIC)
+        {
+            count = (uint8_t)(marker & EXO_CRASH_COUNT_MASK);
+        }
+    }
+    return count;
+#else
+    return 0;
+#endif
+}
+
 /**
  * @brief Configure and start the watchdog. Call at the END of setup(). Cannot be undone.
  */
@@ -357,7 +408,8 @@ inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out)
             latched_error = 0;
             //Only clear GPREGRET when it is NOT holding the watchdog reboot count - zeroing that
             //here would silently disarm the boot-loop guard, since this runs on every boot.
-            if ((latched_marker_raw & EXO_CRASH_MAGIC_MASK) != EXO_WDT_MAGIC)
+            const uint8_t other_magic = (uint8_t)(latched_marker_raw & EXO_CRASH_MAGIC_MASK);
+            if ((other_magic != EXO_WDT_MAGIC) && (other_magic != EXO_STALL_MAGIC))
             {
                 NRF_POWER->GPREGRET = 0;
             }
@@ -478,6 +530,19 @@ inline String exo_reset_reason_string()
         snprintf(crash, sizeof(crash), ",CRASH_0x%02X_n%u",
                  (unsigned)crash_error, (unsigned)(crash_marker & EXO_CRASH_COUNT_MASK));
         return String(head) + names + String(crash);
+    }
+
+    //Our own link-stall detector fired on the previous boot. This is the positive confirmation that
+    //the BLE link died while the Nano itself was still running - checked before DOG/plain SREQ so it
+    //is never mistaken for an End-Trial reboot, which is the other thing that produces SREQ.
+    {
+        const uint8_t stall_n = exo_stall_record();
+        if (stall_n != 0)
+        {
+            char stall[32];
+            snprintf(stall, sizeof(stall), ",BLESTALL_n%u", (unsigned)stall_n);
+            return String(head) + names + String(stall);
+        }
     }
 
     //A watchdog reset means the previous boot HUNG rather than faulted, so GPREGRET2 holds a loop()

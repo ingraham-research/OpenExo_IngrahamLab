@@ -767,6 +767,33 @@ class QtExoDeviceManager(QtCore.QObject):
         self._submit(_do())
 
     @QtCore.Slot()
+    def pingDevice(self):
+        """Send the liveness ping. Fire-and-forget, deliberately quiet.
+
+        The firmware treats 'p' as a no-op whose only job is to prove the link still carries data
+        end to end. If the Nano stops hearing these for EXO_BLE_STALL_MS it records a marker and
+        warm-reboots itself, which is what lets it recover from a stalled link instead of sitting
+        there believing it is still connected.
+
+        Logs nothing on the happy path: this fires every 2 s for the whole session. Failures are
+        swallowed too - a failed write IS the condition the firmware is watching for, and the
+        reconnect machinery already reports real disconnects.
+        """
+        if not self._is_connected or self._client is None or self._loop is None:
+            return
+
+        async def _do():
+            try:
+                await self._client.write_gatt_char(UART_TX_UUID, b"p", response=False)
+            except Exception:
+                pass
+
+        try:
+            self._submit(_do())
+        except Exception:
+            pass
+
+    @QtCore.Slot()
     def calibrateTorque(self):
         self.logger.info("calibrateTorque() called")
         

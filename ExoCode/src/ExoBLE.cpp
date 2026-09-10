@@ -14,6 +14,18 @@
 
 ExoBLE* ExoBLE::_instance = nullptr;
 
+//BLE link liveness. In the observed failure the Nano keeps running - loop() alive, RT data still
+//arriving over I2C, LED still blinking - but nothing reaches the host, and because the disconnect
+//event is never processed BLE.connected() stays non-zero, so ExoBLE never re-advertises and the GUI
+//cannot find the device again. Nothing on our side looks wrong: sendAclPkt() still returns 0 and
+//writeValue() still succeeds. The only trustworthy signal is end-to-end: has the GUI reached us
+//lately. Hence the ping. See EXO_BLE_STALL_MS / exo_ble_stall_reset() in SystemReset.h.
+static uint32_t s_last_rx_ms = 0;
+
+//Only enforce the timeout once a ping has actually been seen, so connecting with a GUI (or any other
+//client) that does not ping can never reboot the board. Fail safe, not fail fast.
+static bool s_ping_seen = false;
+
 namespace
 {
     // 19 bytes is deliberate: the default ATT MTU is 23, leaving 20 usable. Do NOT raise this
@@ -333,6 +345,16 @@ bool ExoBLE::handle_updates()
         BLE.poll();
         int32_t current_status = BLE.connected();
 
+        //Link-stall detector. Runs BEFORE the unchanged-status early return below, because an
+        //unchanged status is exactly the failure: the stack still believes it is connected.
+        if ((current_status > 0) && s_ping_seen &&
+            ((uint32_t)(millis() - s_last_rx_ms) > EXO_BLE_STALL_MS))
+        {
+            //Records EXO_STALL_MAGIC and warm-resets, so the next boot's banner says BLESTALL_n.
+            //Warm keeps GPREGRET, which is what makes this self-confirming rather than a guess.
+            exo_ble_stall_reset();
+        }
+
         if (_connected == current_status)
         {
             #if EXOBLE_DEBUG
@@ -362,6 +384,9 @@ bool ExoBLE::handle_updates()
             #endif
 
             // Mark connected; wait for TX subscribe before sending handshake.
+            //Restart the liveness clock here, or a long gap spent advertising would trip the
+            //detector the instant somebody connects.
+            s_last_rx_ms = millis();
             _connected = current_status;
             _tx_subscribed = false;
             _handshake_sent_this_connection = false;
@@ -483,6 +508,14 @@ void ble_rx::on_rx_recieved(BLEDevice central, BLECharacteristic characteristic)
         len = sizeof(data);
     }
     characteristic.readValue(data, len);
+
+    //Stamp before parsing: any byte arriving at all proves the link is alive end to end, whether or
+    //not it turns out to be a command we recognise.
+    s_last_rx_ms = millis();
+    if ((len > 0) && (data[0] == ble_names::ping))
+    {
+        s_ping_seen = true;
+    }
 
         #if EXOBLE_DEBUG
             logger::print("On Rx Recieved: ");

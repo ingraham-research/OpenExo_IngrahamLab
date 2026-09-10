@@ -88,6 +88,17 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.logger.error(f"Failed to bind device manager to scan page: {e}")
             self.logger.debug(traceback.format_exc())
+        # BLE link-liveness ping. The firmware needs to hear from us periodically: in the observed
+        # failure the Nano keeps running normally but nothing reaches it, and because it never
+        # processes the disconnect it sits believing it is still connected and never re-advertises,
+        # so the GUI cannot find it again. These pings are what let it notice and reboot itself.
+        # 2 s against the firmware's 8 s EXO_BLE_STALL_MS - four misses before it acts.
+        # Runs unconditionally; pingDevice() is a no-op while disconnected.
+        self._ble_ping_timer = QtCore.QTimer(self)
+        self._ble_ping_timer.setInterval(2000)
+        self._ble_ping_timer.timeout.connect(self.qt_dev.pingDevice)
+        self._ble_ping_timer.start()
+
         self.rt_bridge = RtBridge(self)
         # Wire bytes to parser and route RT data to plots
         self.qt_dev.dataReceived.connect(self.rt_bridge.feed_bytes)
