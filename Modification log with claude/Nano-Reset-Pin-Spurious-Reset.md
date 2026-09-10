@@ -3,7 +3,113 @@
 **Date:** 2026-09-09
 **Scope:** The mid-trial freeze / "unexpectedly disconnected". First bench data from the `RESETREAS`
 instrument, flashed for the first time today.
-**Status:** **Root cause NARROWED, not proven.** No code change made for this yet. The evidence below
+> ## !! CORRECTION 2026-09-09 (evening) - READ THIS FIRST !!
+>
+> **The central conclusion below is CONFOUNDED and should not be acted on.** The user pointed out that
+> the gaps between an End-Trial `'Z'` and the next reading are time the exo spent **powered OFF**, not
+> idle. They confirmed there was no 3.3-hour session.
+>
+> That matters because of what we did *not* see: a genuine nRF52840 power-on clears `RESETREAS` to zero,
+> which this firmware reports as `PORBOR`. **`PORBOR` appears zero times in 13 readings**, while the user
+> was definitely power-cycling. The only consistent explanation is that **this board asserts nRESET at
+> power-up** (a reset supervisor or RC on the reset net), so `RESETPIN` is simply what a normal power-on
+> looks like here - and carries no diagnostic information at all.
+>
+> **What this retracts:**
+> - Section 5b's "the resets happen while the exo is idle" - **withdrawn entirely.** Those gaps are
+>   power-off time.
+> - Section 2's "never `LOCKUP`, therefore not a firmware crash." **Withdrawn.** The firmware latches and
+>   clears `RESETREAS` at each boot, so a power cycle after a freeze overwrites the freeze's real reason
+>   before it is ever read. A `LOCKUP` would have been erased. **The Mbed-hardfault and ArduinoBLE
+>   `while (_pendingPkt >= _maxPkt)` spin hypotheses are back in play.**
+> - The leakage/EMI theory is **unsupported** by this data. It may still be true; nothing here shows it.
+>
+> **What still stands:**
+> - The two `SREQ` readings, taken 15 s and 20 s after an End-Trial `'Z'`. Those prove the readout works
+>   and that End Trial performs a clean `NVIC_SystemReset` as designed.
+> - Everything in `Mid-Trial-Freeze-Nano-Radio-Silence.md` about the 9.6 s supervision timeout and the
+>   Teensy surviving. That was measured independently.
+>
+> ### CALIBRATED 2026-09-09 (evening) - the confound is CONFIRMED, and the readout is usable again
+>
+> The user ran the calibration. Result:
+>
+> | Action | Reads |
+> |---|---|
+> | **Power the exo on** | **`RESETPIN`** |
+> | Connect, disconnect, reconnect | `SREQ` |
+>
+> So `RESETPIN` really is this board's normal power-on signature - it asserts nRESET at power-up - and
+> the retractions above stand.
+>
+> **But the instrument is not useless. It just needs one operating rule:**
+>
+> > **After a freeze, do not power-cycle, and make the FIRST reconnect the one you read.**
+>
+> `RESETREAS` is latched and write-1-cleared at every boot, and the resulting string sits in `ErrorChar`
+> until overwritten. So the first connection after a freeze carries that freeze's true cause. A power
+> cycle replaces it with `RESETPIN`; a further reset replaces it again. Under that rule a reading of
+> `LOCKUP` would be real evidence of a firmware crash, and a `RESETPIN` with no power cycle in between
+> would be real evidence of a spurious pin assertion.
+>
+> ### RESOLVED, and it points at a HANG rather than a reset (2026-09-09, late)
+>
+> The loose end below is closed: **this GUI has no Disconnect control at all - End Trial is the only way
+> to drop the link.** So the "connect / disconnect / reconnect -> `SREQ`" test was really connect ->
+> **End Trial** -> reconnect, which sends `ble_names::reset_system`. Code and observation agree exactly,
+> with nothing unexplained.
+>
+> That closure has a much larger consequence. **The Nano has exactly two reset paths:**
+>
+> 1. power-on -> `RESETPIN`
+> 2. End Trial (`reset_system` -> `ComsMCU::_schedule_system_reset()`) -> `SREQ`
+>
+> There is **no watchdog** anywhere in the firmware (verified by grep), and a plain BLE link drop does not
+> reset the Nano. **So during a freeze, nothing in the firmware is capable of resetting it.** A hardware
+> pin assertion or brownout could - but either would reboot the Nano and leave it advertising and
+> connectable, and the user reports that after a freeze they generally **cannot** reconnect and are forced
+> to power-cycle.
+>
+> **Therefore the Nano is most likely not resetting during a freeze at all - it is HANGING.** A hung MCU
+> never touches `RESETREAS`, which is exactly why every reading ever taken has been the recovery power
+> cycle. This also fits the earlier log mining: absent from scans for 7.4-413 s, and 14 entries where the
+> PC connected but the Nano failed to serve its GATT table. Neither is the profile of a clean reboot.
+>
+> This argument rests on verified code structure plus the operational fact, **not** on the confounded
+> readings, so it should be weighted above everything claimed earlier in this document. It means the
+> spurious-pin-reset and leakage/EMI theories are very likely **dead as an explanation for the freezes**,
+> and the Mbed-hardfault / ArduinoBLE-spin hypotheses are the live ones again.
+>
+> **What follows from it:**
+> - `RESETREAS` cannot answer this question. Neither can `GPREGRET` (cleared by power-on) or `ErrorChar`
+>   (RAM). **Nothing on the Nano survives the forced power cycle.**
+> - The instrument must live on the **Teensy** (proven to survive the event) and write to the **SD card**
+>   (survives the power cycle). The Teensy currently has **no Nano-liveness tracking at all** - verified.
+> - A **watchdog on the Nano** would both mitigate and identify: it turns a hang into an automatic
+>   recovery (no power cycle) and makes `RESETREAS` read `DOG`, which the GUI already decodes. The care
+>   needed is where the kick lives - fed from a Cordio RTOS thread that survives the hang, it would never
+>   fire.
+>
+> **Original loose end, now answered:** the code path that makes the Nano call `NVIC_SystemReset` is
+> `ComsMCU::_schedule_system_reset()`, reached only from `ble_names::reset_system` - the GUI's End-Trial
+> shutdown command (`ComsMCU.cpp:364`). A *plain* BLE link drop should not reset the Nano at all. So the
+> `SREQ` seen after a bare connect/disconnect/reconnect is not fully explained: either the GUI's
+> disconnect flow also sends `reset_system`, or an End Trial was in the sequence. Worth confirming, since
+> it decides whether a disconnect quietly overwrites the evidence.
+>
+> **Two things to do before trusting any of this again:**
+> 1. **Calibrate the instrument.** Deliberately power-cycle, connect, read. `RESETPIN` confirms power-on
+>    is indistinguishable from a pin reset on this board. `PORBOR` would mean the readings *are* clean and
+>    only section 5b needs withdrawing.
+> 2. **Fix the confound in firmware.** `NRF_POWER->GPREGRET` is retained across a warm reset but cleared
+>    by a true power-on/brownout. Writing a magic value there at boot and checking it on the next boot
+>    separates "the user turned it on" from "it reset while powered" - which is the distinction this whole
+>    investigation actually needs, and which `RESETREAS` alone cannot give us on this board.
+> 3. **The one clean reading available today:** after a freeze, do NOT power-cycle. Let it re-advertise on
+>    its own, connect, and read. That value is uncontaminated.
+
+**Status:** **CONFOUNDED - see the correction above. Root cause NOT established.** (Original status:
+Root cause NARROWED, not proven.) No code change made for this yet. The evidence below
 is from logs, is reproducible, and rules out the three hypotheses the investigation was previously
 built on. The remaining mechanism is a hardware question that needs a schematic check.
 
