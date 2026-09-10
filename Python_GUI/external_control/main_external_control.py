@@ -50,17 +50,17 @@ def _load_module_from_file(module_name, file_path):
 # Main external control code
 def main():
 
+    #Where the hip exo's code base lives. We import the optimization backend and the UDP receiver from there rather than duplicating them. 
+    #NOTE:YOU NEED TO EDIT THIS TO YOUR OWN SETTING
+    hippo_control_code_path = r"E:\Research\Exoskeletons\Max Shepherd's exo\Exo control codes"
+
+    #Options
     udp_in_use = 0  # By default, don't listen on UDP unless user decided to
     game_theory_mode = 0  # Default to no backend; only toggles if the user picks the game theory mode
 
-    # For debugging
+    #For debugging
     use_loop_time = 1  #If 1, all log timestamps within one loop iteration come from the loop start time, so everything logged in a cycle shares one timestamp
-
-    #Options:
-    #Where the hip exo's code base lives. We import the optimization backend and the UDP receiver from
-    #there rather than duplicating them. EDIT THIS if the folder moves
-    hippo_control_code_path = r"E:\Research\Exoskeletons\Max Shepherd's exo\Exo control codes"
-
+    
     #Data logging
     log_m_action_enabled = 1      #Whether we log every machine action (torque percentage and peak timing)
     log_param_write_enabled = 1   #Whether we log every parameter write and how the exo answered it

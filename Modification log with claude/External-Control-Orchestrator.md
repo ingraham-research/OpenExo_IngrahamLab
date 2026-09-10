@@ -2,8 +2,18 @@
 
 **Date:** 2026-09-08
 **Scope:** New host-side package `Python_GUI/external_control/`. **No firmware changes, no GUI changes.**
-**Status:** Written and host-tested against a stubbed link (62 checks). **Never run against a real GUI
-or a real exo.**
+**Status:** **BENCH-PROVEN ON THE REAL EXO 2026-09-09**, except game-theory mode. The `OP`, `plantar`,
+`dorsi` and `udp` torque-profile modes were all run end to end against a live GUI and a live exo:
+parameter writes accepted and acknowledged on the first attempt for both ankles, both legs actuating.
+**`game_theory_mode` is still untested against hardware.** (Originally written and host-tested against
+a stubbed link, 62 checks.)
+
+**Gotcha found on the first real run of `udp` mode:** the timing senders in the hip exo's code base
+(`GUI/pref_slider.py:45`, `GUI/A_B.py:26`) hard-code `UDP_IP = "10.19.0.220"` — the Raspberry Pi's
+address — so nothing ever reached this Windows host. Receiver, port, binding, firewall and struct
+format were all fine; only the sender's target was wrong. **Expect the same for the self-paced
+treadmill on port 5004 when game-theory mode is first tested.** Prefer `127.0.0.1` over the machine's
+DHCP address wherever the sender runs on the same PC.
 **Design spec:** `Modification log with claude/specs/2026-09-08-experiment-orchestrator-design.md`
 **Related:** `Remote-Control-UDP.md`, `SplineAlt-Shape-Parameterised-Controller.md`,
 `2026-07-14-control-loop-and-transparency-backlog.md`
