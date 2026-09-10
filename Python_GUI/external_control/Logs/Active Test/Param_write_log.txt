@@ -1,51 +1,9 @@
 Python time,Target,Value,Result,Attempts
-1788998890.0445683, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998890.195254, Ankle(R) TorqScale, 0.0, accepted, 1
-1788998890.3583865, Ankle(L) PlantarNm, 13.0, accepted, 1
-1788998890.5066907, Ankle(R) PlantarNm, 13.0, accepted, 1
-1788998890.6006334, Ankle(L) DorsiNm, 0.0, accepted, 1
-1788998890.6820307, Ankle(R) DorsiNm, 0.0, accepted, 1
-1788998905.4332218, Ankle(L) plantar peak time, 75.0, accepted, 1
-1788998905.5461965, Ankle(R) plantar peak time, 75.0, accepted, 1
-1788998905.6856313, Ankle(L) TorqScale, 50.0, accepted, 1
-1788998905.7826858, Ankle(R) TorqScale, 50.0, accepted, 1
-1788998910.060295, Ankle(L) plantar peak time, 70.0, accepted, 1
-1788998910.1745892, Ankle(R) plantar peak time, 70.0, accepted, 1
-1788998915.2586937, Ankle(L) plantar peak time, 55.0, accepted, 1
-1788998915.3607457, Ankle(R) plantar peak time, 55.0, accepted, 1
-1788998918.1932929, Ankle(L) plantar peak time, 49.0, accepted, 1
-1788998918.2970204, Ankle(R) plantar peak time, 49.0, accepted, 1
-1788998929.5509603, Ankle(L) plantar peak time, 79.0, accepted, 1
-1788998929.6974204, Ankle(R) plantar peak time, 79.0, accepted, 1
-1788998940.3525178, Ankle(L) plantar peak time, 65.0, accepted, 1
-1788998940.627836, Ankle(R) plantar peak time, 65.0, accepted, 1
-1788998946.1630945, Ankle(L) plantar peak time, 45.0, accepted, 1
-1788998946.3127785, Ankle(R) plantar peak time, 45.0, accepted, 1
-1788998952.5600905, Ankle(L) plantar peak time, 53.0, accepted, 1
-1788998952.6697736, Ankle(R) plantar peak time, 53.0, accepted, 1
-1788998968.8905792, Ankle(L) plantar peak time, 80.0, accepted, 1
-1788998969.0099788, Ankle(R) plantar peak time, 80.0, accepted, 1
-1788998973.1032693, Ankle(L) plantar peak time, 45.0, accepted, 1
-1788998973.245648, Ankle(R) plantar peak time, 45.0, accepted, 1
-1788998983.1152575, Ankle(L) plantar peak time, 80.0, accepted, 1
-1788998983.2171566, Ankle(R) plantar peak time, 80.0, accepted, 1
-1788998992.8028395, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998992.9299266, Ankle(R) TorqScale, 0.0, accepted, 1
-1788998993.043741, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998993.145953, Ankle(R) TorqScale, 0.0, accepted, 1
-1788998993.2390788, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998993.331209, Ankle(R) TorqScale, 0.0, accepted, 1
-1788998993.449858, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998993.5401635, Ankle(R) TorqScale, 0.0, accepted, 1
-1788998993.629149, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998993.7208576, Ankle(R) TorqScale, 0.0, accepted, 1
-1788998993.809257, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998993.9008706, Ankle(R) TorqScale, 0.0, accepted, 1
-1788998994.033776, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998994.1212971, Ankle(R) TorqScale, 0.0, accepted, 1
-1788998994.2148337, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998994.3069432, Ankle(R) TorqScale, 0.0, accepted, 1
-1788998994.398223, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998994.4862242, Ankle(R) TorqScale, 0.0, accepted, 1
-1788998994.5774708, Ankle(L) TorqScale, 0.0, accepted, 1
-1788998994.6649075, Ankle(R) TorqScale, 0.0, accepted, 1
+1789080090.5749457, Ankle(L) TorqScale, 0.0, accepted, 1
+1789080090.7181332, Ankle(R) TorqScale, 0.0, accepted, 1
+1789080090.8426638, Ankle(L) PlantarNm, 11.0, accepted, 1
+1789080091.155434, Ankle(R) PlantarNm, 11.0, accepted, 1
+1789080091.3784192, Ankle(L) DorsiNm, 5.866666666666666, accepted, 1
+1789080091.5127378, Ankle(R) DorsiNm, 5.866666666666666, accepted, 1
+1789080092.6034796, Ankle(L) TorqScale, 50.0, accepted, 1
+1789080092.7786534, Ankle(R) TorqScale, 50.0, accepted, 1

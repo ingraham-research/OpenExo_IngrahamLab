@@ -1,23 +1,2 @@
 Python time,Elapsed time,Source,Value requested,Value applied
-67426.1858263,7.56,plantar timing,75,75
-67426.1858263,7.56,torque percentage,50.0,50.0
-67430.8354,12.21,plantar timing,70,70
-67436.0362033,17.41,plantar timing,55,55
-67438.9563622,20.33,plantar timing,49,49
-67450.3058298,31.68,plantar timing,79,79
-67461.0493381,42.42,plantar timing,65,65
-67466.9434939,48.32,plantar timing,45,45
-67473.3296983,54.70,plantar timing,53,53
-67489.6673551,71.04,plantar timing,80,80
-67493.8623597,75.24,plantar timing,45,45
-67503.8910584,85.27,plantar timing,80,80
-67513.6056598,94.98,torque percentage,0.0,0.0
-67513.804834,95.18,torque percentage,0.0,0.0
-67514.0208932,95.40,torque percentage,0.0,0.0
-67514.2079961,95.58,torque percentage,0.0,0.0
-67514.415057,95.79,torque percentage,0.0,0.0
-67514.5957475,95.97,torque percentage,0.0,0.0
-67514.7757942,96.15,torque percentage,0.0,0.0
-67514.9961847,96.37,torque percentage,0.0,0.0
-67515.1818578,96.56,torque percentage,0.0,0.0
-67515.3611343,96.74,torque percentage,0.0,0.0
+148618.4093614,0.00,torque percentage,50.0,50.0

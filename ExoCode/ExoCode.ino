@@ -736,6 +736,7 @@ void loop()
 #include "src/uart_commands.h"
 #include "src/UART_msg_t.h"
 #include "src/ComsLed.h"
+#include "src/SystemReset.h"
 #include "src/RealTimeI2C.h"
 #include "src/GetBulkChar.h"
 
@@ -831,6 +832,12 @@ void setup()
       real_time_i2c::init();
       logger::print("Setup->End Setup");
     #endif
+
+    //Arm the hardware watchdog LAST, once every blocking boot step is behind us.
+    //readSingleMessageBlocking() can burn 18 s and get_config() another 8 s with nothing feeding
+    //the dog, so arming any earlier would reset the board mid-boot, forever. See SystemReset.h.
+    //This cannot be undone: the nRF52840 WDT has no stop task.
+    exo_wdt_start();
 }
 
 void loop()
@@ -866,12 +873,30 @@ void loop()
         }
     #endif
 
-    //Performs key communication protocols
+    //Feed the watchdog once per pass, from loop() itself - NOT from a callback. ArduinoBLE runs
+    //Cordio in its own RTOS thread which survives a stalled loop(), so feeding from anything that
+    //outlives the hang would defeat the point. loop() is what we proved stops. See SystemReset.h.
+    exo_wdt_feed();
+
+    //Performs key communication protocols. Each stage stamps a breadcrumb into GPREGRET2, which
+    //survives the warm watchdog reset - so the next boot reports the last phase reached before the
+    //hang, as ",STAGE_n" on the reset-reason string.
+    exo_wdt_stage(EXO_STAGE_HANDLE_BLE);
     mcu->handle_ble();
+
+    exo_wdt_stage(EXO_STAGE_LOCAL_SAMPLE);
     mcu->local_sample();
+
+    exo_wdt_stage(EXO_STAGE_UPDATE_UART);
     mcu->update_UART();
+
+    exo_wdt_stage(EXO_STAGE_UPDATE_GUI);
     mcu->update_gui();
+
+    exo_wdt_stage(EXO_STAGE_HANDLE_ERRORS);
     mcu->handle_errors();
+
+    exo_wdt_stage(EXO_STAGE_LOOP_TOP);   //Reached the end cleanly; anything else means we died mid-phase
 
     #if MAIN_DEBUG
         static float then = millis();

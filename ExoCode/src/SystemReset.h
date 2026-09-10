@@ -110,10 +110,218 @@ inline uint32_t exo_reset_reason_code()
 #  define EXO_HAVE_CRASH_TRAP 1
 #endif
 
+//Shared by the crash trap and the watchdog boot-loop guard below - both pack a magic in the high
+//nibble of GPREGRET and a consecutive-reset count in the low nibble.
 #define EXO_CRASH_MAGIC             0xC0u   //High nibble marks "GPREGRET holds a crash record"
 #define EXO_CRASH_MAGIC_MASK        0xF0u
 #define EXO_CRASH_COUNT_MASK        0x0Fu
 #define EXO_CRASH_MAX_AUTO_RESETS   3
+
+//Forward declaration: exo_wdt_boot_count() below must latch any pending crash record BEFORE it
+//overwrites GPREGRET with the watchdog count. Defined further down; inline, same translation unit.
+inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out);
+
+/* ===========================  HARDWARE WATCHDOG  ===========================
+ * WHY THIS EXISTS: the mid-trial freeze is a HANG, not a fault. Proven
+ * 2026-09-10 - after a freeze the user pressed the Nano's RESET BUTTON instead
+ * of power-cycling (a pin reset is warm, so RESETREAS survives) and the reading
+ * came back 0x00000001, RESETPIN alone. The firmware zeroes RESETREAS every
+ * boot, so any reset during the freeze would have left its bit set: no LOCKUP
+ * (no double fault), no SREQ (so mbed_error_hook's NVIC_SystemReset never ran),
+ * no DOG, and not 0x0/PORBOR (no brownout, no power-on). Nothing reset the MCU.
+ * It stopped and stayed stopped. Independently confirmed by the onboard LED:
+ * ComsLed::life_pulse() toggles green+blue every 100 loop passes, so a live
+ * Nano's LED never shows a steady colour - it blends. At the freeze it froze on
+ * one ENDPOINT of the toggle (white one time, red the next - random phase),
+ * which means local_sample() stopped being called, which means loop() stopped.
+ *
+ * mbed_error_hook CANNOT catch this: a wedged loop raises no fault, so nothing
+ * is ever written to GPREGRET and nothing reboots. Only a hardware timer that
+ * the CPU must keep feeding can.
+ *
+ * WHY IT NEED NOT KNOW WHERE THE BUG IS: the WDT counts off the 32.768 kHz
+ * LFCLK, independently of the CPU. We feed it once per loop() pass. If anything,
+ * anywhere, stops loop() coming round, it fires - no knowledge of the fault site
+ * required. That is exactly why it works where every software timeout did not.
+ *
+ * WHY loop() AND NOT A CALLBACK: ArduinoBLE runs Cordio in its own RTOS thread,
+ * which is why a stalled loop() alone would NOT drop the BLE link. Feeding from
+ * anything that survives the hang would defeat the whole point. loop() is the
+ * thing we proved stops.
+ *
+ * WHY IT ARMS LATE: boot spends up to 18 s in readSingleMessageBlocking()
+ * (10 s kReadyTimeoutMs + 8 s kReceiveTimeoutMs) and up to 8 s in get_config(),
+ * with nothing feeding. Arming before that would reset the board mid-boot,
+ * forever. exo_wdt_start() is called at the END of setup(), once loop() is
+ * about to run.
+ *
+ * ONCE STARTED, THE nRF52840 WDT CANNOT BE STOPPED. By design - and the reason
+ * the arming point above matters.
+ *
+ * WHY 5 SECONDS: comfortably under the ~9.6 s BLE supervision timeout, so the
+ * Nano is already rebooting and re-advertising before the GUI even notices the
+ * link is gone.
+ *
+ * THE BREADCRUMB: the WDT recovers the board but says nothing about WHERE it
+ * hung. exo_wdt_stage() stamps a one-byte stage code into GPREGRET2 as loop()
+ * passes each phase. GPREGRET2 is retained across a warm reset - and a watchdog
+ * reset IS warm - so the next boot reads back the last stage reached before the
+ * hang. "It hung somewhere" becomes "it hung between stage N and stage N+1".
+ *
+ * GPREGRET2 IS SHARED with the crash trap below, which stores an mbed error byte
+ * there. They are told apart by GPREGRET: if it holds the crash magic the byte
+ * is an error code, otherwise it is a stage breadcrumb.
+ */
+#if defined(EXO_HAVE_NRF_RESETREAS)
+#  define EXO_HAVE_WDT 1
+#endif
+
+//Watchdog boot-loop guard. Shares GPREGRET with the crash trap below, distinguished by magic:
+//0xC0 = "a trapped mbed fault happened", 0xD0 = "consecutive watchdog reboots". Both are cleared by
+//exo_crash_mark_healthy() once the GUI actually subscribes, which is the definition of "recovered".
+#define EXO_WDT_MAGIC             0xD0u
+#define EXO_WDT_MAX_AUTO_RESETS   3u
+
+#define EXO_WDT_TIMEOUT_S       5u
+#define EXO_WDT_RELOAD_MAGIC    0x6E524635ul   //nRF52840 WDT reload key, fixed by the datasheet
+#define EXO_WDT_LFCLK_HZ        32768ul
+
+//loop() phase codes, stamped into GPREGRET2 by exo_wdt_stage(). Values are arbitrary but must be
+//non-zero: 0 means "no breadcrumb recorded", which is what a boot with no prior stage looks like.
+#define EXO_STAGE_LOOP_TOP      1u
+#define EXO_STAGE_HANDLE_BLE    2u
+#define EXO_STAGE_LOCAL_SAMPLE  3u
+#define EXO_STAGE_UPDATE_UART   4u
+#define EXO_STAGE_UPDATE_GUI    5u
+#define EXO_STAGE_HANDLE_ERRORS 6u
+
+/**
+ * @brief Stamp the current loop() phase into GPREGRET2. Cheap: one register write, no branch.
+ */
+inline void exo_wdt_stage(uint8_t stage)
+{
+#if defined(EXO_HAVE_WDT)
+    NRF_POWER->GPREGRET2 = (uint32_t)stage;
+#else
+    (void)stage;
+#endif
+}
+
+/**
+ * @brief Latch the PREVIOUS boot's stage breadcrumb, once, before anything clears GPREGRET2.
+ *
+ * MUST be called before exo_crash_record(), which is the only thing that clears GPREGRET2.
+ * exo_crash_record() calls this itself as its first action, so ordering is guaranteed no matter
+ * which one a caller reaches first.
+ */
+inline uint8_t exo_wdt_stage_record()
+{
+#if defined(EXO_HAVE_WDT)
+    static bool captured = false;
+    static uint8_t latched_stage = 0;
+    if (!captured)
+    {
+        captured = true;
+        latched_stage = (uint8_t)NRF_POWER->GPREGRET2;
+    }
+    return latched_stage;
+#else
+    return 0;
+#endif
+}
+
+/**
+ * @brief Feed the watchdog. Call once per loop() pass, from loop() itself.
+ */
+inline void exo_wdt_feed()
+{
+#if defined(EXO_HAVE_WDT)
+    NRF_WDT->RR[0] = EXO_WDT_RELOAD_MAGIC;
+#endif
+}
+
+/**
+ * @brief Consecutive watchdog reboots, counted and stored on each DOG boot. 0 on any other reset.
+ *
+ * WHY: without this a Nano that hangs immediately on every boot would reboot forever, and - worse -
+ * it would defeat the crash trap's own guard below, whose whole point is to let a reproducible fault
+ * leave the device wedged-but-visible instead of thrashing. A dog would just reboot the halted mbed.
+ *
+ * Uses exo_reset_reason_code() rather than reading RESETREAS directly so both share one latch. That
+ * accessor clears the hardware register on first call; calling it here (end of setup) simply latches
+ * earlier than ExoBLE::setup() would, and every later reader gets the same value.
+ */
+inline uint8_t exo_wdt_boot_count()
+{
+#if defined(EXO_HAVE_WDT)
+    static bool counted = false;
+    static uint8_t count = 0;
+    if (!counted)
+    {
+        counted = true;
+        const uint32_t reasons = exo_reset_reason_code();
+        if ((reasons != 0xFFFFFFFFu) && (reasons & 0x00000002ul))   //DOG
+        {
+            //A fault -> mbed halt -> dog reboot leaves a CRASH record sitting in GPREGRET that has
+            //not been read yet (exo_crash_record runs later, from ExoBLE::setup()). Latch it now,
+            //before the write below replaces it, or that reboot silently eats the crash code.
+            //The C-count is lost in that corner case, which is fine: the dog guard below takes over
+            //bounding the loop, and exo_crash_mark_healthy() clears both on a successful connect.
+            exo_crash_record(0, 0);
+
+            const uint8_t marker = (uint8_t)NRF_POWER->GPREGRET;
+            const uint8_t prev = ((marker & EXO_CRASH_MAGIC_MASK) == EXO_WDT_MAGIC)
+                                 ? (uint8_t)(marker & EXO_CRASH_COUNT_MASK) : 0u;
+            count = (uint8_t)((prev + 1u) & EXO_CRASH_COUNT_MASK);
+            NRF_POWER->GPREGRET = (uint32_t)(EXO_WDT_MAGIC | count);
+        }
+    }
+    return count;
+#else
+    return 0;
+#endif
+}
+
+/**
+ * @brief Configure and start the watchdog. Call at the END of setup(). Cannot be undone.
+ */
+inline void exo_wdt_start(uint32_t timeout_s = EXO_WDT_TIMEOUT_S)
+{
+#if defined(EXO_HAVE_WDT)
+    //Latch the PREVIOUS boot's breadcrumb here, at the end of setup(), because loop() starts
+    //overwriting GPREGRET2 with THIS boot's stages on its very first pass. Doing it here rather than
+    //relying on exo_crash_record() being reached first removes the ordering dependency entirely.
+    (void)exo_wdt_stage_record();
+
+    if (NRF_WDT->RUNSTATUS & WDT_RUNSTATUS_RUNSTATUS_Msk)
+    {
+        return;   //Already running; starting twice is harmless but pointless
+    }
+
+    //Boot-loop guard: after this many consecutive watchdog reboots, stop arming. The device then
+    //stays up, advertising and connectable, so the STAGE breadcrumb can actually be READ instead of
+    //being rebooted away every 5 s. Deliberately leaves a hung exo hung - that is the safer failure.
+    if (exo_wdt_boot_count() >= EXO_WDT_MAX_AUTO_RESETS)
+    {
+        return;
+    }
+
+    //SLEEP=1: keep counting while the CPU sleeps. mbed idles the core between events, so without
+    //this a hang that parks in sleep would never trip the dog - which is most of them.
+    //HALT=0: pause while halted by a debugger, so single-stepping does not reset the board.
+    NRF_WDT->CONFIG = (WDT_CONFIG_SLEEP_Run << WDT_CONFIG_SLEEP_Pos) |
+                      (WDT_CONFIG_HALT_Pause << WDT_CONFIG_HALT_Pos);
+
+    NRF_WDT->CRV  = (timeout_s * EXO_WDT_LFCLK_HZ) - 1ul;
+    NRF_WDT->RREN = (WDT_RREN_RR0_Enabled << WDT_RREN_RR0_Pos);   //Only reload register 0 is armed
+
+    exo_wdt_feed();                 //Start from a full counter
+    NRF_WDT->TASKS_START = 1ul;
+#else
+    (void)timeout_s;
+#endif
+}
+
 
 /**
  * @brief Latched GPREGRET pair from the previous boot: {marker byte, error byte}. Captured once.
@@ -124,6 +332,10 @@ inline uint32_t exo_reset_reason_code()
 inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out)
 {
 #if defined(EXO_HAVE_CRASH_TRAP)
+    //FIRST: this function is the only thing that clears GPREGRET2, and on a watchdog reset that
+    //register holds the loop() stage breadcrumb. Latch it before we touch anything.
+    (void)exo_wdt_stage_record();
+
     static bool captured = false;
     static uint8_t latched_marker = 0;
     static uint8_t latched_error = 0;
@@ -132,6 +344,7 @@ inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out)
         captured = true;
         latched_marker = (uint8_t)NRF_POWER->GPREGRET;
         latched_error  = (uint8_t)NRF_POWER->GPREGRET2;
+        const uint8_t latched_marker_raw = latched_marker;
         if ((latched_marker & EXO_CRASH_MAGIC_MASK) == EXO_CRASH_MAGIC)
         {
             //Keep the count, drop the error byte - the count is what the boot-loop guard needs
@@ -142,7 +355,12 @@ inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out)
         {
             latched_marker = 0;   //Not ours (a true power-on clears these), so report nothing
             latched_error = 0;
-            NRF_POWER->GPREGRET  = 0;
+            //Only clear GPREGRET when it is NOT holding the watchdog reboot count - zeroing that
+            //here would silently disarm the boot-loop guard, since this runs on every boot.
+            if ((latched_marker_raw & EXO_CRASH_MAGIC_MASK) != EXO_WDT_MAGIC)
+            {
+                NRF_POWER->GPREGRET = 0;
+            }
             NRF_POWER->GPREGRET2 = 0;
         }
     }
@@ -260,6 +478,17 @@ inline String exo_reset_reason_string()
         snprintf(crash, sizeof(crash), ",CRASH_0x%02X_n%u",
                  (unsigned)crash_error, (unsigned)(crash_marker & EXO_CRASH_COUNT_MASK));
         return String(head) + names + String(crash);
+    }
+
+    //A watchdog reset means the previous boot HUNG rather than faulted, so GPREGRET2 holds a loop()
+    //stage breadcrumb instead of an mbed error byte (the crash magic above is what tells them
+    //apart). Appended into names the same way CRASH_ is, so the GUI prints it with no change.
+    if (reasons & 0x00000002ul)
+    {
+        char stage[24];
+        snprintf(stage, sizeof(stage), ",STAGE_%u_dog%u",
+                 (unsigned)exo_wdt_stage_record(), (unsigned)exo_wdt_boot_count());
+        return String(head) + names + String(stage);
     }
 
     return String(head) + names;
