@@ -263,6 +263,12 @@ bool ExoBLE::setup()
 
 
     BLE.setConnectionInterval(6, 6);
+
+    //No-op unless EXO_CRASH_TRAP_SELFTEST is 1 in SystemReset.h. Placed last so a self-test fault
+    //happens after the reset-reason string is already parked in ErrorChar, and before advertising -
+    //there is no point advertising on a boot we are about to deliberately end.
+    exo_crash_trap_selftest();
+
     advertising_onoff(true);
 
     return true;
@@ -434,6 +440,11 @@ void ExoBLE::send_error(int error_code, int joint_id)
 
 void ExoBLE::_on_tx_subscribed(BLEDevice /*central*/, BLECharacteristic characteristic)
 {
+    //A subscribed GUI is the first moment we KNOW the link is genuinely working, so this is where the
+    //consecutive-crash count gets cleared. Clearing it any earlier (at boot, say) would defeat the
+    //boot-loop guard in mbed_error_hook, which relies on the count surviving a crash-reboot cycle.
+    exo_crash_mark_healthy();
+
     if (_instance != nullptr)
     {
         _instance->_handle_tx_subscribed(characteristic);

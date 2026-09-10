@@ -82,6 +82,129 @@ inline uint32_t exo_reset_reason_code()
 #endif
 }
 
+/* ============================ CRASH TRAP (Nano) ============================
+ *
+ * WHY: RESETREAS above answers "why did the Nano reset". It CANNOT answer the question we actually
+ * have, because when the Nano dies mid-trial it does not reset at all - it stops dead, the radio
+ * goes quiet, BLE times out ~9.6 s later, and the only way back is a hand power cycle. A power-on
+ * reads RESETPIN on this board (measured 2026-09-09), so by the time anyone connects, every trace of
+ * the original fault is gone. Nothing in RAM survives either - not ErrorChar, not GPREGRET.
+ *
+ * WHAT THIS DOES: mbed routes hard faults, failed asserts and allocation failures through
+ * mbed_error(), whose default behaviour is to HALT FOREVER with interrupts off - which is exactly the
+ * dead-radio symptom. Overriding mbed_error_hook() lets us instead stash a compact description of the
+ * fault in GPREGRET/GPREGRET2 and reboot. Two wins: the Nano comes back on its own in ~2 s instead of
+ * needing a power cycle, and the next boot can tell the GUI what killed it.
+ *
+ * WHY GPREGRET: it is retained across a warm reset (which ours is) but cleared by a true power-on.
+ * That is precisely the distinction we need, and it is the reason this works where RESETREAS does not.
+ *
+ * BOOT-LOOP GUARD: a fault that reproduces immediately would otherwise reset forever. After
+ * EXO_CRASH_MAX_AUTO_RESETS consecutive crashes the hook returns instead, letting mbed halt as it
+ * normally would, so a wedged device stays wedged and visible rather than thrashing. The count is
+ * cleared by exo_crash_mark_healthy(), called once the GUI has actually subscribed.
+ */
+
+#if defined(EXO_HAVE_NRF_RESETREAS)
+#  include "platform/mbed_error.h"
+#  define EXO_HAVE_CRASH_TRAP 1
+#endif
+
+#define EXO_CRASH_MAGIC             0xC0u   //High nibble marks "GPREGRET holds a crash record"
+#define EXO_CRASH_MAGIC_MASK        0xF0u
+#define EXO_CRASH_COUNT_MASK        0x0Fu
+#define EXO_CRASH_MAX_AUTO_RESETS   3
+
+/**
+ * @brief Latched GPREGRET pair from the previous boot: {marker byte, error byte}. Captured once.
+ *
+ * Same latch-then-clear discipline as exo_reset_reason_code(). We write back magic + count only, so
+ * the consecutive-crash count survives into the next boot while the error byte starts clean.
+ */
+inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out)
+{
+#if defined(EXO_HAVE_CRASH_TRAP)
+    static bool captured = false;
+    static uint8_t latched_marker = 0;
+    static uint8_t latched_error = 0;
+    if (!captured)
+    {
+        captured = true;
+        latched_marker = (uint8_t)NRF_POWER->GPREGRET;
+        latched_error  = (uint8_t)NRF_POWER->GPREGRET2;
+        if ((latched_marker & EXO_CRASH_MAGIC_MASK) == EXO_CRASH_MAGIC)
+        {
+            //Keep the count, drop the error byte - the count is what the boot-loop guard needs
+            NRF_POWER->GPREGRET  = (uint32_t)(latched_marker & (EXO_CRASH_MAGIC_MASK | EXO_CRASH_COUNT_MASK));
+            NRF_POWER->GPREGRET2 = 0;
+        }
+        else
+        {
+            latched_marker = 0;   //Not ours (a true power-on clears these), so report nothing
+            latched_error = 0;
+            NRF_POWER->GPREGRET  = 0;
+            NRF_POWER->GPREGRET2 = 0;
+        }
+    }
+    if (marker_out) { *marker_out = latched_marker; }
+    if (error_out)  { *error_out  = latched_error; }
+#else
+    if (marker_out) { *marker_out = 0; }
+    if (error_out)  { *error_out  = 0; }
+#endif
+}
+
+#define EXO_CRASH_TRAP_SELFTEST 0   //1 -> deliberately hard-fault ONCE at boot to prove the trap works.
+
+/**
+ * @brief Prove the crash trap end to end. Does nothing unless EXO_CRASH_TRAP_SELFTEST is 1.
+ *
+ * WHY THIS IS NEEDED: a silent trap and a broken trap look identical. Until something has actually
+ * faulted, "no CRASH line in the banner" could mean either "nothing has crashed" or "mbed never
+ * reaches our hook on this core and never will". This settles which.
+ *
+ * It provokes a REAL bus fault (a write to a reserved address) rather than calling mbed_error()
+ * directly, so it exercises the whole chain we care about: hardware fault -> mbed fault handler ->
+ * mbed_error() -> mbed_error_hook() -> GPREGRET -> reboot -> banner.
+ *
+ * It fires only when the crash count is 0, so it crashes exactly ONCE per fresh power-on: boot,
+ * fault, reboot, and the second boot comes up normally carrying the record. Connect and you should
+ * see "*** THE NANO CRASHED AND REBOOTED ITSELF ***". Then set this back to 0 and reflash.
+ *
+ * Safe to run: this happens during ExoBLE::setup(), long before any trial, with motors unpowered.
+ */
+inline void exo_crash_trap_selftest()
+{
+#if defined(EXO_HAVE_CRASH_TRAP) && (EXO_CRASH_TRAP_SELFTEST == 1)
+    uint8_t marker = 0;
+    uint8_t err = 0;
+    exo_crash_record(&marker, &err);   //Latches, so this reads the PREVIOUS boot's record
+    if ((marker & EXO_CRASH_MAGIC_MASK) != EXO_CRASH_MAGIC)
+    {
+        //No crash recorded, so this is a clean boot: fault now, once.
+        volatile uint32_t* bad = (volatile uint32_t*)0xFFFFFFF0u;
+        *bad = 0xDEADBEEFu;
+    }
+#endif
+}
+
+/**
+ * @brief Clear the consecutive-crash count. Call once the link is genuinely up and serving.
+ *
+ * Without this the count only ever grows and the boot-loop guard would eventually stop recovering
+ * from unrelated, widely-spaced faults.
+ */
+inline void exo_crash_mark_healthy()
+{
+#if defined(EXO_HAVE_CRASH_TRAP)
+    NRF_POWER->GPREGRET = 0;
+#endif
+}
+
+//The hook itself lives in SystemReset.cpp. It MUST be in exactly one translation unit: this header
+//is included from several .cpp files, and a non-inline definition here produced
+//"multiple definition of mbed_error_hook" at link time.
+
 /**
  * @brief Human-readable reset reason, formatted for the GUI: "RST:0x<hex>:<names>".
  *
@@ -123,6 +246,21 @@ inline String exo_reset_reason_string()
     //fixed-width hex here sidesteps that entirely.
     char head[20];
     snprintf(head, sizeof(head), "RST:0x%08lX:", (unsigned long)reasons);
+
+    //If the previous boot ended in a trapped fault, append it to the NAMES field rather than adding
+    //a field of its own. The GUI splits this string on ':' and prints everything in names verbatim
+    //(MainWindow._on_reset_reason), so this shows up with no GUI change at all. ErrorChar is 255
+    //bytes and variable length, so the extra characters fit comfortably.
+    uint8_t crash_marker = 0;
+    uint8_t crash_error = 0;
+    exo_crash_record(&crash_marker, &crash_error);
+    if ((crash_marker & EXO_CRASH_MAGIC_MASK) == EXO_CRASH_MAGIC)
+    {
+        char crash[40];
+        snprintf(crash, sizeof(crash), ",CRASH_0x%02X_n%u",
+                 (unsigned)crash_error, (unsigned)(crash_marker & EXO_CRASH_COUNT_MASK));
+        return String(head) + names + String(crash);
+    }
 
     return String(head) + names;
 }

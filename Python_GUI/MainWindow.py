@@ -1150,6 +1150,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 names = parts[2] if len(parts) > 2 else ""
                 lines = [f" RESETREAS = {code}  ({names})"]
                 for name in [n for n in names.split(",") if n]:
+                    # CRASH_0x<err>_n<count> is appended by SystemReset.h when the PREVIOUS boot
+                    # ended in a trapped mbed fault (hard fault, failed assert, out of memory,
+                    # stack overflow) rather than a normal reset. This is the one reset reason that
+                    # means the firmware died on its own, so call it out loudly.
+                    if name.startswith("CRASH_"):
+                        try:
+                            err, cnt = name[len("CRASH_"):].split("_n")
+                        except ValueError:
+                            err, cnt = name[len("CRASH_"):], "?"
+                        lines_extra = [
+                            "   *** THE NANO CRASHED AND REBOOTED ITSELF ***",
+                            f"       mbed error code {err}, consecutive crash #{cnt}.",
+                            "       It recovered on its own, with no power cycle. This is a real",
+                            "       firmware fault - not a power-on. See ExoCode/src/SystemReset.h.",
+                        ]
+                        lines.extend(lines_extra)
+                        continue
                     meaning = self._RESET_REASON_MEANING.get(name)
                     if meaning:
                         lines.append(f"   {name}: {meaning}")
