@@ -21,6 +21,12 @@ complete, mechanical removal procedure — read it before deleting anything by h
 
 ---
 
+**!! READ SECTION 12 BEFORE TRUSTING SECTION 9 MECHANISM !!** The connection interval was **never
+verified**: ArduinoBLE discards the central accept/reject and does not handle CONN_UPDATE_COMPLETE,
+and Windows is documented to accept such requests without applying them, randomly. The RESULT (two
+clean 30-min runs versus 10/10 failures) is observation and stands. The EXPLANATION is inference by
+elimination, not measurement.
+
 ## 0. TL;DR
 
 The mid-trial Nano freeze was **proven to be a hang** — not a crash, not a reset, not a brownout.
@@ -33,6 +39,18 @@ This does not fix the bug. It converts an unrecoverable dead end into a data sou
 cause is found and fixed, **all of it should come out** — see §5.
 
 ---
+
+> ## ⚠ THE INTERVAL IS CURRENTLY SET BACK TO THE FAILING VALUE, ON PURPOSE
+>
+> **2026-09-12: arm A' is DONE and the failure came back 2/2 (10.6 s and 75.7 s), so `(6, 6)` is
+> now 12/12 failures.** `EXO_BLE_INTERVAL_PINNED` is back to `0` = `(12, 24)` = banner `B21`.
+> Set it to `1` to reproduce the failure on demand - it is a control, not a revert, and not an
+> abandonment of §9. Do not fly arm A' on a person. Details and the hot-laptop caveat: §14.3.
+>
+> **2026-09-12:** §13 records that this is a **known upstream bug, open since 2019 and unfixed in
+> the current release** (ArduinoBLE issue #45) - including independent reports of presentation A,
+> and independent evidence that §8's patch does **not** cure it. §14 is the ranked list of what to
+> test next, starting with a possible on-demand repro.
 
 ## 1. The finding: it is a HANG (this is the part worth keeping)
 
@@ -988,3 +1006,907 @@ breadcrumbs can go (§5).
 Worth noting the bounded-spin patch (§8) retains independent value regardless: an unbounded wait on
 a remote party is a defect, and it is what turned a transient radio hiccup into a permanently
 unreachable device.
+
+---
+
+## 10. Two other defects found along the way
+
+Neither is part of the disconnect root cause. Both were found because of it, and both are real.
+
+### 10.1 The liveness ping could corrupt a command and wedge the Nano's parser
+
+**Introduced by this investigation**, on 2026-09-11, and found before it ever bit.
+
+The 2 s ping is a GUI **write**, on the same characteristic the GUI sends commands on, driven by a
+Qt timer. But a single logical command is often several separate BLE writes - a parameter update is
+five:
+
+```python
+await write(b"f")                                   # command byte
+for val in (joint, controller, index, value):
+    await write(struct.pack("<d", float(val)))      # 4 x 8 bytes
+```
+
+Every `await` yields to the event loop, so a ping scheduled at that moment runs **between** them and
+injects its byte into the middle of the payload. The Nano cannot recover: `BleParser` buffers until
+it has collected exactly `expecting * 8` bytes, an **exact equality**, so one stray byte makes that
+33 instead of 32 - never equal. `_waiting_for_data` stays true forever, every later command byte is
+swallowed as payload, and it keeps appending into `byte _buffer[64]` (`BleParser.h:59`) until it runs
+off the end of the array.
+
+Rough exposure: a ~50 ms write sequence against a 2 s ping is ~2.5% per parameter update. That is
+low per update and very high across a session of the external control loop, which sends them
+continuously (`Python_GUI/external_control/`).
+
+**Fix:** an advisory busy counter in `QtExoDeviceManager`. `_submit_tx()` increments it around every
+writer coroutine (in a `finally`, so a hung or raising write still unwinds), and `pingDevice()`
+returns early while it is non-zero. Skipping costs nothing - **any** inbound byte refreshes the
+firmware's link-stall timer, so ordinary commands keep it fed on their own.
+
+**A lock was tried first and deliberately abandoned.** Holding an `asyncio.Lock` across each whole
+sequence would also have stopped two *commands* interleaving - but writers here can block for a long
+time (`beginTrial` holds an `await asyncio.sleep(1)`, `send_end_trial_sequence` waits up to 2 s), and
+bleak's `write_gatt_char` is known on WinRT to occasionally never return at all - there is a comment
+in `send_end_trial_sequence` saying exactly that. One hung write would then have blocked **every**
+later command for the rest of the session. A counter cannot do that.
+
+**The trade is explicit:** this fixes ping-versus-command. Two overlapping *command* sequences can
+still corrupt each other exactly as they always could. That hazard predates the ping and has never
+been observed. If it ever needs fixing, do it by making callers not overlap - not by making writes
+wait on each other.
+
+### 10.2 The CSV time column still wrapped every 655 s
+
+**Pre-existing, unrelated to the disconnect, and nearly four months old.**
+
+Every real-time channel is packed int16 x100, so `Exoskeleton time (seconds)` wraps at +/-327.67 s.
+Commit `6322e17` (2026-07-21, *"Modified real-time plotting on GUI so it ddoesnt cause wrapping
+visual glitch at 327s"*) fixed this - but only for the **plot**. It touched exactly two files,
+`ActiveTrialPage.py` and its test. `MainWindow.py`, where the CSV is written, was never touched, and
+no commit in the repo's history ever added wrap handling there.
+
+Nothing surfaced it because **almost no trial ever ran long enough**: the failure history tops out at
+789 s and most runs died in 2-4 minutes, so barely any trial reached even the first wrap. The
+30-minute B19 run made it obvious - that file's time column spans **-145 s**.
+
+**Fix:** the same correction applied in `MainWindow.py`'s row writer, with its own per-file state
+(the CSV's lifetime is per file, not per plot). The exo-time column is located **by name**, for the
+same reason the channel selection is - the index moves when the firmware payload changes.
+
+**Verified** against the B19 trial: unwrapped span **1,820.7 s** against a wall-clock span of
+**1,820.8 s** - 0.1 s of agreement over 30 minutes, 3 wraps correctly detected, fully monotonic.
+
+**One deliberate difference from the plot.** `_x_for_sample` re-anchors on a genuine reboot, because
+a live axis should restart. The CSV **does not**: re-anchoring would splice two boots into one smooth
+monotonic column and hide that the device restarted. Letting the offset accumulate keeps the
+discontinuity visible - which matters now that the watchdog and stall detector reboot the Nano
+routinely.
+
+Old CSVs are fully recoverable: nothing was lost, only wrapped, so the same unwrap can be applied
+offline to any existing file.
+
+---
+
+## 11. REMOVAL PLAN - what comes out once the fix is confirmed
+
+**Precondition: do not start this until the connection-interval fix (§9) is confirmed** by several
+independent runs plus a motor stress test at non-zero torque. As of writing it rests on **one**
+30-minute run. If it is not confirmed, this plan is void and the diagnostics are still earning their
+keep.
+
+### 11.1 Inventory, by verdict
+
+**KEEP - these are fixes, not scaffolding:**
+
+| item | where | why keep |
+|---|---|---|
+| Connection interval `(12, 24)` | `ExoBLE.cpp` | the fix itself |
+| Bounded `sendAclPkt` wait | ArduinoBLE `HCI.cpp` (**outside repo**) | an unbounded wait on a remote party is a defect regardless of trigger; it is what turned a transient hiccup into a permanently unreachable device. **Report upstream** - that is the only durable fix, since any sketchbook patch dies on a library update |
+| CSV exo-time unwrap | `MainWindow.py` | unrelated real bug (§10.2) |
+| TX busy counter | `QtExoDeviceManager.py` | only needed while the ping exists - see 11.4 |
+
+**REMOVE - pure diagnostics, purpose served:**
+
+| item | where | note |
+|---|---|---|
+| Stage breadcrumbs | `SystemReset.h`, `ExoCode.ino`, `ExoBLE.cpp` | `EXO_STAGE_*`, `exo_wdt_stage()`, `exo_noinit_*`. **Never worked** - no store survived a watchdog reset |
+| Send-path diagnostics | `ExoBLE.cpp` | `s_max_write_us`, `s_sends_since_rx`, `exo_ble_link_diag()`, the `_w`/`_s`/`_FAIL` banner fields. Did its job: `w10` proved the timeout fired |
+| Teensy I2C counters | `RealTimeI2C.*` | `rt_i2c_stats`. Cleared I2C as a cause; nothing left to measure |
+| Link-stats UART command | `uart_commands.h`, `ExoCode.ino`, `SystemReset.h` | `get_link_stats` / `update_link_stats`, `uart_scale_clamp`, `exo_link_stats*` |
+| Build tag and flag readout | `SystemReset.h` | `EXO_FW_TAG`, `_b`/`_rt`/`_fw` fields. Invaluable while iterating, noise afterwards |
+| Bisect flags | `Config.h`, `ComsMCU.cpp` | `RT_BLE_FORWARD` entirely; `REAL_TIME_I2C` stays but **must be 1** |
+
+**DECIDE - judgement calls, see below**
+
+### 11.2 Phase 1 - experiment scaffolding (safe, immediate)
+
+Lowest risk, do this first:
+
+1. `Config.h`: delete `RT_BLE_FORWARD` and its comment block; confirm `REAL_TIME_I2C` is **1**.
+2. `ComsMCU.cpp`: remove the `#if RT_BLE_FORWARD` guard around `_exo_ble->send_message(rt_data_msg);`.
+3. `SystemReset.h`: drop the `_rt`/`_fw` fields from `exo_fw_tag_string()`.
+
+### 11.3 Phase 2 - diagnostics
+
+4. **Breadcrumbs.** `ExoCode.ino`: all `exo_wdt_stage(...)` calls and the `exo_wdt_stage_record()` in
+   `setup()`. `ExoBLE.cpp`: the `EXO_STAGE_BLE_BEGIN` stamp. `SystemReset.h`: `EXO_STAGE_*`,
+   `exo_wdt_stage()`, `exo_wdt_stage_record()`, the `STAGEn`/`g` banner block. `SystemReset.cpp`: the
+   whole `.noinit` block and `exo_noinit_boot_count()`.
+   **Careful:** `exo_wdt_stage_record()` is also what latches the link diagnostic - remove them
+   together, in this phase, or the `BLESTALL` line loses its `_w`/`_s` fields with no warning.
+5. **Send-path diagnostics.** `ExoBLE.cpp`: the statics, `exo_us_bucket`, `exo_count_bucket`,
+   `exo_ble_link_diag()`, the timing around `writeValue`, and the reset block in `on_rx_recieved`.
+   `SystemReset.h`: `exo_ble_stall_reset()` drops its `diag` parameter; the banner keeps `BLESTALL_n`
+   and loses `_w`/`_s`/`_FAIL`. **Keep `s_last_rx_ms` and `s_ping_seen`** - the detector needs them.
+6. **Teensy I2C counters + link-stats.** `RealTimeI2C.*`: `rt_i2c_stats` and the `endTransmission()`
+   capture (revert to the bare call). `uart_commands.h`: both command names, the handler, both switch
+   cases, `UART_command_utils::get_link_stats`, `uart_scale_clamp`. `ExoCode.ino`: the boot-time
+   request. `SystemReset.h`/`.cpp`: `exo_link_stats*` and `exo_link_stats_string()`. `ExoBLE.cpp`:
+   drop `+ exo_link_stats_string()` from the banner.
+7. **Build tag.** `SystemReset.h`: `EXO_FW_TAG` and `exo_fw_tag_string()`, and the four calls
+   appending it. *Consider keeping it* - it cost nothing and settled "which binary is on the board"
+   several times.
+
+### 11.4 Phase 3 - the ping package (decide together)
+
+`ping` command, GUI ping timer, `pingDevice()`, TX busy counter, and the **BLE link-stall detector**
+are one unit: the detector cannot arm without the ping (`s_ping_seen`), and the counter only exists
+because of the ping.
+
+- **Remove all of it** if the interval fix holds. The detector then has nothing to detect, and
+  removing the ping removes the §10.1 collision hazard **at its source** rather than guarding it.
+- **Keep all of it** as a safety net for the one case the watchdog cannot cover: presentation A, where
+  the loop stays alive but the link is dead. That was observed and is not explained by anything the
+  interval fix addresses.
+
+**Removal order matters** - GUI half first. New firmware with an old GUI is safe (no pings, so
+`s_ping_seen` stays false and the detector never arms). Old firmware with a new GUI log-spams
+`Command is not in list: p` every 2 s.
+
+### 11.5 DECIDE - the watchdog
+
+> **SUPERSEDED 2026-09-12 by §13.4: KEEP IT.** The defect behind presentation A has been open
+> upstream since 2019, is still present in the latest ArduinoBLE release, and the reporters'
+> own conclusion was that a hardware watchdog is the only remedy. The "for removing" argument
+> below assumed the fault might simply be gone; that assumption no longer holds. The original
+> weighing is kept for the record.
+
+Genuinely a judgement call, and not the author's to make:
+
+- **For keeping:** it is the only thing that can recover a device that has stopped executing. It costs
+  a handful of instructions per loop. On something that straps to a leg and drives 30 Nm motors, a
+  5 s hardware backstop is cheap insurance.
+- **For removing:** it breaks uploads (§7.0 - the WDT survives a warm reset and kills the bootloader
+  mid-flash, requiring a power-cycle-before-upload habit), and if the interval fix holds it may never
+  fire again.
+
+If kept, keep the boot-loop guard with it (`EXO_WDT_MAGIC`, `exo_wdt_boot_count()`) - without it a
+device that hangs on every boot reboots forever.
+
+### 11.6 Verification after each phase
+
+```
+ACLI="/c/Program Files/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
+CFG="$HOME/.arduinoIDE/arduino-cli.yaml"
+"$ACLI" --config-file "$CFG" compile --fqbn arduino:mbed_nano:nano33ble ExoCode/ExoCode.ino
+"$ACLI" --config-file "$CFG" compile --fqbn teensy:avr:teensy41    ExoCode/ExoCode.ino
+python -c "import ast,io; ast.parse(io.open('Python_GUI/MainWindow.py',encoding='utf-8').read())"
+python -c "import ast,io; ast.parse(io.open('Python_GUI/services/QtExoDeviceManager.py',encoding='utf-8').read())"
+```
+
+Then **one real trial per phase** - not just a compile. Each phase touches the live BLE path, and a
+mistake there looks exactly like the bug this whole investigation was chasing.
+
+`grep -rn "exo_wdt\|EXO_WDT\|EXO_STAGE\|exo_link_stats\|rt_i2c_stats\|RT_BLE_FORWARD" ExoCode/`
+finds every remaining site at any point.
+
+---
+
+## 12. THE INTERVAL WAS NEVER VERIFIED - read this before trusting §9's mechanism
+
+Added 2026-09-12 after checking ArduinoBLE's source and the external literature. **§9's empirical
+result is unaffected. §9's explanation of WHY is not established.**
+
+### 12.1 What ArduinoBLE actually does
+
+Read out of `ArduinoBLE 2.1.0` (the sketchbook copy that builds), not assumed:
+
+- `L2CAPSignalingClass::addConnection()` sends a **Connection Parameter Update Request exactly once,
+  at connection setup**, and only when the central's chosen interval falls outside our
+  `[_minInterval, _maxInterval]`:
+
+  ```cpp
+  if (interval < _minInterval || interval > _maxInterval) { ...send request... }
+  ```
+
+- **`connectionParameterUpdateResponse()` is completely empty.** The library receives the central's
+  accept/reject and throws it away. No retry, no fallback, no record.
+- **`LE_META_EVENT` does not include `CONN_UPDATE_COMPLETE` (0x03).** The enum has CONN_COMPLETE,
+  ADVERTISING_REPORT, LONG_TERM_KEY_REQUEST, REMOTE_CONN_PARAM_REQ, READ_LOCAL_P256_COMPLETE,
+  GENERATE_DH_KEY_COMPLETE, ENHANCED_CONN_COMPLETE - and nothing for the update-complete event.
+
+**Consequence: the firmware never learns what connection interval is in effect.** It knows only the
+value the central picked at connection time, passed into `addConnection()`. Everything this document
+said about "7.5 ms" and "15-30 ms" describes **what was requested**, never what was applied.
+
+### 12.2 What the external sources say
+
+- The **central has final say** and may accept, reject, or do nothing
+  ([TI BLE5-Stack GAP guide](https://software-dl.ti.com/lprf/simplelink_cc2640r2_latest/docs/ble5stack/ble_user_guide/html/ble-stack-5.x/gap.html),
+  [Punch Through](https://punchthrough.com/ble-connection-parameters-guide/)).
+- **Windows 10 is documented to ACCEPT a request and then not apply it** - responding
+  "Connection Parameter Update Response (accepted)" while the interval stays at its initial value,
+  and doing so **randomly**: sometimes applied, sometimes not, on the same stack
+  ([Microsoft Q&A](https://learn.microsoft.com/en-us/answers/questions/848142/windows-10-ble-connection-parameter-update-issue),
+  [Nordic DevZone](https://devzone.nordicsemi.com/f/nordic-q-a/27235/win-10-ble-stacks-acting-as-a-central-problems-accepting-ble-connection-parameter-changes)).
+- Windows generally honours the **PPCP characteristic** (Preferred Peripheral Connection Parameters)
+  rather than L2CAP requests as the way to express preferences.
+
+### 12.3 The competing hypothesis, and why it was rejected
+
+If Windows **rejected** `(6,6)`, the link stayed at Windows' own default - and `(12,24)` would land at
+roughly that same value. Both builds would then have run at the **same interval**, and the only
+difference between them would be whether a single L2CAP packet was sent at connection setup. That
+raised the alternative "the fix is that we stopped asking Windows to change parameters."
+
+**Rejected**, and the user's objection is the reason: the request is sent **once, at connect**. There
+is no mechanism by which one packet at setup causes a link to die 40-800 seconds later, at random.
+
+**And rejecting it strengthens §9 by elimination.** If the intervals had been identical, the observed
+difference (ten failures at a 225 s mean, versus two clean 30-minute runs) would have no cause at
+all. Since the behaviour difference is real and large, **the intervals almost certainly did differ** -
+meaning Windows did apply the 7.5 ms request, and §9's account survives.
+
+That is an argument from elimination, not from measurement. It is weaker than a reading would be.
+
+### 12.4 A speculation that would explain the variance
+
+**Marked clearly as speculation - no evidence either way.**
+
+If Windows applying these requests really is random per connection, then **each connection was a coin
+flip** between "pinned at 7.5 ms" and "left at Windows' comfortable default." That would explain the
+time-to-failure spread that has never been accounted for - 12 s, 24 s, 41 s at one end against
+626 s, 789 s at the other - as **two populations** rather than one process with a fat tail. It also
+fits the distribution looking exponential-ish but not cleanly so (CV 1.13, median/mean 0.59 against
+exponential's 1.00 and 0.69).
+
+Checkable with the same one-line log: if short runs correlate with a pinned 7.5 ms interval and long
+ones do not, that is the answer.
+
+### 12.5 What this does and does not change
+
+| | status |
+|---|---|
+| `(6,6)` failed 10/10, mean 225 s | **unchanged, observed** |
+| `(12,24)` gave two clean 30-min runs at full rate, ~1 in 14 million | **unchanged, observed** |
+| The change is worth keeping | **unchanged** - it works, whatever the reason |
+| "The link ran at 7.5 ms" | **NOT VERIFIED.** Likely, by elimination (§12.3), not measured |
+| "133 connection events/s loaded the host" | **unsupported** - rests on the unverified interval |
+| "No headroom to drain a backlog at 7.5 ms" | **WITHDRAWN** - 133 events/s against ~90 notifications/s is ~48% headroom, and body-blocking episodes recovered on unpatched firmware, proving a reduced rate is survivable |
+
+**The removal plan in §11 does not depend on any of this.** It is gated on the fix working, which is
+an observation, not on why it works.
+
+---
+
+## 13. UPSTREAM CORROBORATION - ArduinoBLE issue #45, open since 2019
+
+Found 2026-09-12, by the user, after §8 was already written and shipped. **We did not find this
+first; we rediscovered a six-year-old open bug from scratch.** That is worth recording honestly,
+and it changes several things.
+
+- <https://github.com/arduino-libraries/ArduinoBLE/issues/45> - *"Weak signal doesn't trigger
+  disconnect() and hangs in multiple places"*, fgaetani, opened **2019-12-19**, last touched
+  **2025-03-20**, **still OPEN**, labelled `type: imperfection` / `status: waiting for information`.
+- **Upstream `master` still contains the unbounded loop today** (`HCI.cpp:638`), and our sketchbook
+  copy is `2.1.0`, which is the **latest release** (2026-06-22). We are not behind; there is no
+  version to upgrade to that fixes this.
+
+### 13.1 What it confirms, verbatim
+
+The opening post names our exact function, our exact loop, and our exact symptom:
+
+> Code execution remained locked in the `writeValue()` function, specifically in the
+> `HCIClass::sendAclPkt()` function. The code remained locked in the `while` loop, because the
+> device is disconnected.
+
+and proposes essentially §8's fix, bounded by an iteration count rather than a clock:
+
+```cpp
+int k = 0;
+while (_pendingPkt >= _maxPkt) { k++; if (k > _maxPkt) break; poll(); }
+```
+
+**Our clock-bounded version is the better of the two**, and for a reason worth stating: `_maxPkt`
+iterations of `poll()` is not a unit of time. `poll()` returns immediately when the transport has
+nothing to read, so a handful of iterations can elapse in microseconds and abandon a send that was
+about to succeed. A wall-clock bound expresses what is actually meant - *the controller has gone
+quiet for 50 ms*.
+
+Independent confirmation matters here because §8's mechanism was, until today, entirely our own
+reconstruction from reading the source plus one `w10` measurement. It now has a second,
+unconnected witness who arrived at the same place from a different application.
+
+### 13.2 What it confirms about presentation A - and this is the bigger one
+
+Presentation A (link dead, **sketch still running normally**, device invisible, only a reset
+recovers it) has been our least-explained observation. The thread describes it independently, twice,
+in terms that match ours almost word for word.
+
+**morettigiorgio, 2020-01-24:**
+
+> if i forced a BLE.disconnect() (during the connection lost), central.connected() and BLE.central()
+> returned the correct false, but my Arduino peripheral (Arduino Nano 33 BLE and Arduino Nano 33 BLE
+> Sense) **is no more discoverable, not even with another BLE.advertise() cmd**. It's very
+> strange... I have to restart
+
+**JoeyTolentino, 2020-02-07:**
+
+> when I walk away, and I lose connectivity, the little display still indicates that "something is
+> connected" and **the IMU data is still updating as it should**; however, I'm unable to see the
+> device to reconnect to it when I'm near by. [...] **The only way to reconnect would be to press
+> the reset button, or cut power.**
+
+Compare our own log: *"Auto disconnected, but green light still flashing, white/pinkish led still
+blinking, exactly as if nothing happened... I can't reconnect... And I just clicked reset button,
+now I can reconnect."*
+
+That is the same fault, on the same board family, reported by strangers six years ago. **It is not
+something about this exoskeleton, this wiring, this GUI or this laptop.** Three of our own Nanos
+reproducing it was already suggestive; this settles it.
+
+Note also that morettigiorgio's report kills a hypothesis we never fully closed out: **calling
+`BLE.advertise()` again does not rescue it.** Our §9 note that the only runtime re-advertise path
+lives in the blocked main loop was a plausible explanation for why the device never came back. It is
+now clear that re-advertising would not have been enough anyway - the controller/stack is wedged at
+a level `advertise()` cannot reach.
+
+### 13.3 What it says AGAINST us - read this before over-claiming §8
+
+**The thread's consensus is that bounding the loop does not fix presentation A.** Three separate
+people say so:
+
+- **fgaetani**, the patch's author, 2020-02-26: *"The reported issue #45 is different, in my case the
+  microcontroller lock in loop in that cycle and by modifying in that way I solved it. While the
+  other issue [...] the board remains apparently connected and is no longer visible from other
+  devices. The only solution is to reset the microcontroller manually or through a watchdog."*
+- **morettigiorgio**: tested the patch, *"without having solved"* the invisible-device problem.
+- **JoeyTolentino**: *"I've tried adding the recommended code by @fgaetani and I did not realize a
+  behaviour change by the hardware."*
+
+**This matches our own results exactly and we should say so plainly.** We patched `HCI.cpp` and
+*kept failing* - B18 fired the new timeout (`BLESTALL_n1_w10_s3`) and the device still had to be
+manually reconnected. At the time that read as a disappointment. It is better understood as our data
+agreeing with three independent reports: **the bounded spin converts a hard hang into a recoverable
+degraded state, and does nothing about the underlying link death.**
+
+So the honest statement of what §8 buys is narrower than §8 implies:
+
+| claim | status after #45 |
+|---|---|
+| The unbounded loop is a real defect that can hang the sketch | **corroborated** - independent report, our `w10` measurement |
+| Bounding it prevents the *hang* presentation (B) | **corroborated** |
+| Bounding it prevents the *disconnection* (A) | **contradicted** - by three reporters and by our own B18 run |
+
+### 13.4 What it says about the watchdog
+
+The thread's own workaround for presentation A is **the nRF52840 hardware watchdog**, using the same
+registers we arrived at independently (`NRF_WDT->CONFIG / CRV / RREN / TASKS_START`), fed from the
+loop and gated on connection state. fgaetani: *"The only solution is to reset the microcontroller
+manually or through a watchdog."*
+
+**This changes the §11.5 recommendation.** That section framed the watchdog as a judgement call whose
+"for removing" argument was *"if the interval fix holds it may never fire again."* Against a defect
+that has been open upstream for six years, with no fix in the latest release, with independent users
+concluding the watchdog is the only remedy - **the watchdog should be kept.** §11.5 is updated
+accordingly. Its real cost is the upload hazard (§7.0), which is a documented habit, not a risk to
+the wearer.
+
+### 13.5 The unresolved tension: is our trigger really "weak signal"?
+
+Every report in the thread attributes the failure to **weak signal / repeated link loss** - walking
+away, hands over the antenna, 9-10 m through obstacles. Ours happens with the laptop on the same
+bench.
+
+Two readings, and we cannot currently choose between them:
+
+1. **Same fault, different route in.** What actually kills it is not distance but *missed connection
+   events*. Range is just the easiest way to produce those. A 7.5 ms interval on a congested 2.4 GHz
+   band could produce the same event-loss density at 1 m that 10 m produces at a relaxed interval.
+   This is consistent with §9 and would unify everything.
+2. **Different fault.** Ours is load-driven, theirs is range-driven, and the shared symptom is just
+   where two different upsets both land.
+
+Reading 1 is the more economical, and it makes a **prediction we can test** (§14.1): deliberately
+attenuating the signal should reproduce the failure on demand.
+
+One more datum from the thread, flagged because it contradicts something we assumed: **polldo, an
+Arduino maintainer, could not reproduce it at all** (2020-07-02) on the reporter's own sketch. A
+fault that some people hit constantly and a maintainer cannot trigger once is why the issue is still
+labelled *"waiting for information"* six years on - and is a fair description of our own experience
+of it being maddeningly intermittent. It also explains why this was never fixed: **nobody upstream
+has ever had a reliable repro.** If §14.1 works, we would have one, and it would be worth posting.
+
+---
+
+## 14. WHAT TO TEST NEXT - ranked by information per unit of effort
+
+Written 2026-09-12 in answer to *"any additional test we can run to understand this better?"*, and
+substantially reshaped by §13. Ordered so that the cheapest, most decisive things come first.
+
+The thing standing in the way of all of this is **the absence of a repro**. Every experiment
+currently costs one run of unknown length - anywhere from 12 s to never - and needs several runs to
+mean anything. §14.1 attacks that directly and should be done before anything else, because it makes
+every other test on this list roughly twenty times cheaper.
+
+### 14.1 FIRST: try to make the failure happen on demand, by attenuating the signal
+
+**Cost: zero code, five minutes. Potential payoff: the entire investigation becomes tractable.**
+
+Every reporter in issue #45 triggers this with **weak signal**, and one of them gives a recipe
+(Hoffa25, 2020-05-01):
+
+> Move the phone to a spot were the connection is really weak [...] To make it come quicker you can
+> force disconnects by putting objects around the arduino (your hands, another smartphone, tablet,
+> whatever blocks the signal well). When disconnected keep covering the arduino for 10-30s and then
+> remove. Repeat until error occurs. **Most of the time the error will occur within 5 minutes.**
+
+Concretely, on the current build, with the trial streaming as usual:
+
+1. Cup both hands tightly around the Nano for ~20 s, release for ~10 s. Repeat.
+2. If that does nothing, escalate: wrap it loosely in aluminium foil, or put the laptop in another
+   room, or both.
+3. Watch for either presentation - GUI stops updating (A), or the device goes unreachable (B) - and
+   note which, plus whether the LEDs keep blinking.
+
+**Interpreting the result, and note that every outcome is informative:**
+
+| outcome | what it means |
+|---|---|
+| Fails within a few minutes, repeatably | **We have a repro.** Use it for everything below, and consider posting it to issue #45 - upstream has been stuck for six years precisely because a maintainer could not reproduce it (polldo, 2020-07-02) |
+| Fails, but only on the old `(6,6)` build | Ties §9 and §13 together: interval sets how much attenuation it takes. Strong support for §13.5 reading 1 |
+| Never fails, however hard we attenuate, on either build | Our fault is **not** the range-driven one in #45 despite the identical symptom. That pushes toward §13.5 reading 2, and is worth knowing |
+
+**Do this with zero torque and the exo on the bench**, not on a person - the point is to provoke a
+freeze, and a freeze on a worn device is exactly what we are trying to prevent.
+
+### 14.2 Log what the central actually chose - **BUILT 2026-09-12, compiles, not yet flashed**
+
+§12's whole problem is that we never read the connection interval. It turns out **we do not need a
+sniffer for the initial value**: the HCI *LE Connection Complete* event carries it, and ArduinoBLE
+already passes it into `L2CAPSignalingClass::addConnection()` - along with the latency and the
+supervision timeout - and then discards all three (`HCI.cpp:1152`, `L2CAPSignaling.cpp:43`).
+
+```cpp
+void L2CAPSignalingClass::addConnection(uint16_t handle, uint8_t role, ...,
+                                        uint16_t interval,
+                                        uint16_t /*latency*/, uint16_t supervisionTimeout, ...)
+```
+
+So: stash `interval`, `latency`, `supervisionTimeout` and the local `updateParameters` flag into
+globals at the top of `addConnection()`, and surface them in the existing connect banner. Four
+values, one new banner field, e.g. `CP_i<interval>_l<latency>_t<timeout>_u<0|1>`.
+
+**What it answers immediately:**
+
+- What interval Windows opened the link at - in 1.25 ms units, so `6` is 7.5 ms and `24` is 30 ms.
+- Whether we even *asked* for a change (`updateParameters`), which distinguishes "Windows already
+  opened inside our range" from "we asked and it may or may not have listened."
+- The supervision timeout, which §14.5 needs.
+
+**What it does NOT answer:** whether a *later* L2CAP update was applied. That still needs §14.6. But
+combined with §14.1, it gives the correlation §12.4 asks for: if short-lived connections turn out to
+be the ones that opened at `6` and long-lived ones opened higher, the two-populations speculation is
+confirmed and §9's mechanism is established rather than merely argued by elimination.
+
+**Caveat, stated up front:** this is a second edit to the sketchbook ArduinoBLE, which §8 already
+warns is invisible to git and dies on any library update. Keep it in `HCI.cpp` if possible - the file
+already carries the patch banner - rather than spreading across a second file.
+
+#### As built
+
+**It is in `HCI.cpp` only** - the single file that already carries the §8 patch banner, so the whole
+sketchbook footprint remains one file. The capture is taken at the source (the HCI *LE Connection
+Complete* handler) rather than in `L2CAPSignaling.cpp`, at **both** connection-complete sites - the
+plain one and the Enhanced one, which is easy to miss because only one of them is obvious.
+
+```cpp
+extern "C" {
+volatile uint16_t exo_ble_cp_interval = 0;
+volatile uint16_t exo_ble_cp_latency  = 0;
+volatile uint16_t exo_ble_cp_timeout  = 0;
+volatile uint16_t exo_ble_cp_count    = 0;   //0 = never connected
+}
+```
+
+`extern "C"` so the firmware can declare them without matching C++ mangling. Values are stored
+**raw**, in wire units, so nothing is lost to rounding.
+
+**Repo side**, `exo_ble_cp_string()` in `SystemReset.h` renders `,CPi<iv>_l<lat>_t<to>_u<0|1>_n<n>`:
+
+| field | meaning |
+|---|---|
+| `i` | interval, **1.25 ms units**. `i6` = 7.5 ms, `i24` = 30 ms |
+| `l` | slave latency, in connection events |
+| `t` | supervision timeout, **10 ms units**. `t500` = 5 s. The link's dead-man's switch - see §14.5 |
+| `u` | **would we have sent an L2CAP update request?** Derived from `i` against our compile-time range using the same test as `addConnection()` |
+| `n` | connections since boot. `n0` -> `,CPnone`, and `i`/`l`/`t` are meaningless |
+
+**`u` is the field that earns this whole change.** It separates *"a relaxed interval helps"* from
+*"not ASKING helps"* - the one alternative explanation an A/B/A cannot rule out by itself, because
+`(6,6)` always triggers a request while `(12,24)` often will not.
+
+#### Where it is delivered, and why not in the boot banner
+
+The connection parameters do not exist at boot, so they cannot go in the reset banner the way
+`exo_link_stats_string()` does. Instead the boot banner is **cached** (`s_boot_banner`) and ErrorChar
+is **rewritten at connect**, in `handle_updates()`'s connection branch, with the CP field appended.
+
+Two things make that safe, both worth recording because ErrorChar is `BLENotify`:
+
+1. **Nobody is subscribed yet.** `QtExoDeviceManager` reads ErrorChar once (`:365`) and only then
+   subscribes (`:392`). So `writeValue()` stores locally and emits **no packet** - nothing is added to
+   the connect burst, which is the burst that already loses controller rows.
+2. **It lands before that read.** This runs on the first main-loop pass after the link comes up; the
+   GUI's read is seconds later. Losing the race would cost only the CP field - degraded, never wrong.
+
+**And one real bug avoided:** the connect path must NOT call `exo_reset_reason_string()` again.
+That function latches state out of GPREGRET as a side effect, and calling it twice is exactly how the
+crash/stall record got erased once before. Hence the cached string rather than a recompute.
+
+`s_boot_banner` is declared with the other file-scope statics at the top of `ExoBLE.cpp`, ahead of
+`begin()`, which uses it.
+
+**Cost:** +352 bytes flash, +16 bytes RAM on the Nano. Teensy unchanged. Both targets compile.
+
+**A deliberate fragility:** if ArduinoBLE is ever updated or reinstalled, those `extern` symbols
+vanish and **the firmware fails to LINK**. That is on purpose. A silent revert to "we have no idea
+what the interval is" is precisely the situation §12 was written about; a link error is a much
+better outcome than a banner that quietly stops telling the truth.
+
+#### What to look for on the first flashed connection
+
+- **`u1` on `B21`** would mean Windows opens outside 15-30 ms and we *are* still sending a request on
+  the working build - which kills the "not asking is the fix" alternative outright.
+- **`u0` on `B21` and `u1` on `B20`** would mean the arms differ in *both* interval and
+  request-sent, leaving the two confounded and making §14.6 the only way to separate them.
+- **`i` identical across arms** would be the loud result: Windows ignoring us entirely, and §9's
+  mechanism would need rewriting from scratch even though the A/B/A effect is real.
+
+### 14.3 The A/B/A control we never ran - **ARM A' DONE 2026-09-12: FAILURE RETURNED 2/2**
+
+Still the single largest hole in §9's evidence. §9 rests on a **between-groups** comparison: ten
+failures on the old build, two clean runs on the new one. Nothing has ever gone *back*.
+
+This is worth doing even though it costs a run of deliberately-broken firmware, because the
+alternative explanation for §9 has never been excluded: **something else changed between those two
+sets of runs.** The ten failures and the two clean runs are separated by several days, a library
+patch, a ping, a lock, and at least one host reboot. An A/B/A puts the interval back as the only
+moving part.
+
+**Promoted to first** at the user's direction - ahead of §14.1 - on the reasoning that §14.1's
+attenuation repro is more informative once we know whether the current build is genuinely protected.
+
+#### How to switch arms
+
+One symbol, in `SystemReset.h`:
+
+```c
+#define EXO_BLE_INTERVAL_PINNED   1u
+//        1 = (6, 6)   7.5 ms PINNED  - the original, known-failing configuration   -> build B20
+//        0 = (12, 24) 15-30 ms range - the candidate fix from section 9            -> build B21
+```
+
+`ExoBLE.cpp` switches on it, and **`EXO_FW_TAG` is derived from it** rather than being a separate
+number to remember. That is deliberate: flipping the interval and forgetting to bump the tag would
+make the banner claim the wrong build, and the entire value of an A/B/A is that every log is
+unambiguously attributable to one arm. Read the arm straight off the banner - `B20` or `B21`.
+
+Both targets compile on this toggle (Nano 372,120 bytes / 37%; Teensy 324,460 bytes).
+
+#### Protocol
+
+1. **Arm A' - now.** `EXO_BLE_INTERVAL_PINNED 1`, flash, run a normal trial. Zero torque, on the
+   bench. Record time-to-failure and which presentation (A: loop alive, link dead / B: everything
+   frozen).
+2. **Arm B - after.** Set it to `0`, flash, confirm the failure goes away again.
+3. Optionally repeat A' once more. Two returns and two disappearances would be about as strong as
+   this design can get without a sniffer.
+
+#### RESULTS - arm A' (6,6), 2026-09-12, both runs in one session
+
+| run | trial start | disconnect | **TTF** | banner |
+|---|---|---|---|---|
+| A'-1 | 15:57:03.131 | 15:57:13.707 | **10.6 s** | `SREQ,BLESTALL_n1_w10_s3,B20_b255_rt1_fw1,I2Cf3k_e288x10_c2_t266d_w0d_x300` |
+| A'-2 | 15:58:51.852 | 16:00:07.507 | **75.7 s** | `SREQ,BLESTALL_n1_w10_s3,B20_b255_rt1_fw1,I2Cf9k_e285x10_c2_t266d_w0d_x300` |
+
+**The failure came back, 2 for 2.** With the ten prior failures that is **12 for 12 on `(6, 6)`**.
+
+`B20` on both confirms the toggle and makes these logs unambiguously arm A' - the thing the build-tag
+derivation was for.
+
+**The signature is byte-identical across both runs AND identical to B18's:**
+`BLESTALL_n1_w10_s3`. One stall detection, worst `writeValue` in the 32.8-65.5 ms bucket (so the 50 ms
+bounded spin fired), three sends since the last inbound byte. Three independent failures, one
+fingerprint. This is one repeatable fault, not a family of coincidences.
+
+**`c2` on both runs is the most load-bearing field here.** Per `SystemReset.h`'s own note, an
+`endTransmission()` code of 2 means the Nano stopped ACKing the I2C bus - *the Nano died first*, and
+the host noticed afterwards. Together with `x300` (capped: at least 3 s of unbroken I2C silence) both
+runs say the same thing about ordering.
+
+**Do not trust `f` and `e`.** The frame count rose 3k -> 9k while the error count *fell* 2880 -> 2850,
+which no cumulative pair of counters can do. Whatever their reset semantics actually are, they are not
+what the header comment implies, and nothing here should be built on them. (An earlier note in this
+session called them "cumulative since Teensy boot" - that is wrong, and `e` falling is the proof.)
+`c` and `x` are unaffected - they are a last-code and a max-run, not totals.
+
+##### The hot-laptop confound, and why it is now mostly defused
+
+A'-1 ran while the host laptop's fan was at full tilt, and 10.6 s is faster than *any* baseline failure
+(minimum 12 s). That looked like it might be host thermal throttling rather than the interval.
+
+**A'-2 answers it.** Same session, same thermal state, minutes later - **75.7 s**, squarely inside the
+historical baseline (12-789 s, mean 225 s). A pathologically loaded host would have produced another
+fast death, not a 7x longer one. So the hot laptop is not driving the result; A'-1 was a fast draw from
+the same distribution we have always seen.
+
+That 7x spread between two runs minutes apart, on one host in one thermal state, is itself worth
+recording: **the process has a large stochastic component that is independent of host load.** It is
+consistent with the exponential-ish time-to-failure already noted (CV 1.13), and with the
+two-populations speculation in section 12.4.
+
+#### Arm B (12,24) - **PASSED: 21 min 49 s, no failure, ended manually**
+
+Flashed immediately after A'-2, **deliberately while the host laptop was still under the same load**,
+so that the comparison is within-session rather than across days. Ran **1,309 s (21 min 49 s)** and
+was **ended manually by the operator, not by a failure**. Banner `SREQ,B21_...` with no `BLESTALL`
+suffix - the documented clean End-Trial reboot.
+
+**THE A/B/A IS NOW COMPLETE AND POSITIVE:**
+
+| arm | interval | result |
+|---|---|---|
+| A (original) | `(6,6)` | 10 failures |
+| B | `(12,24)` | 2 clean 30-min runs |
+| **A' (return)** | `(6,6)` | **2 failures, 0.96 s and 66 s, same session** |
+| **B' (return)** | `(12,24)` | **1 clean 21m49s run, same session, same hot host** |
+
+The failure went away, came back on cue, and went away again. That is the control §9 never had.
+
+**Cumulative exposure on `(12,24)`: 5,026 s across three runs with zero failures.** Against the
+null that B behaves like A (exponential, mean 225.5 s) that is ~22 expected failures, so
+p ~ **2 x 10^-10**. Even this single run alone is **~1 in 333**. The earlier two runs were on a
+different build and a cooler host, which is why the single-run figure is quoted alongside.
+
+Survival probabilities under the null that B behaves like A, exponential against the full 12-failure
+record (mean 225.5 s):
+
+| survived | p |
+|---|---|
+| 7 min | ~1 in 6 |
+| **15 min** | **~1 in 54** |
+| 30 min | ~1 in 2,900 |
+
+Against only today's hot-host pair (mean 43 s) 15 minutes is astronomically unlikely, but n=2 makes
+that mean far too shaky to quote. The conservative column is the one to use.
+
+##### RETRACTED: "B degrades under load and recovers"
+
+**Written during the run from the GUI display, and the CSV does not support it. Retracted.**
+
+Arm B's *data stream did not degrade at all*: 115,442 rows over 1,308.9 s, mean **88.2 Hz**, the
+**worst single second was 73 Hz**, and in nearly 22 minutes there were exactly **two** gaps over
+100 ms, totalling 0.3 s - 0.02% of the run. Max gap 145 ms. Nothing recovered because nothing broke.
+
+What was visibly dropping and recovering was **the GUI's rendering**, not the link. The data kept
+arriving at ~88 Hz the whole time.
+
+So the "recoverability rather than throughput" reframing built on that observation is **withdrawn**.
+It was wrong on both halves - B never degraded, and (see below) A' never degraded either.
+
+*(It does fit host memory pressure hitting Qt repaints while leaving the BLE path alone - but that is
+an aside, not a claim.)*
+
+##### THE FAILURE IS ABRUPT - no ramp, no warning
+
+This is the real finding in these files, and it rules out a whole class of models.
+
+**A'-2 ran at 96.0 Hz with a p99 inter-sample gap of 41 ms right up to the sample before it stopped.**
+Its worst second before the end was a full-rate second. There is no slow decay, no rising gap
+distribution, no creeping loss. The link is healthy, and then it is dead.
+
+Any model of the form *"congestion builds until it tips over"* is inconsistent with this. Whatever
+happens, happens **fast** - between one sample and the next.
+
+##### TIME-TO-FAILURE HAS BEEN OVERSTATED BY A CONSTANT 9.6 s IN EVERY RUN
+
+Both A' runs show **exactly 9.6 s** between the last CSV sample and the GUI's
+`Device disconnected` log line. Arm B's *manual* end shows 0.1 s. So the GUI timestamp is not when
+the link died - it is when Windows finally noticed.
+
+That 9.6 s is almost certainly **`EXO_BLE_STALL_MS` (8 s) plus ~1.6 s** for Windows to register the
+resulting reboot. In other words our own stall detector defines the lag, which is why it is so
+repeatable.
+
+**Corrected times-to-failure, measured from the data rather than the log:**
+
+| run | GUI-reported | **actual (last sample)** |
+|---|---|---|
+| A'-1 | 10.6 s | **0.96 s** |
+| A'-2 | 75.7 s | **66.0 s** |
+
+**A'-1 died in under one second** - the link was gone almost the instant the trial started.
+
+**This applies retroactively to the whole failure record.** Every TTF in these documents taken from a
+GUI disconnect line is ~9.6 s too long. It barely matters for the long ones; it matters enormously at
+the short end, where the "12 s minimum" baseline failure was really about 2.4 s. The baseline mean of
+225.5 s becomes ~216 s. Nothing in §9's conclusion moves, because the arms shift together.
+
+##### THE INTERVALS DID DIFFER - measured from the CSVs, with no firmware change
+
+Inter-sample gaps quantise to connection events, so the existing CSVs already carry a measurement of
+the link timing. Histogramming them (2.5 ms bins, gaps under 70 ms):
+
+| band | A' `(6,6)` | B `(12,24)` |
+|---|---|---|
+| < 2.5 ms (same connection event) | 44.0% | **52.3%** |
+| 12.5-20 ms | **19.7%** (the mode) | 5.9% |
+| 22.5-30 ms | 9.2% | **23.7%** (the mode) |
+
+**The modal inter-burst gap moves from ~15-20 ms on A' to ~25-27.5 ms on B.** The two arms are
+measurably different at the wire level: **Windows did not treat them identically.**
+
+That already rules out one of the three outcomes pre-committed for §14.2 - *"`i` identical across
+arms, Windows ignoring us entirely"*. It is not what happened.
+
+B's shape is also exactly what `ExoBLE.cpp`'s comment predicted for a relaxed interval: a majority of
+samples arriving **within** a connection event (52.3% under 2.5 ms) separated by one-event gaps near
+26 ms. That is multiple packets per event, which at 7.5 ms the link never needed to do.
+
+**What this does NOT establish:** the absolute value on arm A'. A 15-20 ms modal gap is consistent
+both with a true 7.5 ms interval carrying a packet every second event (133 events/s against ~90
+samples/s gives 0.68 packets per event, so 1-2 event gaps are expected) **and** with Windows having
+quietly picked ~15-17.5 ms and ignored the request. Host-side Python timestamps smear the
+quantisation, so this cannot separate them. §14.2 reads the number directly and settles it.
+
+##### THE COST OF THE FIX, measured
+
+| | A'-2 `(6,6)` | B `(12,24)` |
+|---|---|---|
+| mean rate | 96.0 Hz | **88.2 Hz** |
+
+**About 8% fewer samples per second.** That is the throttling the `ExoBLE.cpp` comment said to watch
+for, and it is real but modest - and it buys a link that does not die. Worth stating plainly rather
+than leaving as a footnote, because it is a genuine trade and somebody should get to decide whether
+8% matters for their protocol.
+
+##### What this does and does not yet establish
+
+- **Established:** on this host, today, `(6, 6)` fails reliably and fast, with one repeatable signature.
+  Arm A' is a solid arm. It is no longer true that "nothing ever went back."
+- **Not yet established:** that `(12, 24)` is what prevents it. That is arm B, and it is only decisive
+  if it survives **in this same session, on this same hot host** - which is the whole point of running
+  it now rather than tomorrow.
+- **Still unestablished either way (section 12):** *why*. Nothing here reads back the interval actually
+  in force. Even a clean arm B would tell us THAT the setting matters, not WHY.
+- **One alternative an A/B/A cannot kill by itself:** `(6, 6)` *always* triggers the L2CAP parameter
+  request, because Windows never opens a link at exactly 7.5 ms, whereas `(12, 24)` may often need no
+  request at all. So "B survives" might mean *not asking* is what helps, rather than a relaxed interval.
+  Section 12.3 rejects that (one packet at connect cannot kill a link 40-800 s later) and that rejection
+  still stands - but **section 14.2 would settle it directly**, because it logs the `updateParameters`
+  flag alongside the interval. If arm B survives, 14.2 becomes the next thing to build.
+
+#### What each outcome means
+
+| arm A' result | reading |
+|---|---|
+| Fails within ~4 min, as the baseline did (mean 225 s, worst 789 s) | **§9 is causal.** The interval is the variable, and everything from §12.3's argument-by-elimination gets replaced by an actual controlled comparison |
+| **Does not fail**, runs 30 min clean | **§9 is in serious trouble.** Something else fixed it between the two groups - the library patch, the ping, or the host reboot - and §9 needs rewriting. This is the outcome worth taking seriously, and the reason to run the control at all |
+| Fails, but much later than 225 s | Ambiguous on one run. The baseline itself spanned 12 s to 789 s, so a single long survival is weak evidence - see §12.4 on the two-populations speculation. Needs repeats |
+
+**One caution on interpretation:** arm A' is *not* a clean re-run of the original ten failures. The
+library patch, the ping, the TX lock and the CSV fix are all still in place. So a failure on A' is
+attributable to the interval, but a *survival* on A' does not by itself exonerate the interval - it
+could mean one of those other changes is doing the work. That asymmetry is why the "does not fail"
+row above says §9 is in trouble rather than refuted.
+
+### 14.4 Log RSSI alongside the telemetry
+
+`central.rssi()` is available and we never use it. Sample it once a second into the existing stream.
+
+- If §13.5 reading 1 is right, **RSSI should sag in the seconds before a failure** - which would
+  convert "random" into "predictable", and is the single most useful thing we could learn.
+- If RSSI is flat and strong right up to the instant it dies, that is strong evidence our fault is
+  *not* the range-driven one in #45, whatever the symptoms share.
+- Watch specifically for **RSSI reading exactly 0**, which polldo and Hoffa25 both report as a marker
+  of a link in trouble on this stack.
+
+Cheap, repo-side (no library edit), and it costs one channel.
+
+### 14.5 Set the supervision timeout explicitly - a candidate FIX for presentation A, not just a probe
+
+**This is the most interesting untried idea on the list, and it is a fix rather than a measurement.**
+
+Presentation A is *"the link is dead but the Nano still believes it is connected, so it never
+returns to advertising."* The supervision timeout is the **exact mechanism the BLE spec provides for
+noticing that** - it is the peripheral's dead-man's switch: no valid packet from the central within
+the timeout, and the controller must declare the link lost and report a disconnect.
+
+Two facts make this worth pursuing:
+
+1. **We never set it.** `BLE.setSupervisionTimeout()` exists in 2.1.0 (`BLELocalDevice.cpp:408`) and
+   is not called anywhere in `ExoBLE.cpp`. `L2CAPSignaling`'s `_supervisionTimeout` is therefore 0,
+   so we accept whatever Windows picks and never request anything else.
+2. **There is upstream history of this timer being wrong on this exact board.** PR #44 - the one that
+   closed issue #33, the "peripheral does not notice disconnection" issue - was in part a fix for
+   `WSF_MS_PER_TICK` not matching the value mbed was compiled with, with the PR author noting *"the
+   `WSF_MS_PER_TICK` needs to match the value mbed was compiled with for the supervision timeout to
+   match."* A tick-rate mismatch makes the supervision timer run at the wrong rate - and a timer
+   that runs too slow is, precisely, a peripheral that never notices the link is gone. Users
+   reported #44 did not actually resolve it.
+
+So: call `BLE.setSupervisionTimeout()` with a short, explicit value and see whether presentation A
+starts self-recovering - the controller reports a disconnect, our existing disconnect handling runs,
+and the main loop's `advertising_onoff()` puts it back on the air without a reboot.
+
+**Three cautions, none of them small:**
+
+- **Units are 10 ms**, per the BLE spec, range 0x000A-0x0C80 (100 ms to 32 s), and the spec requires
+  `timeout > (1 + latency) * maxInterval * 2`. With `(12, 24)` = 30 ms max and zero latency the floor
+  is 60 ms, so anything from about 100 ms up is legal - but a value that tight will drop the link on
+  ordinary interference. Something in the **2-5 s** region is the sane starting point. Verify the
+  units against the library rather than trusting this paragraph.
+- **It changes the L2CAP request too.** Look again at `addConnection()`: setting `_supervisionTimeout`
+  makes `updateParameters` true whenever the central's value differs, so we would start sending a
+  parameter-update request on *every* connection, including ones where the interval already suited
+  us. That is a second moving variable, and it partially re-entangles this with §12. Run §14.2 first so
+  the request is at least visible.
+- **If the tick rate really is wrong, setting the value does not fix the rate.** The request would be
+  honoured in name and still expire at the wrong wall-clock time. That failure mode would look like
+  "we set 3 s and it disconnects after 30 s, or never" - which is itself a diagnosis, so the test is
+  still worth running.
+
+### 14.6 BLE sniffer - the only source of ground truth
+
+An nRF52840 dongle running `nRF Sniffer for Bluetooth LE` into Wireshark, ~£10 and an evening.
+
+It is the only way to settle, rather than infer:
+
+- The actual connection interval in force, continuously, including after any L2CAP update.
+- Whether Windows sent *Connection Parameter Update Response (accepted)* and then ignored it - the
+  documented Windows behaviour in §12.2, and currently pure inference on our part.
+- What the last packets before a failure look like, and **which side stops transmitting first.** That
+  single observation separates "the Nano's radio stopped" from "Windows stopped scheduling" and would
+  cut the remaining hypothesis space roughly in half.
+- Whether the supervision timeout is expiring at its nominal wall-clock value (§14.5).
+
+Ranked last only because of setup cost. If §14.1 through §14.5 leave us still guessing, this stops
+being optional.
+
+### 14.7 Worth doing regardless of diagnosis: make the GUI reconnect itself
+
+Not a test - a mitigation, recorded here so it is not lost. The GUI currently never attempts to
+reconnect; every failure needs a human. An automatic retry would not fix presentation A (the device
+is genuinely unreachable until it resets), but combined with the watchdog it would close the loop:
+device reboots itself, GUI notices and re-attaches, the trial continues with a gap in the data rather
+than ending.
+
+Deliberately **not** done yet, because auto-reconnect would mask exactly the events we are currently
+trying to count. It belongs in the §11 cleanup phase, after the diagnosis is settled.
+
+### 14.8 Suggested order
+
+**Revised 2026-09-12 at the user's direction:**
+
+1. **§14.3** A/B/A on the interval - **in progress.** Arm A' is built and flashed; does the failure
+   come back? Answering this first means §14.1 is then run against a build we know the status of.
+2. **§14.1** attenuation repro - changes the cost of everything below it.
+3. **§14.2** log the negotiated parameters - **BUILT, awaiting a flash.**
+4. **§14.4** log RSSI - repo-side, pairs with §14.1 to test the weak-signal hypothesis directly.
+5. **§14.5** explicit supervision timeout - the candidate fix for presentation A.
+6. **§14.6** sniffer - if the above has not settled it.
+
+**None of this blocks tomorrow's labmate stress test.** That run answers a different and more
+immediate question - does the current build survive a real session on a healthy host - and should go
+ahead unchanged, with nothing added that could perturb it.

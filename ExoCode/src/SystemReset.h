@@ -217,7 +217,22 @@ inline uint8_t exo_stall_record();
 //      BLESTALL; RGB fixed while green kept flashing = a live loop slowed to ~20 Hz). But the
 //      link still dies as often - two runs at 41 s and 24 s. So B19 is the FIRST change aimed at
 //      WHY it dies: connection interval 7.5 ms rigid -> 15-30 ms range (ExoBLE.cpp).
-#define EXO_FW_TAG                19u
+// 20 = A/B/A CONTROL, arm A' (doc section 14.3). Connection interval deliberately put BACK to
+//      (6,6) = 7.5 ms pinned - the configuration that failed 10/10 - to test whether the failure
+//      returns. Section 9 rests on a BETWEEN-GROUPS comparison (10 failures on the old build, 2
+//      clean runs on the new one) separated by several days, a library patch, a ping, a lock and a
+//      host reboot. Nothing has ever gone BACK. This build makes the interval the only moving part.
+//      EXPECTED: failure inside ~4 min (baseline mean 225 s). If it does NOT fail, section 9 is in
+//      serious trouble and something else was the real fix.
+// 21 = A/B/A, arm B again: interval restored to (12,24). Flip EXO_BLE_INTERVAL_PINNED to 0.
+#define EXO_BLE_INTERVAL_PINNED   0u
+//        1 = (6, 6)   7.5 ms PINNED  - the original, known-failing configuration   -> build B20
+//        0 = (12, 24) 15-30 ms range - the candidate fix from section 9            -> build B21
+//
+// The build tag is DERIVED from that toggle on purpose. Flipping the interval and forgetting to
+// bump the tag would make the banner claim the wrong build, and the whole point of an A/B/A is that
+// every log is unambiguously attributable to one arm. They cannot disagree now.
+#define EXO_FW_TAG                (EXO_BLE_INTERVAL_PINNED ? 20u : 21u)
 
 #define EXO_STALL_MAGIC           0xE0u
 
@@ -620,6 +635,71 @@ inline String exo_link_stats_string()
              (unsigned long)exo_link_stats[3],
              (unsigned long)exo_link_stats[4],
              (unsigned long)exo_link_stats[5]);
+    return String(b);
+}
+
+//The connection parameters the CENTRAL actually chose, captured off the HCI LE Connection
+//Complete event by a local patch to the SKETCHBOOK copy of ArduinoBLE (HCI.cpp - see the comment
+//block there, and doc section 14.2). extern "C" to avoid depending on C++ mangling across that
+//boundary. If ArduinoBLE is ever updated or reinstalled these vanish and the LINK FAILS TO BUILD -
+//which is deliberate: a silent revert to "we have no idea what the interval is" is exactly the
+//situation section 12 was written about.
+extern "C" {
+    extern volatile uint16_t exo_ble_cp_interval;
+    extern volatile uint16_t exo_ble_cp_latency;
+    extern volatile uint16_t exo_ble_cp_timeout;
+    extern volatile uint16_t exo_ble_cp_count;
+}
+
+/**
+ * @brief ",CPi<interval>_l<latency>_t<timeout>_u<0|1>_n<count>" - what the CENTRAL chose.
+ *
+ * THE POINT OF THIS FIELD: until 2026-09-12 nothing in this firmware had ever read back the
+ * connection interval. BLE.setConnectionInterval() sets what is REQUESTED; the central has final
+ * say, ArduinoBLE discards its answer, and Windows is documented to accept such a request and then
+ * not apply it - randomly. Every "7.5 ms" and "15-30 ms" in the write-ups was a request, not a
+ * measurement. This is the measurement.
+ *
+ * UNITS ARE RAW, as they come off the wire - no conversion, so nothing is lost:
+ *   i = interval, 1.25 ms units.  i6 = 7.5 ms (the pinned value), i24 = 30 ms.
+ *   l = slave latency, in connection events.
+ *   t = supervision timeout, 10 ms units. t500 = 5 s. This is the link's dead-man's switch:
+ *       no valid packet from the central within it and the controller must declare the link lost.
+ *       Directly relevant to presentation A - see doc section 14.5.
+ *   u = would we have sent an L2CAP parameter-update request? Derived from i against our own
+ *       compile-time range, using the SAME test as L2CAPSignalingClass::addConnection().
+ *       This is the field that separates "a relaxed interval helps" from "not ASKING helps" -
+ *       the one alternative an A/B/A cannot rule out on its own.
+ *   n = connections since boot. n0 means we have never connected, so i/l/t are meaningless.
+ *
+ * WHAT IT DOES NOT TELL YOU: whether a later L2CAP update was applied. This is the value the link
+ * OPENED at. If the central accepts an update mid-connection, that stays invisible without a
+ * sniffer (doc section 14.6).
+ */
+inline String exo_ble_cp_string()
+{
+    const uint16_t n = exo_ble_cp_count;
+    if (n == 0u)
+    {
+        return String(",CPnone");
+    }
+
+    const uint16_t iv = exo_ble_cp_interval;
+
+    //Mirror addConnection()'s test exactly: a request goes out only when the central's choice falls
+    //OUTSIDE our range. Kept in lockstep with the values passed to BLE.setConnectionInterval() in
+    //ExoBLE.cpp - if you change one, change the other.
+    const uint16_t our_min = EXO_BLE_INTERVAL_PINNED ? 6u : 12u;
+    const uint16_t our_max = EXO_BLE_INTERVAL_PINNED ? 6u : 24u;
+    const unsigned requested = (iv < our_min || iv > our_max) ? 1u : 0u;
+
+    char b[64];
+    snprintf(b, sizeof(b), ",CPi%u_l%u_t%u_u%u_n%u",
+             (unsigned)iv,
+             (unsigned)exo_ble_cp_latency,
+             (unsigned)exo_ble_cp_timeout,
+             requested,
+             (unsigned)n);
     return String(b);
 }
 

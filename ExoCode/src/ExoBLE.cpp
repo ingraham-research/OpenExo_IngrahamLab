@@ -32,6 +32,10 @@ static uint32_t s_max_write_us    = 0;
 static uint32_t s_sends_since_rx  = 0;
 static bool     s_write_failed    = false;
 
+//The boot-time reset banner, cached so the connect path can append the connection parameters to it
+//without recomputing it. See the ErrorChar write in begin() for why recomputing would be a bug.
+static String s_boot_banner;
+
 //Coarse log2 buckets - we get 8 bits total through GPREGRET2, so precision is not the point;
 //distinguishing "instant" from "blocking" is.
 static uint8_t exo_us_bucket(uint32_t us)
@@ -294,9 +298,13 @@ bool ExoBLE::setup()
     {
         //Append what the Teensy saw on the RT link, so one reconnect tells both halves of the
         //story: what the Nano did, and whether I2C was healthy while it happened.
-        String reset_reason = exo_reset_reason_string() + exo_link_stats_string();
-        char reset_char[reset_reason.length() + 1];
-        reset_reason.toCharArray(reset_char, reset_reason.length() + 1);
+        //Cached, not just written: handle_updates() rewrites ErrorChar at connect to append the
+        //connection parameters (see below), and it must NOT re-enter exo_reset_reason_string() to
+        //do it. That function latches state out of GPREGRET as a side effect, so calling it twice
+        //is how the crash/stall record got erased once before. Cache the string, append to the copy.
+        s_boot_banner = exo_reset_reason_string() + exo_link_stats_string();
+        char reset_char[s_boot_banner.length() + 1];
+        s_boot_banner.toCharArray(reset_char, s_boot_banner.length() + 1);
         _gatt_db.ErrorChar.writeValue(reset_char);
     }
 
@@ -348,7 +356,24 @@ bool ExoBLE::setup()
     //throughput. In that case either revert to (6, 6), or try (6, 24) - which keeps 7.5 ms available
     //as the minimum but lets the host back off to 30 ms when it is busy, testing "rigid" rather than
     //"fast" as the problem.
-    BLE.setConnectionInterval(12, 24);
+    //
+    //---- A/B/A CONTROL EXPERIMENT, 2026-09-12 (doc section 14.3) --------------------------------
+    //Which arm is compiled is set by EXO_BLE_INTERVAL_PINNED in SystemReset.h, NOT here, because
+    //the build tag in the banner is derived from that same symbol - so a log can never misreport
+    //which arm produced it. Flip it there; this file follows.
+    //
+    //  arm A' (=1): (6, 6)   - put the failing configuration BACK. Expect failure inside ~4 min.
+    //  arm B  (=0): (12, 24) - the candidate fix.
+    //
+    //Why bother: section 9's evidence is entirely between-groups and the two groups are separated
+    //by several days AND a library patch AND the ping AND a host reboot. If the failure returns on
+    //arm A' and then goes away again on arm B, the interval is the only thing that moved. If it
+    //does NOT return, something else was doing the work and section 9 needs rewriting.
+    if (EXO_BLE_INTERVAL_PINNED) {
+        BLE.setConnectionInterval(6, 6);
+    } else {
+        BLE.setConnectionInterval(12, 24);
+    }
 
     //No-op unless EXO_CRASH_TRAP_SELFTEST is 1 in SystemReset.h. Placed last so a self-test fault
     //happens after the reset-reason string is already parked in ErrorChar, and before advertising -
@@ -465,6 +490,25 @@ bool ExoBLE::handle_updates()
             _tx_subscribed = false;
             _handshake_sent_this_connection = false;
             _handshake_payload_pending = true;
+
+            //Append the connection parameters the CENTRAL chose (doc section 14.2). They only exist
+            //once the LE Connection Complete event has landed, which is why this cannot be done at
+            //boot with the rest of the banner.
+            //
+            //SAFE TO WRITE HERE, for two reasons worth stating because ErrorChar is BLENotify:
+            //  1. Nobody is subscribed yet. The GUI subscribes to ErrorChar only AFTER its one-shot
+            //     read (QtExoDeviceManager: read at :365, start_notify at :392), so writeValue()
+            //     stores locally and sends nothing. No packet is added to the connect burst - the
+            //     burst that already loses controller rows.
+            //  2. It lands before that read. This runs the first main-loop pass after the link comes
+            //     up; the GUI's read is several seconds later. If it ever did lose the race the only
+            //     cost is a banner without the CP field - degraded, never wrong.
+            {
+                String banner = s_boot_banner + exo_ble_cp_string();
+                char banner_char[banner.length() + 1];
+                banner.toCharArray(banner_char, banner.length() + 1);
+                _gatt_db.ErrorChar.writeValue(banner_char);
+            }
         }
 
         advertising_onoff(current_status == 0);

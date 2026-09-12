@@ -257,9 +257,129 @@ Listed so they are not mistaken for evidence:
 
 - `_pendingPkt` and `_maxPkt` values at runtime — never read.
 - The negotiated ATT MTU — never read.
+- **The connection interval actually in effect — never read, in ANY build.** `setConnectionInterval()`
+  sets only what is REQUESTED, once, at connection setup. ArduinoBLE discards the central's
+  accept/reject (`L2CAPSignalingClass::connectionParameterUpdateResponse()` is an empty function) and
+  its `LE_META_EVENT` enum has no `CONN_UPDATE_COMPLETE` (0x03), so the firmware never learns what
+  was applied. Windows is documented to sometimes accept such a request without applying it, and to
+  do so randomly. **Every reference to "7.5 ms" or "15-30 ms" in these documents describes what was
+  requested, not what was in force.**
 - Actual bytes per RT notification on the wire — never measured.
 - Whether pull-up resistors are present on the Nano's `Wire` pins — never checked.
 - Whether the upstream authors experience the same failure — never asked.
 - Whether B19 holds up across repeated, independent runs — **only one run so far.**
 - The actual negotiated connection interval after the change — never read back.
 - The Nano's program counter during a freeze — no SWD access.
+
+---
+
+# APPENDIX - EXTERNAL REPORTS (NOT OUR OBSERVATIONS)
+
+**This appendix is deliberately fenced off from everything above.** Nothing here was measured on our
+hardware. It is included because it is checkable fact rather than inference - direct quotation from a
+public bug tracker, with dates and authors - and because it bears directly on several things above.
+**Do not let it substitute for our own measurements.**
+
+Source: <https://github.com/arduino-libraries/ArduinoBLE/issues/45>, *"Weak signal doesn't trigger
+disconnect() and hangs in multiple places"*. Opened 2019-12-19 by fgaetani, 19 comments, last
+activity 2025-03-20, **state: OPEN**, labels `type: imperfection` / `status: waiting for information`.
+
+## A1. Facts about the library itself (verified directly, 2026-09-12)
+
+- Our sketchbook ArduinoBLE is `2.1.0`.
+- `2.1.0` is the **latest release** (published 2026-06-22 per the GitHub releases API).
+- Upstream `master` **still contains the unbounded `while (_pendingPkt >= _maxPkt) { poll(); }`** at
+  `src/utility/HCI.cpp:638`. Checked by fetching the raw file from `master` on 2026-09-12.
+- `BLE.setSupervisionTimeout()` exists in 2.1.0 (`BLELocalDevice.cpp:408`) and is **not called
+  anywhere in our firmware**.
+- `L2CAPSignalingClass::addConnection()` **receives** the central's chosen `interval`, `latency` and
+  `supervisionTimeout` as arguments, from the HCI LE Connection Complete event (`HCI.cpp:1152`). It
+  uses `interval` and `supervisionTimeout` and discards `latency`. None are stored or exposed.
+
+## A2. Quotations - the hang (our presentation B)
+
+fgaetani, opening post, 2019-12-19:
+
+> Code execution remained locked in the `writeValue()` function, specifically in the
+> `HCIClass::sendAclPkt()` function. The code remained locked in the `while` loop, because the device
+> is disconnected.
+
+Proposed patch, same post:
+
+> ```cpp
+> int k = 0;
+> while (_pendingPkt >= _maxPkt) { k++; if (k > _maxPkt) break; poll(); }
+> ```
+
+## A3. Quotations - the unreachable device (our presentation A)
+
+morettigiorgio, 2020-01-24:
+
+> if i forced a BLE.disconnect() (during the connection lost), central.connected() and BLE.central()
+> returned the correct false, but my Arduino peripheral (Arduino Nano 33 BLE and Arduino Nano 33 BLE
+> Sense) is no more discoverable, not even with another BLE.advertise() cmd. It's very strange... I
+> have to restart
+
+JoeyTolentino, 2020-02-07:
+
+> when I walk away, and I lose connectivity, the little display still indicates that "something is
+> connected" and the IMU data is still updating as it should; however, I'm unable to see the device
+> to reconnect to it when I'm near by. [...] The only way to reconnect would be to press the reset
+> button, or cut power.
+
+## A4. Quotations - the patch does NOT fix presentation A
+
+fgaetani, 2020-02-26:
+
+> The reported issue #45 is different, in my case the microcontroller lock in loop in that cycle and
+> by modifying in that way I solved it. While the other issue [...] The board remains apparently
+> connected and is no longer visible from other devices. The only solution is to reset the
+> microcontroller manually or through a watchdog
+
+morettigiorgio, 2020-01-24:
+
+> I tested the above modify too [...] but without having solved.
+
+JoeyTolentino, 2020-02-07:
+
+> I've tried adding the recommended code by @fgaetani and I did not realize a behaviour change by the
+> hardware.
+
+## A5. Quotations - trigger and reproduction
+
+Hoffa25, 2020-05-01, giving a repro procedure:
+
+> Move the phone to a spot were the connection is really weak and it continuously jumps between
+> connected and disconnected (9-10 meters and/or some object in front). Most of the time the error
+> will occur within 5 minutes. To make it come quicker you can force disconnects by putting objects
+> around the arduino (your hands, another smartphone, tablet, whatever blocks the signal well). When
+> disconnected keep covering the arduino for 10-30s and then remove. Repeat until error occurs.
+
+Hoffa25, same post, on the aftermath:
+
+> As you see the loop() stops looping. Also a really weird thing starts: every 30 s from then on the
+> eventhandlers get triggered with disconnected and connected. Even if I have removed my app!?
+
+polldo (Arduino), 2020-07-02, **failing to reproduce**:
+
+> Using your sketch I was not able to observe the reported error. [...] Even after several
+> disconnection events caused by the weakness of the bluetooth signal, the nano33ble continues to
+> loop and both the connection and disconnection events are correctly triggered. However, the strange
+> behavior is that when the connection is weak the returned RSSI value appears to be 0.
+
+## A6. Related issue history
+
+- Issue #33, *"BLE nano 33 does not report or disconnect from central"* (2019-10-02) - the
+  peripheral-does-not-notice-disconnection issue. **Closed 2019-12-02** by PR #44.
+- PR #44, *"Cordio: BLE thread loop fixes"* - among other things restored `WSF_MS_PER_TICK` to match
+  what mbed was compiled with, the author noting it *"needs to match the value mbed was compiled with
+  for the supervision timeout to match."*
+- Multiple users in #45 state that #44 did **not** resolve the behaviour in practice
+  (alexisicte 2019-12-19, morettigiorgio 2020-01-24).
+
+## A7. What this appendix does NOT establish
+
+- **Not** that our failure and theirs have the same cause. The symptoms match; the trigger they all
+  describe is weak signal, and ours occurs on a bench at ~1 m. Untested either way.
+- **Not** that our RSSI behaves like theirs. We have never logged RSSI.
+- **Not** anything about connection intervals. Nobody in that thread measured one either.
