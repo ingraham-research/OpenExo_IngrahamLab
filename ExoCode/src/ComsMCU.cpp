@@ -229,7 +229,13 @@ void ComsMCU::update_gui()
             rt_data_msg.data[_mark_index] = my_mark;
         }
 
-        _exo_ble->send_message(rt_data_msg);
+        //Bisect round 2: everything above still runs (I2C receive, unpacking, life_pulse) - only
+        //the BLE forward is suppressed. See RT_BLE_FORWARD in Config.h.
+        #if RT_BLE_FORWARD
+            _exo_ble->send_message(rt_data_msg);
+        #else
+            (void)rt_data_msg;
+        #endif
 
         #if COMSMCU_DEBUG
             logger::println("ComsMCU::update_gui->sent message");

@@ -26,6 +26,50 @@ static uint32_t s_last_rx_ms = 0;
 //client) that does not ping can never reboot the board. Fail safe, not fail fast.
 static bool s_ping_seen = false;
 
+//What the send path looked like since the last byte arrived from the GUI. Reset on every RX, so
+//these describe exactly the silent window the stall detector fires on. See exo_ble_stall_reset().
+static uint32_t s_max_write_us    = 0;
+static uint32_t s_sends_since_rx  = 0;
+static bool     s_write_failed    = false;
+
+//Coarse log2 buckets - we get 8 bits total through GPREGRET2, so precision is not the point;
+//distinguishing "instant" from "blocking" is.
+static uint8_t exo_us_bucket(uint32_t us)
+{
+    uint32_t v = us >> 6;   //64 us units
+    uint8_t b = 0;
+    while (v && b < 15) { v >>= 1; b++; }
+    return b;
+}
+
+//Coarse send-count bucket: 0 = none at all, 1 = 1-9, 2 = 10-99, 3 = 100+. Two bits is enough - the
+//distinction that matters is "we were talking into the void" versus "we had nothing to send".
+static uint8_t exo_count_bucket(uint32_t c)
+{
+    if (c == 0)   { return 0; }
+    if (c < 10)   { return 1; }
+    if (c < 100)  { return 2; }
+    return 3;
+}
+
+//Layout, 8 bits, packed into GPREGRET2 by exo_ble_stall_reset():
+//  bits 0-3  max writeValue() duration bucket, ~2^(w-1) * 64 us (0 = under 64 us)
+//  bit  4    a writeValue() returned false at some point
+//  bits 5-6  notifications attempted during the silence (see exo_count_bucket)
+//  bit  7    ALWAYS 1
+//Bit 7 exists so the byte can never be 0. GPREGRET2 is shared with the watchdog stage breadcrumb,
+//and a zero there already means "nothing recorded" - without this marker a diag of all-zeros would
+//be indistinguishable from a blank, which is exactly the ambiguity that wasted three bench runs.
+#define EXO_DIAG_MARKER 0x80u
+
+uint8_t exo_ble_link_diag()
+{
+    return (uint8_t)((exo_us_bucket(s_max_write_us) & 0x0Fu)
+                     | (s_write_failed ? 0x10u : 0x00u)
+                     | ((exo_count_bucket(s_sends_since_rx) & 0x03u) << 5)
+                     | EXO_DIAG_MARKER);
+}
+
 namespace
 {
     // 19 bytes is deliberate: the default ATT MTU is 23, leaving 20 usable. Do NOT raise this
@@ -171,6 +215,12 @@ ExoBLE::ExoBLE()
 
 bool ExoBLE::setup()
 {
+    //A watchdog surviving a warm reset is still counting while this runs (the nRF52840 WDT is only
+    //cleared by a power-on reset or by firing). BLE.begin() is the longest single block on the boot
+    //path after the UART waits, so bracket it. Harmless when no watchdog is running.
+    exo_wdt_feed();
+    exo_wdt_stage(EXO_STAGE_BLE_BEGIN);
+
     if (!BLE.begin())
     {
         utils::spin_on_error_with("BLE.begin() failed");
@@ -242,7 +292,9 @@ bool ExoBLE::setup()
     //send_error() above is a no-op at this point (it early-returns while _connected is 0), so this
     //write is what ErrorChar actually holds until the first runtime error overwrites it.
     {
-        String reset_reason = exo_reset_reason_string();
+        //Append what the Teensy saw on the RT link, so one reconnect tells both halves of the
+        //story: what the Nano did, and whether I2C was healthy while it happened.
+        String reset_reason = exo_reset_reason_string() + exo_link_stats_string();
         char reset_char[reset_reason.length() + 1];
         reset_reason.toCharArray(reset_char, reset_reason.length() + 1);
         _gatt_db.ErrorChar.writeValue(reset_char);
@@ -274,7 +326,29 @@ bool ExoBLE::setup()
     _gatt_db.TXChar.setEventHandler(BLESubscribed, ExoBLE::_on_tx_subscribed);
 
 
-    BLE.setConnectionInterval(6, 6);
+    exo_wdt_feed();   //BLE.begin() and the GATT registration above are behind us
+
+    //CONNECTION INTERVAL EXPERIMENT, 2026-09-11. Was `setConnectionInterval(6, 6)`.
+    //
+    //Units are 1.25 ms, so (6, 6) pinned the link at 7.5 ms - the BLE MINIMUM - as both the min AND
+    //the max, giving the central no range to negotiate within. That demands 133 connection events
+    //per second, every second, from a Windows host that is also scheduling its own radio work.
+    //
+    //WHY CHANGE IT: by 2026-09-11 the failure was characterised as the BLE link dying every 20 s to
+    //13 min, after which the controller stops completing packets (see the doc, section 3.9). Every
+    //fix so far addressed what happens AFTER that; this is the first change aimed at why it happens.
+    //A rigid 7.5 ms interval is the most aggressive thing this firmware asks of the link.
+    //
+    //(12, 24) = 15-30 ms. The RT stream is ~100 notifications/s, which needs ~1.5-3 packets per
+    //connection event in this range - normal for a BLE central, but NOT something this setup has
+    //ever exercised, because at 7.5 ms it only ever needed <1 packet per event.
+    //
+    //WATCH FOR: if the RT stream thins out (gaps in exo time in the CSV, plots updating slower than
+    //100 Hz) then the host is NOT sending multiple packets per event, and the interval is throttling
+    //throughput. In that case either revert to (6, 6), or try (6, 24) - which keeps 7.5 ms available
+    //as the minimum but lets the host back off to 30 ms when it is busy, testing "rigid" rather than
+    //"fast" as the problem.
+    BLE.setConnectionInterval(12, 24);
 
     //No-op unless EXO_CRASH_TRAP_SELFTEST is 1 in SystemReset.h. Placed last so a self-test fault
     //happens after the reset-reason string is already parked in ErrorChar, and before advertising -
@@ -352,7 +426,7 @@ bool ExoBLE::handle_updates()
         {
             //Records EXO_STALL_MAGIC and warm-resets, so the next boot's banner says BLESTALL_n.
             //Warm keeps GPREGRET, which is what makes this self-confirming rather than a guess.
-            exo_ble_stall_reset();
+            exo_ble_stall_reset(exo_ble_link_diag());
         }
 
         if (_connected == current_status)
@@ -436,7 +510,16 @@ void ExoBLE::send_message(BleMessage &msg)
 
     int bytes_to_send = _ble_parser.package_raw_data(buffer, msg);
 
-    _gatt_db.TXChar.writeValue(buffer, bytes_to_send);
+    //Time the write. If ArduinoBLE's `while (_pendingPkt >= _maxPkt) poll();` (HCI.cpp:636) is
+    //engaged this is where it shows up - the call stops returning promptly. Cheap enough to leave on
+    //the 100 Hz RT path: two micros() reads and a compare.
+    const uint32_t t0 = micros();
+    const bool write_ok = _gatt_db.TXChar.writeValue(buffer, bytes_to_send);
+    const uint32_t dt = micros() - t0;
+
+    if (dt > s_max_write_us) { s_max_write_us = dt; }
+    if (!write_ok)           { s_write_failed = true; }
+    s_sends_since_rx++;
 }
 
 void ExoBLE::send_error(int error_code, int joint_id)
@@ -516,6 +599,11 @@ void ble_rx::on_rx_recieved(BLEDevice central, BLECharacteristic characteristic)
     {
         s_ping_seen = true;
     }
+
+    //A byte arrived, so the link is demonstrably alive: start the send-path measurement over.
+    s_max_write_us   = 0;
+    s_sends_since_rx = 0;
+    s_write_failed   = false;
 
         #if EXOBLE_DEBUG
             logger::print("On Rx Recieved: ");

@@ -55,6 +55,8 @@ class QtExoDeviceManager(QtCore.QObject):
         self._error_notify_enabled = False
         self._intentional_disconnect = False  # Track if disconnect was intentional
         self._next_connect_timeout_s: Optional[float] = None  # one-shot connect timeout override
+        # Serialises everything that writes to the Nano's UART characteristic. See _submit_tx().
+        self._tx_lock_obj: Optional[asyncio.Lock] = None
         # Persistent asyncio loop running in a background thread
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
@@ -683,6 +685,50 @@ class QtExoDeviceManager(QtCore.QObject):
         self.logger.debug("Connection check passed")
         return True
 
+    def _tx_lock(self) -> asyncio.Lock:
+        """The lock guarding the UART TX characteristic. Created lazily on first use."""
+        if self._tx_lock_obj is None:
+            self._tx_lock_obj = asyncio.Lock()
+        return self._tx_lock_obj
+
+    def _submit_tx(self, coro):
+        """Submit a coroutine that WRITES to the Nano, serialised against all other writers.
+
+        WHY THIS EXISTS: a single logical command is often several separate BLE writes. A parameter
+        update is five - the command byte 'f' and then four 8-byte doubles:
+
+            await write(b"f"); for val in (...): await write(struct.pack("<d", val))
+
+        Every `await` yields to the event loop, so any other writer scheduled at that moment runs
+        BETWEEN them and injects its bytes into the middle of the payload.
+
+        The Nano cannot recover from that. BleParser is a state machine: once it has seen a command
+        byte it buffers everything until it has collected exactly `expecting * 8` bytes -
+
+            if (_bytes_collected == _working_message.expecting * 8) { ...complete... }
+
+        - an exact equality. One stray byte makes that 33 instead of 32, which is never equal, so
+        `_waiting_for_data` stays true forever and every subsequent command byte is swallowed as
+        payload. Worse, it keeps appending into `byte _buffer[64]` (BleParser.h), so at 65 bytes it
+        runs off the end of the array.
+
+        This was introduced by the 2 s liveness ping added 2026-09-11, which writes to the same
+        characteristic on a timer and will happily land mid-sequence. But the hazard predates it:
+        any two overlapping command sequences could already corrupt each other, which matters for
+        the external control loop in Python_GUI/external_control/ because it sends parameter updates
+        back to back.
+
+        Serialising at submit time - rather than per write - is what makes this correct: the lock
+        must span the WHOLE sequence, not each individual write.
+
+        Deliberately NOT applied to _submit() generally: connect, scan and disconnect coroutines
+        must not queue behind a command sequence.
+        """
+        async def _serialised():
+            async with self._tx_lock():
+                return await coro
+        return self._submit(_serialised())
+
     def _submit(self, coro):
         """Submit coroutine to event loop with error handling and logging."""
         try:
@@ -764,7 +810,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def pingDevice(self):
@@ -782,6 +828,12 @@ class QtExoDeviceManager(QtCore.QObject):
         if not self._is_connected or self._client is None or self._loop is None:
             return
 
+        # Skip rather than queue: a ping delayed behind a command sequence has already lost its
+        # meaning, and queuing them risks a burst after a long sequence (e.g. end-trial).
+        lock = self._tx_lock_obj
+        if lock is not None and lock.locked():
+            return
+
         async def _do():
             try:
                 await self._client.write_gatt_char(UART_TX_UUID, b"p", response=False)
@@ -789,7 +841,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 pass
 
         try:
-            self._submit(_do())
+            self._submit_tx(_do())
         except Exception:
             pass
 
@@ -811,7 +863,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 self.logger.exception(f"Error in calibrateTorque: {ex}")
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def calibrateFSRs(self):
@@ -831,7 +883,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 self.logger.exception(f"Error in calibrateFSRs: {ex}")
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def motorOff(self):
@@ -845,7 +897,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def motorOn(self):
@@ -859,7 +911,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot(list)
     def updateTorqueValues(self, parameter_list: list):
@@ -892,7 +944,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot(float, float)
     def sendFsrValues(self, left_fsr: float, right_fsr: float):
@@ -911,7 +963,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def sendPresetFsrValues(self):
@@ -928,7 +980,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def stopTrial(self):
@@ -942,7 +994,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def switchToAssist(self):
@@ -956,7 +1008,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def switchToResist(self):
@@ -970,7 +1022,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot(float)
     def sendStiffness(self, stiffness: float):
@@ -986,7 +1038,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot(object)
     def newStiffness(self, stiffnessInput):
@@ -1009,7 +1061,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def send_acknowledgement(self):
@@ -1023,7 +1075,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def beginTrial(self):
@@ -1058,7 +1110,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 self.logger.exception(f"Error in beginTrial: {ex}")
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     def _ensure_loop(self):
         if self._loop and self._loop_thread and self._loop_thread.is_alive():

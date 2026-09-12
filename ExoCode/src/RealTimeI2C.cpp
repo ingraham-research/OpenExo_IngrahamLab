@@ -5,6 +5,22 @@
 #include "Logger.h"
 #include <Wire.h>
 
+#if defined(ARDUINO_TEENSY36) || defined(ARDUINO_TEENSY41)
+//Definitions for the counters declared in RealTimeI2C.h. Teensy-only: the Nano is the I2C slave and
+//receives in an ISR, so it has no transmit result to inspect.
+namespace rt_i2c_stats
+{
+    volatile uint32_t frames_sent = 0;
+    volatile uint32_t error_count = 0;
+    volatile uint32_t last_ok_ms  = 0;
+    volatile uint8_t  last_error  = 0;
+    volatile uint32_t worst_gap_ms = 0;
+    volatile uint32_t max_consec_err = 0;
+    volatile uint32_t cur_consec_err = 0;
+    volatile bool     had_first_ok  = false;
+}
+#endif
+
 //#define RT_I2C_DEBUG 1
 
 #define FIXED_POINT_FACTOR 100
@@ -100,7 +116,42 @@ void real_time_i2c::msg(float* data, int len)
     #if defined(ARDUINO_TEENSY36) || defined(ARDUINO_TEENSY41)
         MY_WIRE.beginTransmission(RT_I2C_ADDR);
         MY_WIRE.send(bytes, packed_len);
-        MY_WIRE.endTransmission();
+
+        //The return code used to be discarded. It is the ONLY observer of this link that survives a
+        //Nano reboot, and it answers the question the Nano cannot answer about itself: when the Nano
+        //goes dark, was it still acknowledging on the bus?
+        //  0 = ok, 1 = data too long, 2 = NACK on address, 3 = NACK on data, 4 = other
+        //A 2 means the Nano stopped ACKing, i.e. the Nano died first and the RT stall is a symptom.
+        //Staying at 0 while the Nano is dark means frames are still landing in its receive ISR and
+        //it is the MAIN LOOP that is wedged, with I2C perfectly healthy.
+        const uint8_t rt_rc = MY_WIRE.endTransmission();
+        rt_i2c_stats::frames_sent++;
+        if (rt_rc == 0)
+        {
+            const uint32_t now = millis();
+            if (rt_i2c_stats::had_first_ok)
+            {
+                //Only meaningful once there IS a previous success to measure from.
+                const uint32_t gap = now - rt_i2c_stats::last_ok_ms;
+                if (gap > rt_i2c_stats::worst_gap_ms)
+                {
+                    rt_i2c_stats::worst_gap_ms = gap;
+                }
+            }
+            rt_i2c_stats::had_first_ok = true;
+            rt_i2c_stats::last_ok_ms = now;
+            rt_i2c_stats::cur_consec_err = 0;
+        }
+        else
+        {
+            rt_i2c_stats::error_count++;
+            rt_i2c_stats::last_error = rt_rc;
+            rt_i2c_stats::cur_consec_err++;
+            if (rt_i2c_stats::cur_consec_err > rt_i2c_stats::max_consec_err)
+            {
+                rt_i2c_stats::max_consec_err = rt_i2c_stats::cur_consec_err;
+            }
+        }
     #endif
 }
 

@@ -3,6 +3,7 @@
 #include "Arduino.h"
 #include <string.h>
 #include "GetBulkChar.h"
+#include "SystemReset.h"   //exo_wdt_feed() - see the note on the two wait loops below
 
 
 // --- Shared Global Constants (MUST MATCH SENDER) ---
@@ -48,6 +49,13 @@ void readSingleMessageBlocking() {
     // 2. Transmit the entire message in one burst using Serial.write().
     // This is the most efficient method for large C-strings on Arduino.
     while (!Serial1.available()) {
+		//FEED THE WATCHDOG HERE. The nRF52840 WDT is NOT cleared by a warm reset - only by a
+		//power-on reset, or by the dog itself firing. So after any NVIC_SystemReset (our link-stall
+		//detector, or End Trial) the dog is STILL RUNNING with its 5 s window while this loop can
+		//block for up to kReadyTimeoutMs (10 s). Without this feed every warm reset costs an extra
+		//reboot AND destroys the GPREGRET evidence that reset was meant to carry. exo_wdt_feed() is
+		//a single register write and is harmless when no watchdog is running.
+		exo_wdt_feed();
 		Serial1.write(txBuffer_NanoReady, message_length);
 		//Serial.print("\nCharacter R sent.");
 		digitalWrite(LEDR, HIGH);
@@ -67,6 +75,10 @@ void readSingleMessageBlocking() {
 
     // The loop runs indefinitely until the messageComplete flag is set to true.
     while (!messageComplete) {
+		//Same reason as the ready loop above: this can block for kReceiveTimeoutMs (8 s) and a
+		//watchdog surviving from before the reset would bite partway through.
+		exo_wdt_feed();
+
         // Only proceed if data is available in the UART buffer
         while (Serial1.available()) {
 			//Serial.print("\nSerial.available() > 0, incomingChar:");

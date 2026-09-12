@@ -27,7 +27,34 @@
 	#define CRITICAL_BATT_VAL 21 //In volts. Battery voltage below this will trigger the low battery warning in the GUI.
 	#define RESISTOR_1 21250 //Set it to the measured resistance of R1 on the OpenExo Board 0.5.1 Mark 3, and update the volt_sense pin mapping in Board.h
 	#define RESISTOR_2 3275 //Set it to the measured resistance of R2 on the OpenExo Board 0.5.1 Mark 3, and update the volt_sense pin mapping in Board.h
+    //Bisect round 1 used REAL_TIME_I2C 0 and survived ~40 min, but removed I2C traffic AND the BLE
+    //notification flood together. Round 2 (RT_BLE_FORWARD, below) split them and cleared I2C.
+    //The Nano stops servicing interrupts entirely at the freeze (I2C ACKs stop for >=3 s AND both
+    //LEDs freeze solid), so the question is whether the RT path is involved at all. With this at 0
+    //the Teensy stops pushing RT frames over I2C and the Nano stops forwarding them over BLE.
+    //EXPECT: no plots, no CSV data, and the green LED_PWR permanently solid (it is toggled only
+    //inside the `if (new_rt_data)` branch). That is the experiment working, not a new fault.
+    //If it now runs indefinitely, the RT path is implicated. If it still freezes, it is not.
+    //NB the UART fallback for RT is dead (uart_commands.h:695 - float_values is `static` in a
+    //header so writer and reader are different TUs), which is why this removes the data entirely
+    //rather than rerouting it.
     #define REAL_TIME_I2C 1
+    //BISECT ROUND 2 IS COMPLETE and this is back to 1 - normal operation. Kept as a flag because
+    //it is the cleanest way to re-run the experiment. Result: with RT notifications suppressed the
+    //device ran 30+ min with I2C fully live; with them enabled it failed in 50-789 s across nine
+    //runs. The BLE notification stream is a NECESSARY CONDITION for the failure; I2C is not.
+    //0 = the Nano still receives RT frames over I2C exactly as normal, but does NOT forward them
+    //over BLE. That isolates the two things round 1 removed together:
+    //   still freezes  -> the I2C path is the cause
+    //   runs long      -> the BLE notification flood is the cause, and the prime suspect is
+    //                     ArduinoBLE's unbounded `while (_pendingPkt >= _maxPkt) poll();`
+    //                     (HCI.cpp:636) busy-waiting in the main thread and starving receiveThd,
+    //                     the lower-priority Wire slave thread - which would stop I2C ACKs and
+    //                     freeze both LEDs without any bus fault at all.
+    //NOTE the green LED_PWR still works in this build (life_pulse runs on RT arrival, which is
+    //upstream of the BLE send), so it remains a valid liveness indicator here - unlike round 1.
+    #define RT_BLE_FORWARD 1
+
     #define LOOP_FREQ_HZ 500
     #define LOOP_TIME_TOLERANCE 0.1 
     

@@ -1130,9 +1130,14 @@ class MainWindow(QtWidgets.QMainWindow):
         "PORBOR":   "power-on or BROWNOUT. No crash was recorded. If nobody power-cycled it,\n"
                     "             this is a power event - or a hang that needed a manual cycle.",
         "LOCKUP":   "CPU LOCKUP - a hard fault escalated. This is a firmware crash.",
-        "SREQ":     "software reset (NVIC_SystemReset). Expected right after an End Trial 'Z';\n"
-                    "             unexpected otherwise - could be an Mbed fault handler reboot.",
-        "DOG":      "watchdog timeout - but this firmware configures no watchdog. Investigate.",
+        "SREQ":     "software reset (NVIC_SystemReset). Expected in THREE cases, and the rest of\n"
+                    "             this line says which: BLESTALL_n = our BLE link-stall detector\n"
+                    "             rebooted the Nano because the GUI went silent while the stack\n"
+                    "             still thought it was connected (NOT an error - the recovery\n"
+                    "             working as designed); CRASH_0x = an Mbed fault handler reboot;\n"
+                    "             and a bare SREQ right after an End Trial 'Z'. A bare SREQ with\n"
+                    "             no End Trial and no suffix is the only unexplained case.",
+        "DOG":      "watchdog timeout - the Nano stopped feeding the dog and rebooted itself. The STAGE_n on this line says which loop() phase it died in; STAGE_7 (ARMED) means it died on the boot path before the first full pass.",
         "RESETPIN": "reset pin - the button was pressed, or the board was re-flashed.",
         "VBUS":     "USB VBUS detected - board woke on USB power being applied.",
     }

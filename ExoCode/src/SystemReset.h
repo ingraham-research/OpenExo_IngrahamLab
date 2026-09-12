@@ -7,6 +7,7 @@
 
 #include "Arduino.h"
 #include <stdio.h>   //snprintf, used to format the reset-reason string
+#include "Config.h"  //REAL_TIME_I2C, reported in the banner as rt<0|1>
 
 #if defined(ARDUINO_TEENSY36) || defined(ARDUINO_TEENSY41)
 #define CPU_RESTART_ADDR (uint32_t *)0xE000ED0C
@@ -120,6 +121,7 @@ inline uint32_t exo_reset_reason_code()
 //Forward declaration: exo_wdt_boot_count() below must latch any pending crash record BEFORE it
 //overwrites GPREGRET with the watchdog count. Defined further down; inline, same translation unit.
 inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out);
+inline uint8_t exo_stall_record();
 
 /* ===========================  HARDWARE WATCHDOG  ===========================
  * WHY THIS EXISTS: the mid-trial freeze is a HANG, not a fault. Proven
@@ -182,6 +184,41 @@ inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out);
 //0xE0 = "the BLE link went dead while we still thought we were connected, so we reset ourselves".
 //This is the ONLY marker that positively confirms the link-stall diagnosis: it is written by our own
 //code on a deliberate warm reset, so seeing it in the banner means the detector fired, not a guess.
+//Build tag, appended to every reset-reason banner. Bump this whenever the instrumentation changes.
+//WHY: three bench runs were spent arguing about what a STAGE_0 meant, when the real question was
+//"which firmware is actually on the board". The banner now answers that itself.
+//  9 = boot-path stages 8-15, GPREGRET2 no longer blanked, send-path diag with the 0x80 marker
+// 10 = .noinit RAM breadcrumb alongside GPREGRET2, banner reports both as STAGEn<n>_g<g>
+// 11 = .noinit breadcrumb latched at the top of setup() with the register copy. B10 CONFIRMED
+//      that a watchdog reset wipes GPREGRET2 (g0 with a known non-zero stage in flight), so
+//      the RAM copy is the one to trust - B10's STAGEn15 was it reporting its own footprint.
+// 12 = Teensy RT-I2C health counters fetched at boot and appended as I2Cf<n>_e<n>_c<n>_t<n>
+// 13 = adds w<n>, the WORST gap ever seen between successful RT transmissions. t is sampled
+//      after the Nano's ~18-26 s reboot and so describes the recovery, not the failure; w does
+//      not move once the event is over, so it is the field to trust.
+// 14 = link stats pre-scaled + clamped for the int16x100 UART (B13's f0/e165 was a wrap), and
+//      a .noinit boot counter reported as b<n> to settle whether that section is retained
+// 15 = B14 ANSWERED THAT: b1 on every boot, so .noinit is zeroed at startup and neither it nor
+//      GPREGRET2 survives a watchdog reset - the STAGE breadcrumb has never had a working
+//      store, do not trust STAGEn/g. Adds x<n> = longest run of consecutive I2C failures, and
+//      fixes worst_gap measuring its first interval from boot instead of from a real success.
+// 16 = RT-I2C BISECT BUILD. REAL_TIME_I2C forced to 0 in Config.h; banner carries rt<0|1> so the
+//      build is never in doubt. B15 established the failure is an interrupt-level stop, not a
+//      loop hang (x300 capped = >=3 s of unbroken I2C silence, both LEDs frozen), and no
+//      in-Nano store survives it - so this bisects by subsystem instead of instrumenting more.
+// 17 = bisect round 2. REAL_TIME_I2C back to 1, RT_BLE_FORWARD 0: I2C runs normally, only the
+//      BLE forward is suppressed. Round 1 (rt0) survived ~40 min but removed I2C traffic AND
+//      the BLE notification flood together; this splits them. Banner carries rt<n>_fw<n>.
+// 18 = NORMAL OPERATION restored (rt1_fw1) PLUS the bounded-wait patch to the sketchbook copy of
+//      ArduinoBLE (HCI.cpp sendAclPkt - see that file comment and doc section 8). THIS BUILD IS THE
+//      TEST OF THE FIX: if presentation B (everything frozen solid) stops happening, the unbounded
+//      spin was the amplifier. If it still happens, the spin is exonerated - cheaply either way.
+// 19 = B18 CONFIRMED the spin was the amplifier (w10 = the 50 ms timeout firing; DOG became
+//      BLESTALL; RGB fixed while green kept flashing = a live loop slowed to ~20 Hz). But the
+//      link still dies as often - two runs at 41 s and 24 s. So B19 is the FIRST change aimed at
+//      WHY it dies: connection interval 7.5 ms rigid -> 15-30 ms range (ExoBLE.cpp).
+#define EXO_FW_TAG                19u
+
 #define EXO_STALL_MAGIC           0xE0u
 
 #define EXO_WDT_MAGIC             0xD0u
@@ -199,14 +236,52 @@ inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out);
 #define EXO_STAGE_UPDATE_UART   4u
 #define EXO_STAGE_UPDATE_GUI    5u
 #define EXO_STAGE_HANDLE_ERRORS 6u
+//Stamped by exo_wdt_start(). Seeing this in a banner means the dog fired after arming but before the
+//loop reached its first breadcrumb - i.e. a boot-path stall, not a steady-state hang. STAGE_0 now
+//means only "the previous boot recorded nothing", e.g. it ended in a true power-on.
+#define EXO_STAGE_ARMED         7u
+
+//BOOT-PATH stages. Added after three runs reported the useless STAGE_0: the loop stages only cover
+//steady state, so anything dying before the first complete pass was indistinguishable from "nothing
+//recorded". These are stamped from setup() onward so the breadcrumb is NEVER 0 on a live board.
+#define EXO_STAGE_SETUP_ENTRY   8u   //setup() reached at all
+#define EXO_STAGE_BULK_READ     9u   //inside readSingleMessageBlocking() - can block ~18 s
+#define EXO_STAGE_GET_CONFIG    10u  //inside UART get_config() - can block ~8 s
+#define EXO_STAGE_I2C_INIT      11u  //real_time_i2c::init()
+#define EXO_STAGE_SETUP_DONE    12u  //end of setup(), about to enter loop()
+#define EXO_STAGE_CTOR_EXODATA  13u  //loop() pass 1: constructing ExoData
+#define EXO_STAGE_CTOR_COMSMCU  14u  //loop() pass 1: constructing ComsMCU -> runs ExoBLE::setup()
+#define EXO_STAGE_BLE_BEGIN     15u  //inside ExoBLE::setup(), around BLE.begin()
+#define EXO_STAGE_LINK_STATS    16u  //fetching the Teensy's RT-I2C counters over UART
 
 /**
  * @brief Stamp the current loop() phase into GPREGRET2. Cheap: one register write, no branch.
+ */
+//Defined in SystemReset.cpp - a .noinit RAM breadcrumb that, unlike GPREGRET2, is expected to
+//survive a watchdog reset. See the long comment there.
+#if defined(EXO_HAVE_WDT)
+void exo_noinit_stage_set(uint8_t stage);
+uint8_t exo_noinit_stage_get();
+uint8_t exo_noinit_boot_count();
+#else
+//Teensy has neither a watchdog nor GPREGRET; these compile away to nothing.
+inline void exo_noinit_stage_set(uint8_t) {}
+inline uint8_t exo_noinit_stage_get() { return 0; }
+inline uint8_t exo_noinit_boot_count() { return 0; }
+#endif
+
+/**
+ * @brief Stamp the current phase. Writes BOTH stores on purpose.
+ *
+ * GPREGRET2 is kept because it is what carries the link diagnostic through a SREQ (that path is
+ * proven to work). The .noinit copy is what should survive a DOG. Reporting both lets the banner
+ * show which store actually retained anything, instead of us guessing again.
  */
 inline void exo_wdt_stage(uint8_t stage)
 {
 #if defined(EXO_HAVE_WDT)
     NRF_POWER->GPREGRET2 = (uint32_t)stage;
+    exo_noinit_stage_set(stage);
 #else
     (void)stage;
 #endif
@@ -222,6 +297,13 @@ inline void exo_wdt_stage(uint8_t stage)
 inline uint8_t exo_wdt_stage_record()
 {
 #if defined(EXO_HAVE_WDT)
+    //Latch the RAM copy at the SAME INSTANT as the register copy. This is not optional: B10 reported
+    //STAGEn15 because exo_noinit_stage_get() was first reached from exo_reset_reason_string(), deep
+    //inside ExoBLE::setup(), by which time THIS boot had already stamped SETUP_ENTRY and then
+    //BLE_BEGIN over the previous boot's value - so it reported its own footprint. Both stores are
+    //latch-once, so binding them here makes the ordering impossible to get wrong from any caller.
+    (void)exo_noinit_stage_get();
+
     static bool captured = false;
     static uint8_t latched_stage = 0;
     if (!captured)
@@ -274,6 +356,11 @@ inline uint8_t exo_wdt_boot_count()
             //bounding the loop, and exo_crash_mark_healthy() clears both on a successful connect.
             exo_crash_record(0, 0);
 
+            //Same hazard, second register user: a BLESTALL marker from our own link-stall detector
+            //also lives in GPREGRET and is also read later (from exo_reset_reason_string). Latch it
+            //here too or the write below erases the very evidence the detector exists to produce.
+            (void)exo_stall_record();
+
             const uint8_t marker = (uint8_t)NRF_POWER->GPREGRET;
             const uint8_t prev = ((marker & EXO_CRASH_MAGIC_MASK) == EXO_WDT_MAGIC)
                                  ? (uint8_t)(marker & EXO_CRASH_COUNT_MASK) : 0u;
@@ -299,13 +386,25 @@ inline uint8_t exo_wdt_boot_count()
  * next boot and is reported in the banner. That is the whole point - it turns "we think the link
  * stalls" into a message from the device saying it did.
  */
-inline void exo_ble_stall_reset()
+inline void exo_ble_stall_reset(uint8_t diag)
 {
 #if defined(EXO_HAVE_WDT)
     const uint8_t marker = (uint8_t)NRF_POWER->GPREGRET;
     const uint8_t count = ((marker & EXO_CRASH_MAGIC_MASK) == EXO_STALL_MAGIC)
                           ? (uint8_t)(marker & EXO_CRASH_COUNT_MASK) : 0u;
     NRF_POWER->GPREGRET = (uint32_t)(EXO_STALL_MAGIC | ((count + 1u) & EXO_CRASH_COUNT_MASK));
+
+    //Park what the link looked like at the moment we gave up, so the next boot can report it. This
+    //is the measurement that decides between the two candidate root causes:
+    //  - sends BLOCKING (high w) => ArduinoBLE's unbounded `while (_pendingPkt >= _maxPkt) poll();`
+    //    (HCI.cpp:636) is engaged: the controller stopped acking and the queue is full.
+    //  - sends INSTANT (low w) with a high send count => the stack is writing into a dead link and
+    //    never saw the disconnect event. Different bug entirely.
+    //GPREGRET2 normally holds the watchdog stage breadcrumb, but the stage is only ever REPORTED on
+    //a DOG reset and this is an SREQ, so the two never collide.
+    NRF_POWER->GPREGRET2 = (uint32_t)diag;
+#else
+    (void)diag;
 #endif
     exo_system_reset();
 }
@@ -366,6 +465,7 @@ inline void exo_wdt_start(uint32_t timeout_s = EXO_WDT_TIMEOUT_S)
     NRF_WDT->CRV  = (timeout_s * EXO_WDT_LFCLK_HZ) - 1ul;
     NRF_WDT->RREN = (WDT_RREN_RR0_Enabled << WDT_RREN_RR0_Pos);   //Only reload register 0 is armed
 
+    exo_wdt_stage(EXO_STAGE_ARMED); //So a trip before the loop's first breadcrumb is identifiable
     exo_wdt_feed();                 //Start from a full counter
     NRF_WDT->TASKS_START = 1ul;
 #else
@@ -413,7 +513,12 @@ inline void exo_crash_record(uint8_t* marker_out, uint8_t* error_out)
             {
                 NRF_POWER->GPREGRET = 0;
             }
-            NRF_POWER->GPREGRET2 = 0;
+            //DELIBERATELY NOT zeroing GPREGRET2 here. It used to be, and that was the single biggest
+            //source of confusion in this investigation: this runs on every boot, from ExoBLE::setup(),
+            //and it blanked the watchdog breadcrumb - so any trip between here and the loop's first
+            //stamp reported the meaningless STAGE_0. There is no need to clear it: a stale byte is
+            //only ever READ as an mbed error code when the CRASH magic is present in GPREGRET, and
+            //that branch (above) still clears it.
         }
     }
     if (marker_out) { *marker_out = latched_marker; }
@@ -481,6 +586,59 @@ inline void exo_crash_mark_healthy()
  * The "RST:" prefix is what lets the GUI tell this apart from a runtime error report, which
  * shares the same characteristic and uses the "<code>:<joint>" format (see ExoBLE::send_error).
  */
+/**
+ * @brief ",Bn" - which build is on the board. See EXO_FW_TAG.
+ */
+//RT-I2C health as reported by the Teensy (which survives a Nano reboot). Defined in
+//SystemReset.cpp, filled by UART_command_utils::get_link_stats() during the Nano's setup().
+extern float exo_link_stats[6];
+extern bool  exo_link_stats_valid;
+
+/**
+ * @brief ",I2Cf<frames>_e<errors>_c<code>_t<ms>" - what the TEENSY saw on the RT link.
+ *
+ * This is the half of the story the Nano cannot tell about itself. c is the last endTransmission()
+ * return code (2 = the Nano stopped ACKing on the bus, so it died first; 0 with the Nano dark means
+ * frames were still landing in its receive ISR and the MAIN LOOP is what wedged). t is milliseconds
+ * since the last SUCCESSFUL transmission.
+ */
+inline String exo_link_stats_string()
+{
+    if (!exo_link_stats_valid)
+    {
+        return String(",I2Cnone");
+    }
+    //Units match the scaling in UART_command_handlers::get_link_stats: f = thousands of frames,
+    //e = tens of errors, t and w = 100 ms units. A value at 300 means "at or above the cap".
+    //x = the longest RUN of consecutive failures, in frames. At 100 Hz, 100 of those is one second
+    //of total silence - that is an outage. Single digits are the chronic background loss.
+    char b[96];
+    snprintf(b, sizeof(b), ",I2Cf%luk_e%lux10_c%u_t%lud_w%lud_x%lu",
+             (unsigned long)exo_link_stats[0],
+             (unsigned long)exo_link_stats[1],
+             (unsigned)exo_link_stats[2],
+             (unsigned long)exo_link_stats[3],
+             (unsigned long)exo_link_stats[4],
+             (unsigned long)exo_link_stats[5]);
+    return String(b);
+}
+
+inline String exo_fw_tag_string()
+{
+    //bN is the .noinit boot counter - see SystemReset.cpp. b1 every time means that RAM is being
+    //zeroed at startup and the stage breadcrumb cannot live there.
+    //rt1/rt0 = the REAL_TIME_I2C build flag. In the banner on purpose: the bisect build looks
+    //broken (no plots, no data) and this is how you tell "the experiment" from "a new fault".
+    //rt<n>/fw<n> = the REAL_TIME_I2C and RT_BLE_FORWARD build flags. Both in the banner because
+    //the bisect builds look broken in different ways and this is how you tell which is running.
+    char tag[40];
+    snprintf(tag, sizeof(tag), ",B%u_b%u_rt%u_fw%u",
+             (unsigned)EXO_FW_TAG, (unsigned)exo_noinit_boot_count(),
+             (unsigned)(REAL_TIME_I2C ? 1u : 0u),
+             (unsigned)(RT_BLE_FORWARD ? 1u : 0u));
+    return String(tag);
+}
+
 inline String exo_reset_reason_string()
 {
     const uint32_t reasons = exo_reset_reason_code();
@@ -529,7 +687,7 @@ inline String exo_reset_reason_string()
         char crash[40];
         snprintf(crash, sizeof(crash), ",CRASH_0x%02X_n%u",
                  (unsigned)crash_error, (unsigned)(crash_marker & EXO_CRASH_COUNT_MASK));
-        return String(head) + names + String(crash);
+        return String(head) + names + String(crash) + exo_fw_tag_string();
     }
 
     //Our own link-stall detector fired on the previous boot. This is the positive confirmation that
@@ -539,9 +697,28 @@ inline String exo_reset_reason_string()
         const uint8_t stall_n = exo_stall_record();
         if (stall_n != 0)
         {
-            char stall[32];
-            snprintf(stall, sizeof(stall), ",BLESTALL_n%u", (unsigned)stall_n);
-            return String(head) + names + String(stall);
+            //diag is the byte parked by exo_ble_stall_reset(), latched out of GPREGRET2 by
+            //exo_wdt_stage_record() at the top of setup() before anything overwrites it.
+            //  w = max writeValue() duration bucket, ~2^(w-1) * 64 us (w=0 means under 64 us)
+            //  s = notifications attempted during the silence, bucket ~2^(s-1) (s=0 means none)
+            //  _FAIL appended if writeValue() ever returned false
+            const uint8_t diag = exo_wdt_stage_record();
+            char stall[64];
+            if ((diag & 0x80u) == 0u)
+            {
+                //No marker bit: this byte did not come from exo_ble_link_diag(), so it is a stale
+                //stage breadcrumb or a blank. Report that rather than decoding nonsense.
+                snprintf(stall, sizeof(stall), ",BLESTALL_n%u_nodiag", (unsigned)stall_n);
+            }
+            else
+            {
+                const unsigned w = (unsigned)(diag & 0x0Fu);
+                const unsigned sent = (unsigned)((diag >> 5) & 0x03u);
+                const bool failed = (diag & 0x10u) != 0u;
+                snprintf(stall, sizeof(stall), ",BLESTALL_n%u_w%u_s%u%s",
+                         (unsigned)stall_n, w, sent, failed ? "_FAIL" : "");
+            }
+            return String(head) + names + String(stall) + exo_fw_tag_string();
         }
     }
 
@@ -550,13 +727,17 @@ inline String exo_reset_reason_string()
     //apart). Appended into names the same way CRASH_ is, so the GUI prints it with no change.
     if (reasons & 0x00000002ul)
     {
-        char stage[24];
-        snprintf(stage, sizeof(stage), ",STAGE_%u_dog%u",
-                 (unsigned)exo_wdt_stage_record(), (unsigned)exo_wdt_boot_count());
-        return String(head) + names + String(stage);
+        //n = the .noinit RAM copy, g = the GPREGRET2 copy. If n is populated while g is 0, that
+        //confirms GPREGRET2 is wiped by a watchdog reset and n is the one to trust.
+        char stage[48];
+        snprintf(stage, sizeof(stage), ",STAGEn%u_g%u_dog%u",
+                 (unsigned)exo_noinit_stage_get(),
+                 (unsigned)exo_wdt_stage_record(),
+                 (unsigned)exo_wdt_boot_count());
+        return String(head) + names + String(stage) + exo_fw_tag_string();
     }
 
-    return String(head) + names;
+    return String(head) + names + exo_fw_tag_string();
 }
 
 #endif

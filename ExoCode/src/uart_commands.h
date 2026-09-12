@@ -53,6 +53,8 @@ namespace UART_command_names
     static const uint8_t update_system_reset = 0x1A;
     static const uint8_t update_controller_param_ack = 0x1B;
     static const uint8_t reset_ack = 0x1C;   // Teensy -> Nano: "got the reset, closing logs"
+    static const uint8_t get_link_stats    = 0x1D;   // Nano -> Teensy: "how is the RT I2C link?"
+    static const uint8_t update_link_stats = 0x1E;   // Teensy -> Nano: the answer
 };
 
 /**
@@ -186,6 +188,52 @@ namespace UART_command_handlers
         set_controller_params(msg.joint_id, (uint8_t)msg.data[(uint8_t)UART_command_enums::controller_params::CONTROLLER_ID], (uint8_t)msg.data[(uint8_t)UART_command_enums::controller_params::PARAM_START], exo_data);
         //Serial.println("Updating Controller Params: " + String(msg.joint_id) + ", " + String((uint8_t)msg.data[(uint8_t)UART_command_enums::controller_params::PARAM_START]) + ", " + String(j_data->controller.controller));
 #endif
+    }
+
+    /**
+     * @brief Scale a counter into the UART's usable range and clamp it.
+     *
+     * 300 is deliberately below the 327.67 ceiling so a clamped value is visibly "at the cap"
+     * rather than being mistaken for a real reading near the limit.
+     */
+    inline static float uart_scale_clamp(uint32_t value, uint32_t divisor)
+    {
+        const float f = (float)value / (float)divisor;
+        return (f > 300.0f) ? 300.0f : f;
+    }
+
+    /**
+     * @brief Teensy -> Nano: the RT-I2C health counters. The Teensy is the only observer of this
+     * link that survives a Nano reboot, so these describe what the bus looked like THROUGH the
+     * failure. See the endTransmission() note in RealTimeI2C.cpp.
+     */
+    inline static void get_link_stats(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
+    {
+        UART_msg_t tx_msg;
+        tx_msg.command = UART_command_names::update_link_stats;
+        tx_msg.joint_id = 0;
+        tx_msg.len = 6;
+        //UART payloads are int16 fixed-point x100 (UARTHandler.h), i.e. a range of +/-327.67 ONLY.
+        //Raw counters blow straight through that: B13 reported frames_sent as 0 while error_count
+        //was 165, which is arithmetically impossible, because ~78000 frames wrapped. Everything
+        //here is therefore pre-scaled into units that stay well inside the range and clamped at 300
+        //so an out-of-range value reads as "at or above the cap" instead of silently wrapping.
+        #if defined(ARDUINO_TEENSY36) || defined(ARDUINO_TEENSY41)
+            tx_msg.data[0] = uart_scale_clamp(rt_i2c_stats::frames_sent, 1000u);  //thousands of frames
+            tx_msg.data[1] = uart_scale_clamp(rt_i2c_stats::error_count, 10u);    //tens of errors
+            tx_msg.data[2] = (float)rt_i2c_stats::last_error;                     //0-4, always fits
+            tx_msg.data[3] = uart_scale_clamp((uint32_t)(millis() - rt_i2c_stats::last_ok_ms), 100u);
+            tx_msg.data[4] = uart_scale_clamp(rt_i2c_stats::worst_gap_ms, 100u);  //100 ms units
+            tx_msg.data[5] = uart_scale_clamp(rt_i2c_stats::max_consec_err, 1u);  //frames in a row
+        #else
+            tx_msg.data[0] = 0.0f;
+            tx_msg.data[1] = 0.0f;
+            tx_msg.data[2] = 0.0f;
+            tx_msg.data[3] = 0.0f;
+            tx_msg.data[4] = 0.0f;
+            tx_msg.data[5] = 0.0f;
+        #endif
+        handler->UART_msg(tx_msg);
     }
 
     inline static void get_status(UARTHandler *handler, ExoData *exo_data, UART_msg_t msg)
@@ -884,6 +932,11 @@ namespace UART_command_utils
         float start_time = millis();
         while (1)
         {
+            //Feed any watchdog that survived a warm reset - this loop runs for up to
+            //CONFIG_TIMEOUT (8 s) on the boot path, well past the 5 s dog window. Compiles to
+            //nothing on the Teensy. See SystemReset.h.
+            exo_wdt_feed();
+
             msg.command = UART_command_names::get_config;
             msg.len = 0;
             msg = call_and_response(handler, msg, timeout);
@@ -923,6 +976,43 @@ namespace UART_command_utils
             config[i] = msg.data[i];
         }
         return 0;
+    }
+
+    /**
+     * @brief Nano -> Teensy: fetch the RT-I2C counters into exo_link_stats. Returns 0 on success.
+     *
+     * Uses the runtime UART command path (handle_msg from the Teensy's 500 Hz control loop), NOT
+     * the bulk-char 'R' handshake - that one is setup()-only and is why a rebooted Nano never gets
+     * its controller list back. This path answers any time, which is the whole point: it works
+     * after the Nano has rebooted, while the Teensy has been running through the whole event.
+     */
+    static uint8_t get_link_stats(UARTHandler *handler, float timeout)
+    {
+        UART_msg_t msg;
+        float start_time = millis();
+        while (1)
+        {
+            exo_wdt_feed();   //this loop runs on the boot path; see SystemReset.h
+
+            msg.command = UART_command_names::get_link_stats;
+            msg.len = 0;
+            msg = call_and_response(handler, msg, timeout);
+
+            if ((msg.command == UART_command_names::update_link_stats) && (msg.len >= 6))
+            {
+                for (int i = 0; i < 6; i++)
+                {
+                    exo_link_stats[i] = msg.data[i];
+                }
+                exo_link_stats_valid = true;
+                return 0;
+            }
+
+            if ((millis() - start_time) > timeout)
+            {
+                return 1;
+            }
+        }
     }
 
     static void wait_for_get_config(UARTHandler *handler, ExoData *data, float timeout)
@@ -975,6 +1065,13 @@ namespace UART_command_utils
 		// Prefer the BLE/RT stream or a rate-limited one-shot if this needs to be observed.
         switch (msg.command)
         {
+        case UART_command_names::get_link_stats:
+            UART_command_handlers::get_link_stats(handler, exo_data, msg);
+            break;
+        case UART_command_names::update_link_stats:
+            //Consumed by UART_command_utils::get_link_stats()'s call_and_response; if one arrives
+            //here it is a late duplicate and is safely ignored.
+            break;
         case UART_command_names::empty_msg:
             //logger::println("UART_command_utils::handle_message->Empty Message!");
             break;
