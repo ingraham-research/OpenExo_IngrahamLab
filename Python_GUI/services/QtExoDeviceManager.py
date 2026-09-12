@@ -55,8 +55,9 @@ class QtExoDeviceManager(QtCore.QObject):
         self._error_notify_enabled = False
         self._intentional_disconnect = False  # Track if disconnect was intentional
         self._next_connect_timeout_s: Optional[float] = None  # one-shot connect timeout override
-        # Serialises everything that writes to the Nano's UART characteristic. See _submit_tx().
-        self._tx_lock_obj: Optional[asyncio.Lock] = None
+        # Non-zero while a writer coroutine is part-way through a command sequence. Advisory only:
+        # nothing ever WAITS on it. Read by pingDevice(). See _submit_tx().
+        self._tx_busy = 0
         # Persistent asyncio loop running in a background thread
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
@@ -685,14 +686,8 @@ class QtExoDeviceManager(QtCore.QObject):
         self.logger.debug("Connection check passed")
         return True
 
-    def _tx_lock(self) -> asyncio.Lock:
-        """The lock guarding the UART TX characteristic. Created lazily on first use."""
-        if self._tx_lock_obj is None:
-            self._tx_lock_obj = asyncio.Lock()
-        return self._tx_lock_obj
-
     def _submit_tx(self, coro):
-        """Submit a coroutine that WRITES to the Nano, serialised against all other writers.
+        """Submit a coroutine that WRITES to the Nano, marking the TX path busy while it runs.
 
         WHY THIS EXISTS: a single logical command is often several separate BLE writes. A parameter
         update is five - the command byte 'f' and then four 8-byte doubles:
@@ -718,16 +713,32 @@ class QtExoDeviceManager(QtCore.QObject):
         the external control loop in Python_GUI/external_control/ because it sends parameter updates
         back to back.
 
-        Serialising at submit time - rather than per write - is what makes this correct: the lock
-        must span the WHOLE sequence, not each individual write.
+        WHY A COUNTER AND NOT A LOCK: an earlier version of this used an asyncio.Lock that writers
+        held for their whole sequence, which also stopped two command sequences interleaving with
+        each other. That was abandoned deliberately. Writers here can block for a long time -
+        beginTrial() holds an `await asyncio.sleep(1)`, send_end_trial_sequence() waits up to 2 s on
+        a write-with-response - and bleak's write_gatt_char is known on WinRT to occasionally never
+        return at all (see the comment in send_end_trial_sequence). With a lock, one hung write
+        would block EVERY later command for the rest of the session. A counter cannot do that: it is
+        advisory, nothing waits on it, and the `finally` guarantees it unwinds.
 
-        Deliberately NOT applied to _submit() generally: connect, scan and disconnect coroutines
-        must not queue behind a command sequence.
+        The trade is explicit: this fixes the ping-versus-command collision, and leaves the
+        pre-existing hazard of two overlapping COMMAND sequences exactly as it has always been.
+        That hazard predates the ping and has never been observed; if it ever needs fixing, do it by
+        making callers not overlap, not by making writes wait on each other.
+
+        Deliberately NOT applied to _submit() generally: connect, scan and disconnect coroutines are
+        not writers.
         """
-        async def _serialised():
-            async with self._tx_lock():
+        async def _marked():
+            self._tx_busy += 1
+            try:
                 return await coro
-        return self._submit(_serialised())
+            finally:
+                # finally, not a plain decrement: if a write hangs or raises, the counter must still
+                # come back down or pings would be suppressed for the rest of the session.
+                self._tx_busy -= 1
+        return self._submit(_marked())
 
     def _submit(self, coro):
         """Submit coroutine to event loop with error handling and logging."""
@@ -828,10 +839,11 @@ class QtExoDeviceManager(QtCore.QObject):
         if not self._is_connected or self._client is None or self._loop is None:
             return
 
-        # Skip rather than queue: a ping delayed behind a command sequence has already lost its
-        # meaning, and queuing them risks a burst after a long sequence (e.g. end-trial).
-        lock = self._tx_lock_obj
-        if lock is not None and lock.locked():
+        # Skip if a command sequence is part-way through. A ping is a single byte and cannot be
+        # corrupted itself, but it CAN land between a command byte and its data payload, which
+        # wedges the Nano's parser - see _submit_tx(). Skipping costs nothing: any inbound byte
+        # refreshes the firmware's link-stall timer, so commands keep it fed on their own.
+        if self._tx_busy:
             return
 
         async def _do():
