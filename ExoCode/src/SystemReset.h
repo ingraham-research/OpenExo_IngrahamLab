@@ -224,15 +224,49 @@ inline uint8_t exo_stall_record();
 //      host reboot. Nothing has ever gone BACK. This build makes the interval the only moving part.
 //      EXPECTED: failure inside ~4 min (baseline mean 225 s). If it does NOT fail, section 9 is in
 //      serious trouble and something else was the real fix.
-// 21 = A/B/A, arm B again: interval restored to (12,24). Flip EXO_BLE_INTERVAL_PINNED to 0.
-#define EXO_BLE_INTERVAL_PINNED   0u
-//        1 = (6, 6)   7.5 ms PINNED  - the original, known-failing configuration   -> build B20
-//        0 = (12, 24) 15-30 ms range - the candidate fix from section 9            -> build B21
+// 21 = A/B/A, arm B: (12,24) = 15-30 ms. **SUPERSEDED 2026-09-12 - do not ship.** 15 ms is
+//      inside this range and 15 ms was measured FATAL (died at 118 s), so a host that has persisted
+//      15 ms is silently accepted with no request sent. See the selector block below.
+// 22 = arm C, (20,23) = 25-28.75 ms. Broke the request-vs-interval confound: sends a request AND
+//      survives, so it is the interval that matters, not the act of asking. Clean for 1,050 s.
+// 23 = (20,24) = 25-30 ms. PRODUCTION DEFAULT. Excludes every interval measured or suspected fatal
+//      while staying in the band proven clean.
+//===================================================================================================
+// CONNECTION INTERVAL SELECTOR. One symbol, and EXO_FW_TAG is derived from it so a banner can never
+// misreport which arm produced it. Replaces the earlier two-boolean scheme, which had a precedence
+// wart (PINNED silently overrode ARM_C).
 //
-// The build tag is DERIVED from that toggle on purpose. Flipping the interval and forgetting to
-// bump the tag would make the banner claim the wrong build, and the whole point of an A/B/A is that
-// every log is unambiguously attributable to one arm. They cannot disagree now.
-#define EXO_FW_TAG                (EXO_BLE_INTERVAL_PINNED ? 20u : 21u)
+//   0 = (20, 24) = 25.0-30.0 ms  -> B23  **PRODUCTION DEFAULT as of 2026-09-12**
+//   1 = ( 6,  6) =  7.5 ms       -> B20  the original, FATAL configuration. Experiment only.
+//   2 = (12, 24) = 15.0-30.0 ms  -> B21  SUPERSEDED - see the warning below. Do not ship this.
+//   3 = (20, 23) = 25.0-28.75 ms -> B22  arm C, the confound-breaker. Proven clean for 1,050 s.
+//
+// WHY 0 IS (20,24) AND NOT (12,24) - this is the important part:
+//
+// MEASURED fatality, all intervals read off the wire (doc sections 14.20-14.32):
+//       7.5 ms  -> 12/12 failures
+//      15.0 ms  -> DIED at 118 s          <-- and 15.0 ms is INSIDE (12,24)
+//     28.75 ms  -> clean 1,050 s
+//      30.0 ms  -> clean 5,026 s
+//
+// Windows PERSISTS the negotiated interval per device, across reflashes and GUI restarts. And
+// L2CAPSignalingClass::addConnection() only sends a request when the central's choice falls OUTSIDE
+// our range. So with (12,24), a host that has settled at 15 ms is ACCEPTED - no request is sent, and
+// the firmware has no way to pull the link back up. The whole trial then runs at an interval that is
+// known to kill the link.
+//
+// (20,24) excludes every interval we have reason to distrust while staying inside the band that has
+// actually been proven clean. Anything faster than 25 ms is outside the range, so a request goes out
+// and the link gets pulled up. Arm C already established that sending a request is harmless.
+//
+// Kept as a RANGE rather than pinning (24,24): min == max is the property that was under suspicion
+// for the whole investigation, and there is no reason to reintroduce it.
+//===================================================================================================
+#define EXO_BLE_INTERVAL_SEL      0u
+
+#define EXO_FW_TAG                (EXO_BLE_INTERVAL_SEL == 1u ? 20u : \
+                                   EXO_BLE_INTERVAL_SEL == 2u ? 21u : \
+                                   EXO_BLE_INTERVAL_SEL == 3u ? 22u : 23u)
 
 #define EXO_STALL_MAGIC           0xE0u
 
@@ -649,6 +683,12 @@ extern "C" {
     extern volatile uint16_t exo_ble_cp_latency;
     extern volatile uint16_t exo_ble_cp_timeout;
     extern volatile uint16_t exo_ble_cp_count;
+    //LE Connection Update Complete (subevent 0x03) - an event upstream ArduinoBLE does not handle
+    //at all. This is what finally answers "did the central APPLY our request, and to what".
+    extern volatile uint16_t exo_ble_cu_interval;
+    extern volatile uint16_t exo_ble_cu_timeout;
+    extern volatile uint16_t exo_ble_cu_count;
+    extern volatile uint16_t exo_ble_cu_status;
 }
 
 /**
@@ -689,17 +729,38 @@ inline String exo_ble_cp_string()
     //Mirror addConnection()'s test exactly: a request goes out only when the central's choice falls
     //OUTSIDE our range. Kept in lockstep with the values passed to BLE.setConnectionInterval() in
     //ExoBLE.cpp - if you change one, change the other.
-    const uint16_t our_min = EXO_BLE_INTERVAL_PINNED ? 6u : 12u;
-    const uint16_t our_max = EXO_BLE_INTERVAL_PINNED ? 6u : 24u;
+    //Must track ExoBLE.cpp exactly, or u is computed against a range we never asked for.
+    const uint16_t our_min = (EXO_BLE_INTERVAL_SEL == 1u) ? 6u :
+                             (EXO_BLE_INTERVAL_SEL == 2u) ? 12u :
+                             (EXO_BLE_INTERVAL_SEL == 3u) ? 20u : 20u;
+    const uint16_t our_max = (EXO_BLE_INTERVAL_SEL == 1u) ? 6u :
+                             (EXO_BLE_INTERVAL_SEL == 2u) ? 24u :
+                             (EXO_BLE_INTERVAL_SEL == 3u) ? 23u : 24u;
     const unsigned requested = (iv < our_min || iv > our_max) ? 1u : 0u;
 
-    char b[64];
+    char b[96];
     snprintf(b, sizeof(b), ",CPi%u_l%u_t%u_u%u_n%u",
              (unsigned)iv,
              (unsigned)exo_ble_cp_latency,
              (unsigned)exo_ble_cp_timeout,
              requested,
              (unsigned)n);
+
+    //",UPi<interval>_t<timeout>_s<status+1>_n<count>" - what the central DID with our request.
+    //Absent entirely when no LE Connection Update Complete arrived, which is itself the answer:
+    //  no UP field at all + u1  -> we asked and the central NEVER REPLIED AT ALL.
+    //  UPs1                     -> granted; UPi is the interval now actually in force.
+    //  UPs>1                    -> rejected, with HCI status (s - 1).
+    if (exo_ble_cu_status != 0u)
+    {
+        char u[48];
+        snprintf(u, sizeof(u), ",UPi%u_t%u_s%u_n%u",
+                 (unsigned)exo_ble_cu_interval,
+                 (unsigned)exo_ble_cu_timeout,
+                 (unsigned)exo_ble_cu_status,
+                 (unsigned)exo_ble_cu_count);
+        return String(b) + String(u);
+    }
     return String(b);
 }
 

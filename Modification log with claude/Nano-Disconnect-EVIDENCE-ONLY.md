@@ -383,3 +383,74 @@ polldo (Arduino), 2020-07-02, **failing to reproduce**:
   describe is weak signal, and ours occurs on a bench at ~1 m. Untested either way.
 - **Not** that our RSSI behaves like theirs. We have never logged RSSI.
 - **Not** anything about connection intervals. Nobody in that thread measured one either.
+
+---
+
+# §11. MEASURED CONNECTION INTERVALS AND OUTCOMES - 2026-09-12
+
+**All of this is measurement, which is why it belongs in this document.** Intervals are read either from
+the HCI event fields surfaced in the connect banner (`CPi` = LE Connection Complete, `UPi` = LE Connection
+Update Complete) or from trial-CSV packet timing. Where both exist they agree.
+
+## 11.1 The ladder
+
+| interval in force | how measured | runs | outcome |
+|---|---|---|---|
+| **7.5 ms** | `UPi6` + SUCCESS; CSV 52.2 bursts/s | 13 | **12 failures.** Mean ~216 s, min 0.96 s, max 789 s. One run CUT CLEAN at 637.7 s |
+| **15 ms** | `UPi12` + SUCCESS; CSV 41.1 and 39.0 bursts/s | 2 | **2 failures**, 118 s and 429 s |
+| **28.75 ms** | `UPi12`->settled; CSV 33.7 bursts/s | 1 | clean, **cut by operator at 1,050 s** |
+| **~30 ms** | `CPi24`, `u0`; CSV 34.9 bursts/s | 3 | clean, cut at **1,309 / 1,821 / 1,896 s** |
+| **30.0 ms** (B23) | `CPi6`, `u1`, `UPi24` + SUCCESS | 1 | ongoing at time of writing, past 20 min |
+
+Every clean run above was **ended by the operator**, never by a failure.
+
+## 11.2 Banner readings, verbatim
+
+| time | build | banner fields | note |
+|---|---|---|---|
+| 16:36:49 | B21 | `CPi24_l0_t960_u0_n1` | |
+| 16:45:59 | B21 | `CPi24_l0_t960_u0_n1` | |
+| 16:46:31 | B21 | `CPi24_l0_t960_u0_n1` | |
+| 16:47:11 | B21 | `CPi24_l0_t960_u0_n1` | four separate boots, byte-identical |
+| 17:04:16 | B22 | `CPi24_l0_t960_u1_n1,UPi12_t960_s1_n1` | requested 25-28.75 ms; **CSV shows it ran at 28.75 ms**, so `UPi12` was transient |
+| 17:26:34 | B20 | `CPi23_l0_t960_u1_n1,UPi6_t960_s1_n1` | opened at arm C's 28.75 ms; **granted 7.5 ms** |
+| 17:39:17 | B20 | `CPi6_l0_t960_u0_n1,UPi12_t960_s1_n1` | opened at 7.5 ms, **nothing requested**, Windows moved it to 15 ms itself |
+| 17:42:08 | B20 | same | identical condition, replicated |
+| 17:58:22 | B23 | `CPi6_l0_t960_u1_n1,UPi24_t960_s1_n1` | opened at 7.5 ms, request fired, **granted 30.0 ms** |
+
+## 11.3 Facts established by those readings
+
+- **The supervision timeout is 9.6 s** (`t960`, every reading). It equals, to the digit, the constant lag
+  between the last CSV sample and the GUI's `Device disconnected` line, measured independently at 9.6 s on
+  both A' runs (and 0.1 s on a manual end).
+- **Windows persists the negotiated interval per device**, across reflashes and GUI restarts. n=3:
+  `i23` after a 28.75 ms session, `i6` twice after 7.5 ms sessions.
+- **Windows grants the MAXIMUM of the requested range.** n=2: `(20,23)` -> 28.75 ms; `(20,24)` -> 30.0 ms.
+- **Windows also changes the interval with no request from us.** `u0` with `UPi12`: it moved a 7.5 ms link
+  to 15 ms on its own.
+- **Windows 11 10.0.26200 granted both 7.5 ms and 28.75 ms**, with status SUCCESS.
+
+## 11.4 Failure fingerprint - unchanged across every failure measured
+
+`SREQ,BLESTALL_n1_w10_s3` plus `c2` and `x300`, on B18, both A' runs, and both 15 ms runs.
+`c2` = the Teensy's `endTransmission()` saw a NACK, i.e. **the Nano stopped ACKing first**.
+`x300` = at or above the cap, i.e. **>= 3 s of unbroken I2C silence**.
+
+## 11.5 Stream health, measured from trial CSVs
+
+| run | rows | mean rate | gaps > 100 ms | max gap |
+|---|---|---|---|---|
+| ~30 ms, 1,309 s | 115,442 | 88.2 Hz | **2**, totalling 0.3 s | 145 ms |
+| 28.75 ms, 1,050 s | 99,620 | 94.9 Hz | - | 265 ms |
+| 7.5 ms, died 66 s | 6,338 | 96.0 Hz | - | 52 ms |
+
+**The failure is abrupt.** The 7.5 ms run held 96.0 Hz with a p99 gap of 41 ms right up to its last
+sample. No ramp, no rising gap distribution, no warning.
+
+## 11.6 Still NOT measured
+
+- Where between 15 ms and 28.75 ms the fatal threshold sits.
+- Whether 25 ms is safe. Only 28.75 ms and ~30 ms have run long.
+- Whether the interval stays put **mid-session**. The banner only covers the first ~2 s of a connection,
+  and `addConnection()` runs once, at connect.
+- `_pendingPkt` / `_maxPkt` at runtime; the negotiated ATT MTU; the Nano's program counter at a freeze.

@@ -1,5 +1,28 @@
 # Nano spurious resets — RESETREAS says RESETPIN
 
+> # ✅ SUPERSEDED 2026-09-12 - THE ROOT CAUSE IS NOW KNOWN
+>
+> **The mid-trial BLE death is caused by a short connection interval.** Measured: **7.5 ms fails 12/12**,
+> **15 ms fails 2/2**, while **28.75 ms and ~30 ms have run 6,076+ s with zero failures**. The fix is
+> `setConnectionInterval(20, 24)` = 25-30 ms in `ExoBLE.cpp` (build B23).
+>
+> **Read `Nano-Hang-Watchdog-And-Breadcrumbs.md` §0 first** - it carries the authoritative status and a
+> retraction ledger for every superseded claim across this whole investigation.
+>
+> **This document is kept for its reasoning and its raw observations, not its conclusions.** Specific
+> things in here that are now known to be wrong or incomplete are listed at the end of this banner.
+>
+> **Superseded here specifically:**
+> - The whole premise - "spurious resets" - dissolves. There were no spurious resets. `RESETPIN` is simply
+>   what a normal power-on looks like on this board, which the in-document correction below already
+>   established, and the real failure was the connection interval.
+> - **The one durable lesson stands and is worth keeping:** `RESETREAS` carries **no** diagnostic value on
+>   this hardware. Every later diagnosis used GPREGRET-based magic values instead, which is why the
+>   `BLESTALL` / `DOG` / `CRASH_0x` suffixes exist at all.
+
+---
+
+
 **Date:** 2026-09-09
 **Scope:** The mid-trial freeze / "unexpectedly disconnected". First bench data from the `RESETREAS`
 instrument, flashed for the first time today.

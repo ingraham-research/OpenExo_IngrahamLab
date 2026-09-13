@@ -40,6 +40,24 @@ cause is found and fixed, **all of it should come out** — see §5.
 
 ---
 
+> ## ✅ RESOLVED 2026-09-12: THE CONNECTION INTERVAL IS THE CAUSE - MEASURED, NOT INFERRED
+>
+> **MEASURED LADDER: 7.5 ms -> 12/12 fail. 15 ms -> 2/2 fail (118 s, 429 s). 28.75 ms -> clean 1,050 s.
+> ~30 ms -> clean 5,026 s.** The fatal threshold is between 15 and 28.75 ms.
+>
+> **⚠ `(12,24)` IS SUPERSEDED - it contains the fatal 15 ms and cannot correct a host that has
+> persisted it. PRODUCTION DEFAULT IS NOW `(20,24)` = 25-30 ms, build B23 (§14.33).**
+>
+> `(6,6)` is granted by Windows as **7.5 ms** - confirmed twice over, by the `UPi6` banner AND by
+> burst-spacing analysis of the traffic (§14.25) - and fails **12/12**. **Caution: its failure time
+> has a fat tail reaching at least 789 s, so no single `(6,6)` run under ~13 min can show safety**
+> (§14.26). Pooled: 12 failures in 3,240 s at the fast interval, 0 in 6,076 s at a relaxed one,
+> p ~ 1.7e-10. A relaxed
+> interval (~29-30 ms) has run **6,076 s clean across four runs**. Arm C proves it is the interval
+> and not the act of asking: it **sends a request** and survives. See §14.20-§14.22.
+> **Also new and operationally important: Windows PERSISTS the negotiated interval across
+> connections (§14.23), so test order matters and a banner is no longer self-describing.**
+>
 > ## ⚠ THE INTERVAL IS CURRENTLY SET BACK TO THE FAILING VALUE, ON PURPOSE
 >
 > **2026-09-12: arm A' is DONE and the failure came back 2/2 (10.6 s and 75.7 s), so `(6, 6)` is
@@ -51,6 +69,204 @@ cause is found and fixed, **all of it should come out** — see §5.
 > the current release** (ArduinoBLE issue #45) - including independent reports of presentation A,
 > and independent evidence that §8's patch does **not** cure it. §14 is the ranked list of what to
 > test next, starting with a possible on-demand repro.
+
+---
+
+## §0. CURRENT STATE OF TRUTH - read this and nothing else if you are in a hurry
+
+**Added 2026-09-12 as the authoritative status block.** This document is ~2,800 lines written across
+three days of live debugging, and it contains roughly a dozen claims that were later retracted or
+superseded **in place**. That history is deliberately preserved - it is how the reasoning can be
+audited - but it means **no individual section below can be trusted on its own.** This section and the
+ledger in §0.3 are the index of what is actually true.
+
+### §0.1 The answer
+
+**The Nano's mid-trial BLE death is caused by a short connection interval.** Measured, not inferred:
+
+| interval in force | result |
+|---|---|
+| **7.5 ms** | **12 / 12 failures** (mean ~216 s, max 789 s) |
+| **15 ms** | **2 / 2 failures** (118 s, 429 s) |
+| 28.75 ms | clean 1,050 s |
+| ~30 ms | clean 5,026 s across three runs, plus B23 ongoing |
+
+14 failures at <= 15 ms; **zero failures in 6,076+ s at >= 28.75 ms**. The fatal threshold lies between
+15 ms and 28.75 ms and has not been located. Pooled against the fast-interval failure rate (one per
+270 s), p ~ 2 x 10^-12.
+
+The causal claim is not merely correlational: **arm C sends an L2CAP parameter-update request and
+survives, while arm A' sends one and dies** (§14.18). That rules out "the act of asking Windows is what
+hurts", which was the one alternative an A/B/A could not exclude.
+
+### §0.2 What is in the firmware now, and why
+
+| item | status | why |
+|---|---|---|
+| `EXO_BLE_INTERVAL_SEL 0` -> `setConnectionInterval(20, 24)` = 25-30 ms, build **B23** | **THE FIX** | §14.33. `max` is what Windows grants you; `min` is only the trigger that decides what gets corrected (§14.36) |
+| Bounded wait in sketchbook `ArduinoBLE/HCI.cpp` `sendAclPkt` | **KEEP**, report upstream | An unbounded wait on a remote party is a defect regardless of trigger. **Known upstream bug, open since 2019** (§13). Lost on any library update |
+| Connection-parameter readout (`CPi`/`UPi` banner fields) | **KEEP while diagnosing** | Two more sketchbook patches to `HCI.cpp`: the LE Connection Complete capture, and a handler for **LE meta subevent 0x03** which upstream has never implemented (§14.2, §14.28) |
+| Hardware watchdog (nRF52840 WDT, 5 s) | **KEEP** - §11.5's "decide" is superseded | Catches presentation **B** (main loop stopped). The community's only remedy for the 2019 upstream bug (§13.4). Costs: breaks uploads, so power-cycle before flashing (§7.0) |
+| BLE link-stall detector (8 s) + GUI 2 s ping + TX busy counter | **KEEP** | Catches presentation **A** (loop alive, link dead, would never re-advertise). **Now also the only protection against a mid-session interval drift, which the fix structurally cannot cover** (§14.37) |
+| CSV exo-time unwrap in `MainWindow.py` | **KEEP** | Unrelated real bug, four months old (§10.2) |
+| Breadcrumbs, send-path diag, Teensy I2C counters, link-stats command, bisect flags | **REMOVE** when convenient | §11.2-§11.3. Purpose served; the breadcrumbs never worked at all |
+
+### §0.3 RETRACTION LEDGER - every claim in this document that is no longer true
+
+Ordered as they appear. **If you find any of these asserted in the body, the body is the stale copy.**
+
+| # | claim, as originally written | status | where |
+|---|---|---|---|
+| 1 | "The Nano never froze; this is host-side" | **retracted** - the device confirmed it (`BLESTALL`) | §3.7 |
+| 2 | "The failure is an interrupt-level stop" | **retracted** - `MbedI2C::receiveThd()` is a polling RTOS thread, not an ISR | § line 466 |
+| 3 | "Missing I2C pull-ups" | **retracted** - bisect round 2 exonerated I2C entirely | §3.9 |
+| 4 | "The link is bandwidth-saturated" | **withdrawn** | § line 609 |
+| 5 | "The 2 s ping is a likely fix" (one 13.2-min run) | **retracted** - ~1 in 33, not evidence | § line 1006 |
+| 6 | "No headroom to drain a backlog at 7.5 ms" | **withdrawn** - ~48% headroom, and body-blocking recovered unpatched | §12.5 |
+| 7 | "B18 gave self-recovery" | **retracted** - the watchdog did that, and the GUI never auto-reconnects | §8 |
+| 8 | "Windows is constantly asked to change parameters" | **retracted** - it is ONE request, at connect | §12.3 |
+| 9 | "Teensy I2C `f`/`e` counters are cumulative since Teensy boot" | **retracted** - frames rose while errors FELL. Reset semantics unknown; **do not build on `f`/`e`**. `c` and `x` are fine | §14.x |
+| 10 | "Arm B degrades under load and recovers" | **retracted** - the CSV shows 88.2 Hz with two gaps >100 ms in 22 min. The **GUI rendering** stuttered, not the link. The "recoverability not throughput" reframing built on it is withdrawn | §14.x |
+| 11 | "The 9.6 s CSV-to-disconnect lag is `EXO_BLE_STALL_MS` + ~1.6 s" | **corrected** - it is the **supervision timeout**, measured at `t960` = exactly 9.6 s | §14.x |
+| 12 | "My arm C design is void as a confound-breaker" | **retracted** - it worked exactly as designed; I had over-read a transient | §14.17 |
+| 13 | "Windows applies 15 ms to ANY request, requested value irrelevant" (the preset hypothesis, §14.13) | **dead** - Windows honours the requested range and grants its **maximum** | §14.16, §14.36 |
+| 14 | "The link never ran at 7.5 ms, on any build" | **retracted** - `UPi6` + SUCCESS. It did. §9's original account is restored | §14.21 |
+| 15 | "§9's 133-connection-events-per-second arithmetic is void" | **itself void** - 7.5 ms is confirmed, so the arithmetic is restored. **But see the live problem in §0.4** | §14.21 |
+| 16 | "Modal burst-to-burst spacing measures the connection interval" | **corrected** - it measures **events-per-burst x interval**. Use the **bursts/s <= events/s** constraint instead | §14.21, §14.32 |
+| 17 | "`(12,24)` is the fix" | **SUPERSEDED** - it contains the measured-fatal 15 ms and cannot correct a host that has persisted it. Use `(20,24)` | §14.30, §14.32, §14.33 |
+| 18 | "Windows' interval choice is deterministic (4/4 identical)" | **reinterpreted** - that was **inertia, not independence**: Windows persists the negotiated interval per device (n=3), and all four runs had inherited 30 ms | §14.23, §14.35 |
+| 19 | §11.5's watchdog "decide - judgement call" | **superseded: KEEP it** | §13.4 |
+| 20 | Published Win10 thresholds ("won't accept >20 ms, won't go below 15 ms") | **do not apply to this host** - Windows 11 10.0.26200 granted both 7.5 ms and 28.75 ms with SUCCESS | §14.24 |
+
+### §0.4 THE ONE BIG THING STILL UNKNOWN: *why* a short interval is fatal
+
+**§9's mechanism is in worse shape than when the investigation started, and this should not be glossed
+over.** Its story was `_pendingPkt` saturation driven by 133 connection events/s at 7.5 ms. But **15 ms
+is only 66.7 events/s and kills just as reliably** (2/2). So whatever the mechanism is, it bites at half
+the rate that explanation requires, and no account currently covers both rungs.
+
+Also open: where between 15 and 28.75 ms the threshold sits; whether 25 ms (which `(20,24)` permits) is
+safe or merely untested - only 28.75 and ~30 ms have run long, and `(23,24)` is the tighter alternative
+if that ever matters.
+
+### §0.5 METHOD NOTES worth keeping - they cost us real time
+
+1. **A survival only counts if it exceeds the longest failure ever seen in that condition** - and
+   comfortably, not marginally. `(6,6)`'s failures reach **789 s**, so the 637.7 s run that looked like a
+   counter-example was a 5.2% draw, expected about once in 13 attempts (§14.25).
+2. **Never trust a banner alone - cross-check the CSV.** `UPi` is one sample from the first ~2 s of a
+   connection. Arm C's banner said 15 ms while it actually ran at 28.75 ms (§14.16).
+3. **To read the interval from a CSV, use the hard constraint `bursts/s <= connection events/s`**, not the
+   modal gap: 2 x 15 ms and 1 x 28.75 ms are degenerate and that degeneracy misled us once (§14.32).
+4. **GUI disconnect timestamps overstate time-to-failure by a constant 9.6 s** - the supervision timeout.
+   Negligible for long runs, enormous at the short end (§14.x).
+5. **Windows persists the negotiated interval per device**, so **test order matters** and consecutive runs
+   of the same build are not necessarily the same experiment (§14.23, §14.29).
+
+### §0.5b B23 VALIDATION RUN - 32.1 min clean, and NO mid-session drift
+
+`(20,24)`, ended by the operator at **1,926.6 s**, 184,407 rows.
+
+| metric | value |
+|---|---|
+| mean rate | **95.7 Hz** - the highest of any relaxed run (`(12,24)` managed 88.2) |
+| gaps > 100 ms | **3**, totalling 0.6 s = **0.03%** of the run |
+| per-second rate | median 96 Hz, min 54, **1,925 / 1,927 seconds at >= 80 Hz** |
+
+Single-run p ~ **1 in 1,256**. Pooled relaxed exposure **8,002 s, zero failures** against 29.6 expected,
+p ~ **1.4 x 10^-13**.
+
+**§14.37's residual risk did NOT materialise.** Interval stability by quarter:
+
+| quarter | bursts/s | ~30 ms gap band |
+|---|---|---|
+| Q1 0-8 min | 37.73 | 49.9% |
+| Q2 8-16 min | 37.89 | 49.0% |
+| Q3 16-24 min | 35.98 | 49.9% |
+| Q4 24-32 min | 35.54 | 51.6% |
+
+Flat across 32 minutes, so **Windows did not drift the interval down mid-session.** This is a *within-run*
+comparison using one method throughout, so it is unaffected by the calibration problem below.
+
+### §0.5c CORRECTION: the "bursts/s <= events/s" test is NOT a hard constraint
+
+**§0.5 item 3 and §14.32 both call this a hard constraint. That was overstated, and this corrects it.**
+
+B23's 37.7 bursts/s **exceeds the 33.3 connection events/s available at the 30 ms its banner reported** -
+which is arithmetically impossible, so the method, not the banner, is wrong. The cause is the burst
+detector itself: it splits bursts at an 8 ms gap, and at ~2.9 samples per connection event the host's
+timestamp spread *within* one event can exceed 8 ms and be counted as two bursts.
+
+**Direction of the bias:** over-counting bursts inflates `bursts/s`, which makes the derived
+`interval <= 1000/bursts_per_sec` **too tight**. So every exclusion stated from it is less firm than
+written. The "~15 ms gap population" discriminator has the same weakness - B23 shows 13.5% in that band in
+Q1, and a genuine 15 ms gap cannot exist at a 30 ms interval, so part of that band is splitting artefact.
+
+**What this does NOT change:**
+
+- **The ladder in §0.1 is unaffected.** It rests on the banner's **HCI event fields** (`UPi6` = 7.5 ms,
+  `UPi12` = 15 ms, `UPi24` = 30 ms), read directly off LE Connection Update Complete. Direct measurements,
+  not estimates.
+- **Arm C's transient is still correctly diagnosed** (§14.16). That rested on a large *distributional*
+  difference - 2.6% vs 12-22% in the 15 ms band, 62% vs 45-50% at 30 ms - not on the precise ceiling.
+- **Within-run drift checks remain valid**, since they compare the same method against itself.
+
+**Use it as a corroborating instrument, never as a primary measurement.** If an absolute interval is ever
+needed to better than a factor of ~1.3, the banner's `UPi` is the measurement and a sniffer (§14.6) is the
+arbiter. A better CSV estimator would need the burst threshold calibrated against a known interval first.
+
+### §0.6b DEBUG-FEATURE AUDIT - what to keep and what to discard
+
+**Added 2026-09-12 at the operator's request**, now that the root cause is known. This supersedes the
+inventory in §11.1, which was written before the cause was found and before upstream issue #45 was known.
+Ordered by verdict, not by file.
+
+#### KEEP PERMANENTLY - these are fixes or safety, not scaffolding
+
+| item | where | why it stays |
+|---|---|---|
+| `setConnectionInterval(20, 24)` + the `EXO_BLE_INTERVAL_SEL` selector | `SystemReset.h`, `ExoBLE.cpp` | **The fix.** Keep the selector too: it documents the measured ladder and makes a re-test one character |
+| Bounded wait in `sendAclPkt` | sketchbook `ArduinoBLE/HCI.cpp` | Upstream bug open since 2019 (§13). **Report upstream** - a sketchbook patch dies on every library update |
+| Hardware watchdog + boot-loop guard | `SystemReset.*`, `ExoCode.ino` | Only thing that recovers a stopped main loop. §11.5's "decide" is superseded by §13.4 |
+| Link-stall detector + 2 s ping + TX busy counter | `ExoBLE.cpp`, `QtExoDeviceManager.py` | Only thing that recovers presentation A - **and now the only cover for a mid-session interval drift, which the fix structurally cannot reach** (§14.37) |
+| CSV exo-time unwrap | `MainWindow.py` | Unrelated four-month-old bug (§10.2) |
+
+#### KEEP FOR NOW - diagnostics that are still earning their keep
+
+| item | why not yet |
+|---|---|
+| `CPi` / `UPi` connection-parameter readout (3 patches in sketchbook `HCI.cpp`) | The *why* is still unknown (§0.4), the fatal threshold is unlocated, and §14.37's mid-session drift is unproven. **This is the instrument that would detect all three.** Revisit once a mechanism is established |
+| `EXO_FW_TAG` build tag | Costs nothing and settled "which binary is on the board" repeatedly. §11.3 already suggested keeping it |
+| The 9.6 s supervision-timeout knowledge | Not code - but **`EXO_BLE_STALL_MS` (8 s) is deliberately shorter than it**, which is why failures show `BLESTALL` rather than a stack disconnect. Do not change one without the other |
+
+#### DISCARD - purpose served, or never worked
+
+| item | where | verdict |
+|---|---|---|
+| **Stage breadcrumbs** | `SystemReset.*`, `ExoCode.ino`, `ExoBLE.cpp` | **Never worked at all** - no store survived a watchdog reset (B14 proved `.noinit` is zeroed). Pure dead weight. Remove first |
+| Send-path diagnostics (`s_max_write_us`, `_w`/`_s`/`_FAIL`) | `ExoBLE.cpp` | Did its job: `w10` proved the bounded spin fires. **Careful:** `exo_wdt_stage_record()` also latches this, so remove them together (§11.3 item 4) |
+| Teensy RT-I2C counters (`rt_i2c_stats`) | `RealTimeI2C.*` | Cleared I2C as a cause, and **`f`/`e` turned out to be untrustworthy** (ledger #9). `c` and `x` were useful but have nothing left to settle |
+| Link-stats UART command | `uart_commands.h`, `ExoCode.ino`, `SystemReset.h` | Carrier for the above; goes with it |
+| `RT_BLE_FORWARD` bisect flag | `Config.h`, `ComsMCU.cpp` | Experiment over. Confirm `REAL_TIME_I2C` stays **1** |
+| `SD_LOG_SELFTEST_TRIAL` | `SdLogger.h`, `ExoCode.ino` | Self-test scaffolding that halts in `setup()`. Verify it is **0** and consider removing the block |
+
+#### DECIDE LATER - depends on the resync discussion
+
+| item | note |
+|---|---|
+| Whether the stall detector should ALSO resync trial state | If `Nano-Reboot-Trial-Resync-TODO.md` is built, the detector's reboot becomes a recoverable event rather than a lost trial, which changes how aggressive 8 s should be |
+| Whether to keep the ping at 2 s | Removing the ping removes the §10.1 collision hazard at its source, but disarms the detector (`s_ping_seen`). One unit, decide together |
+
+**Sequence:** breadcrumbs -> send-path diag + `exo_wdt_stage_record()` -> I2C counters + link-stats ->
+bisect flags. **One real trial per step**, per §11.6 - each touches the live BLE path, and a mistake there
+looks exactly like the bug this investigation was chasing.
+
+### §0.6 NOT YET DONE
+
+- **Motor stress test at non-zero torque, on a different laptop.** The last gate before §11's removal plan
+  can start. Everything above is zero-torque bench work on one (RF- and RAM-compromised) host.
+- **Report the `sendAclPkt` bound upstream** on issue #45. A patch in the sketchbook dies on every library
+  update; upstream is the only durable home for it.
 
 ## 1. The finding: it is a HANG (this is the part worth keeping)
 
@@ -1725,9 +1941,11 @@ Both A' runs show **exactly 9.6 s** between the last CSV sample and the GUI's
 `Device disconnected` log line. Arm B's *manual* end shows 0.1 s. So the GUI timestamp is not when
 the link died - it is when Windows finally noticed.
 
-That 9.6 s is almost certainly **`EXO_BLE_STALL_MS` (8 s) plus ~1.6 s** for Windows to register the
-resulting reboot. In other words our own stall detector defines the lag, which is why it is so
-repeatable.
+**CORRECTED 2026-09-12, same day:** that was first attributed to `EXO_BLE_STALL_MS` (8 s) plus
+~1.6 s for Windows to notice the reboot. **Wrong.** The first §14.2 reading gives `t960` - Windows set
+the **supervision timeout to 960 x 10 ms = exactly 9.6 s**. The lag IS the supervision timeout, by
+definition: the central declares the link lost after 9.6 s without a valid packet. Two independent
+measurements - CSV timing and an HCI event field - agreeing to the digit.
 
 **Corrected times-to-failure, measured from the data rather than the log:**
 
@@ -1769,6 +1987,859 @@ both with a true 7.5 ms interval carrying a packet every second event (133 event
 samples/s gives 0.68 packets per event, so 1-2 event gaps are expected) **and** with Windows having
 quietly picked ~15-17.5 ms and ignored the request. Host-side Python timestamps smear the
 quantisation, so this cannot separate them. §14.2 reads the number directly and settles it.
+
+##### FIRST §14.2 READING, 2026-09-12 16:36 - `CPi24_l0_t960_u0_n1`
+
+Build `B21`, first connection after flashing. Decoded:
+
+| field | raw | **meaning** |
+|---|---|---|
+| `i24` | 24 | **connection interval = 30.0 ms** (24 x 1.25 ms) |
+| `l0` | 0 | slave latency 0 |
+| `t960` | 960 | **supervision timeout = 9.6 s** (960 x 10 ms) |
+| `u0` | 0 | **no L2CAP update request was sent** |
+| `n1` | 1 | first connection since boot |
+
+**Windows opens this link at 30 ms on its own.** Our `(12, 24)` range is 15-30 ms, and 30 ms sits
+exactly on its upper edge, so `addConnection()`'s test (`interval < _min || interval > _max`) is false
+and **we ask for nothing at all** on the working build.
+
+**1. The supervision timeout is measured, and it explains the 9.6 s constant** - see the correction
+above. It also has a consequence nobody had noticed: **`EXO_BLE_STALL_MS` is 8 s, which is SHORTER
+than the 9.6 s supervision timeout.** Our detector always wins that race, which is why every failure
+shows `BLESTALL` rather than a clean stack-level disconnect. We have never once let the BLE stack's own
+link-loss mechanism run to completion.
+
+**2. It is evidence FOR §14.5's broken-supervision-timer theory.** With a 9.6 s timeout, a peripheral
+whose supervision timer works should notice a dead link within 9.6 s and drop to advertising by itself.
+Presentation A, before the stall detector existed, left the Nano unreachable **indefinitely** - far
+longer than 9.6 s. So Windows' supervision timer fired (it logged "link lost" on schedule) and **the
+Nano's did not**. That asymmetry is exactly what PR #44's `WSF_MS_PER_TICK` complaint predicts: the
+nRF52840/mbed supervision timer running at the wrong rate. §14.5 moves up the list.
+
+**3. `u0` means the confound is REAL, not ruled out.** This is outcome #2 of the three pre-committed
+above, and it is the awkward one:
+
+| | arm A' `(6,6)` | arm B `(12,24)` |
+|---|---|---|
+| request sent? | **yes** (30 outside [6,6]) | **no** (`u0`, measured) |
+| interval in force | ~15-20 ms (from CSV gaps) | **30 ms** (measured) |
+
+The arms differ in **both** variables. So *"a relaxed interval helps"* and *"not ASKING helps"* are
+still both alive, and the A/B/A cannot separate them - as §12.3 warned.
+
+**But the CSV histogram does rule out the strongest version of the sceptical case.** If Windows simply
+ignored the `(6,6)` request, arm A' would also have run at 30 ms and shown B's ~26 ms modal gap. It
+showed ~15-20 ms instead. So **Windows did act on the request** - though evidently not down to 7.5 ms.
+The likely reading: Windows moved from its 30 ms default toward our request and stopped at its own
+floor (~15 ms is a documented Windows lower bound for non-HID peripherals), i.e. a *partial* grant.
+
+##### WINDOWS IS DETERMINISTIC - four independent connections, identical
+
+Four connections on `B21`, each from a **separate boot** (End Trial `'Z'` reboots the Nano, which is
+why every one reads `n1` - so these are four fresh negotiations, not four reads of one):
+
+| time | reading |
+|---|---|
+| 16:36:49 | `CPi24_l0_t960_u0_n1` |
+| 16:45:59 | `CPi24_l0_t960_u0_n1` |
+| 16:46:31 | `CPi24_l0_t960_u0_n1` |
+| 16:47:11 | `CPi24_l0_t960_u0_n1` |
+
+**Byte-identical, four for four.** Windows picks 30 ms / latency 0 / 9.6 s every time, with no
+variance at all.
+
+**This narrows §12.4's two-populations speculation but does not kill it.** What is now measured is
+that Windows' *opening* choice is perfectly stable. §12.4 was about whether Windows' *response to a
+request* is random - and arm B never sends one (`u0`), so these four readings cannot speak to it.
+Testing that needs arm A' readings, which is what the next section makes possible.
+
+##### A LIMITATION IN §14.2 AS FIRST BUILT - and the fix (`UP`)
+
+`exo_ble_cp_capture()` fires on **LE Connection Complete**, which is the value the link *opens* at -
+before any L2CAP request has even been sent. So on arm A' it would have read `CPi24_..._u1` and told
+us only *that* we asked, never what Windows did about it. **The central question of §12 would still
+have been unanswered.**
+
+Fixed by handling the event ArduinoBLE has never handled: **LE meta subevent 0x03, LE Connection
+Update Complete.** Upstream's `LE_META_EVENT` enum has no enumerator for it and its switch has no
+case, which - together with `connectionParameterUpdateResponse()` being empty - is *why* the library
+can send a request and never learn its fate. The local patch adds the case (with a cast, so 0x03 stays
+out of `HCI.h` and the whole patch remains in one file) and records the result.
+
+New banner field, emitted only when such an event actually arrived:
+
+```
+,UPi<interval>_t<timeout>_s<status+1>_n<count>
+```
+
+**Its absence is as informative as its presence:**
+
+| banner | meaning |
+|---|---|
+| `u1` and **no `UP` field** | We asked and **the central never answered at all.** This is the "no negotiation room, so the host gives up" hypothesis, directly observed |
+| `u1` + `UPs1` | **Granted.** `UPi` is the interval now actually in force - the number §12 has wanted since it was written |
+| `u1` + `UPs` > 1 | **Rejected**, with HCI status (`s` - 1) |
+| `u0` and no `UP` | Nothing asked, nothing changed - the expected arm B shape |
+
+Status is stored **+1** so that 0 can mean "no event seen"; `s1` = HCI status 0x00 = SUCCESS. Both `UP`
+values are zeroed on every new connection, so they always describe the current one.
+
+**Second timing bug, found and fixed before flashing.** The update event lands tens to hundreds of ms
+*after* the connection completes, so the banner write in the connection branch is always too early to
+contain it. `handle_updates()` now refreshes the banner whenever `exo_ble_cu_status` changes, placed
+**before** the unchanged-status early return (the status does not change when an update arrives, so
+anything after that return would never run) and gated on `!_tx_subscribed` - which confines writes to
+the pre-subscribe window, where no notification can be generated and the refresh still lands ahead of
+the GUI's read at ~1.9 s.
+
+##### §14.9 THE EXPERIMENT THAT BREAKS THE CONFOUND - one line, decisive
+
+`u0` makes this both possible and necessary. **Choose a range that excludes Windows' 30 ms default -
+so a request IS sent - but which is otherwise almost identical to 30 ms.**
+
+```c
+BLE.setConnectionInterval(20, 23);   // 25.0 - 28.75 ms
+```
+
+30 ms falls outside `[20, 23]`, so `updateParameters` becomes true and we get `u1`. If Windows honours
+it we land at ~28.75 ms - **4% away from the 30 ms that just survived 22 minutes.** The link timing is
+effectively unchanged; the only thing that meaningfully changes is that **we asked**.
+
+| result | conclusion |
+|---|---|
+| **Survives** (20+ min) | Sending a request is harmless. The *interval value* was the killer. §9 confirmed, the sceptical alternative dead |
+| **Fails** | **Sending the request is the cause**, not the interval. §9's fix is real but its mechanism is wrong, and the true fix is "never ask Windows for anything" |
+
+Either way it resolves the single largest remaining ambiguity, for one line and one run.
+
+**BUILT 2026-09-12 as arm C / build `B22`.** Both targets compile. Selected by a second toggle in
+`SystemReset.h`, with `EXO_FW_TAG` derived from both so the banner can never misreport the arm:
+
+```c
+#define EXO_BLE_INTERVAL_PINNED   0u   // 1 -> (6,6)   = B20
+#define EXO_BLE_INTERVAL_ARM_C    1u   // 1 -> (20,23) = B22   (requires PINNED 0)
+                                       // both 0       = B21 = (12,24)
+```
+
+`exo_ble_cp_string()`'s `our_min`/`our_max` follow the same selector, or `u` would be computed against
+a range we never asked for.
+
+##### RECOMMENDED ORDER: `B20` FIRST, AND IT COSTS ABOUT A MINUTE
+
+Arm C needs 20+ minutes to mean anything. **Arm A' on `B20` needs about one minute**, because it dies
+in 1-66 s - and with the `UP` field it now answers the question §12 was written about:
+
+- `u1` + no `UP` -> Windows **never replied** to `(6,6)`. The "no negotiation room, host gives up"
+  hypothesis, observed rather than argued.
+- `u1` + `UPs1_i<n>` -> granted, and `UPi` is **what arm A actually ran at** - currently known only as
+  a ~15-20 ms bound inferred from CSV gap histograms.
+- Several `B20` connections also finally test §12.4 directly: if `UPi` varies connection to connection,
+  that is the two-populations mechanism confirmed.
+
+**It also changes how to read arm C.** If `B20` shows Windows never answers `(6,6)`, then arm C stops
+being "asked vs did not ask" and becomes the much sharper "a request that gets answered vs one that
+gets ignored" - a far more specific claim, and one worth reporting upstream on issue #45.
+
+Keep the range rather than pinning `(23,23)`: pinning min = max is itself the property under suspicion,
+and mixing it in here would reintroduce the confound this experiment exists to remove.
+
+##### ARM C FIRST READING - `CPi24_l0_t960_u1_n1,UPi12_t960_s1_n1`
+
+Build `B22`, `setConnectionInterval(20, 23)` = 25.0-28.75 ms requested. 2026-09-12 17:04.
+
+| field | meaning |
+|---|---|
+| `CPi24` | opened at **30 ms**, as on all four B21 connections |
+| `u1` | **a request WAS sent** - as designed |
+| `UPs1` | **HCI status 0x00 = SUCCESS. Windows GRANTED it.** |
+| `UPi12` | the interval now in force is **15.0 ms** |
+| `UPt960` | supervision timeout unchanged, 9.6 s |
+
+**We asked for 25.0-28.75 ms. Windows said SUCCESS and gave us 15.0 ms** - below our requested
+minimum, a value we never asked for and explicitly excluded.
+
+##### MY ARM C DESIGN IS VOID AS A CONFOUND-BREAKER - stated plainly
+
+§14.9 assumed that requesting 25-28.75 ms would land us near 28.75 ms, isolating "we asked" from
+"the interval changed". **Windows defeated that by ignoring the requested value entirely.** Arm C is
+therefore **not** a confound-breaker - it is a *replication of arm A'*: request sent, 15 ms in force.
+The experiment as designed does not do what it was built to do, and §14.9's table should not be used.
+
+##### WHAT IT DOES ESTABLISH - and it is a lot
+
+**1. Windows' actual policy is now visible: ANY parameter-update request -> 15 ms.** Regardless of what
+was requested. It replies SUCCESS and applies 15 ms. Two independent requested ranges - `(6,6)` =
+7.5 ms and `(20,23)` = 25-28.75 ms - and the same 15 ms result.
+
+**2. It confirms the CSV inference, by a completely independent route.** The gap histogram put arm A'
+at a ~15-20 ms modal inter-burst gap, and that was explicitly flagged as unable to distinguish "true
+7.5 ms with a packet every second event" from "Windows quietly picked ~15 ms". **Direct HCI readout now
+says 15 ms.** Two methods, one answer.
+
+**3. §12 IS SUBSTANTIALLY CLOSED, and its headline claim is confirmed false:**
+
+| arm | request? | **interval actually in force** |
+|---|---|---|
+| A / A' `(6,6)` | yes | **15 ms** (never 7.5 ms) |
+| B `(12,24)` | no (`u0`) | **30 ms** |
+| C `(20,23)` | yes | **15 ms** (measured) |
+
+**"The link ran at 7.5 ms" is false. It never did, on any build.** Windows never honoured it.
+
+**4. §9's arithmetic was wrong and needs correcting.** §9 argued from "7.5 ms demands 133 connection
+events per second". At 15 ms it is **66.7 events/s** - half that. Every number in §9 derived from 133
+events/s is void. (The already-withdrawn "no headroom to drain" argument was therefore doubly wrong.)
+
+**5. The real variable is 15 ms versus 30 ms - a factor of two, not a factor of four.** That is the
+whole difference between 12 failures and 5,026 s of clean running.
+
+##### THE CONFOUND IS WELDED SHUT BY WINDOWS, NOT BY OUR CHOICES
+
+On this host, **request sent <=> 15 ms**, and **no request <=> 30 ms**. The two are perfectly
+correlated *by Windows' own behaviour*. So no choice of requested range can separate them: you cannot
+get 15 ms without asking, and you cannot ask without getting 15 ms.
+
+**Prediction for the running arm C trial: it should FAIL**, on the same timescale as A' (1-66 s), since
+it is the same condition. If it does, that is a *replication* of A' reached by a different requested
+range - which strengthens §9, because it shows the failure tracks **the interval in force**, not our
+particular choice of numbers.
+
+##### §14.10 ARM D - the confound-breaker that should actually work
+
+`addConnection()` has a **second** trigger for `updateParameters`, and it does not touch the interval:
+
+```cpp
+uint16_t updatedMinInterval = interval;   // = 24, the central's OWN value
+uint16_t updatedMaxInterval = interval;   // = 24
+if (_minInterval && _maxInterval) {
+    if (interval < _minInterval || interval > _maxInterval) { ...override... }   // NOT taken
+}
+if (_supervisionTimeout && supervisionTimeout != _supervisionTimeout) {
+    updatedSupervisionTimeout = _supervisionTimeout;
+    updateParameters = true;                                                     // taken
+}
+```
+
+So:
+
+```cpp
+BLE.setConnectionInterval(12, 24);     // contains 30 ms -> interval branch NOT taken
+BLE.setSupervisionTimeout(800);        // 8 s != Windows' 960 -> request IS sent
+```
+
+This sends a request whose **requested interval is min = max = 24 - exactly the 30 ms Windows already
+chose.** A request goes out, but it asks Windows to keep what it has.
+
+| outcome | conclusion |
+|---|---|
+| `UPi12` again (15 ms) | Windows goes to 15 ms on **any** request. Confound confirmed structural, unbreakable on this host, and the mechanistic question is academic *here* |
+| `UPi24` + `UPt800` | **CONFOUND BROKEN.** A request sent, 30 ms retained. Survival then isolates "does asking, by itself, hurt?" |
+
+It also doubles as §14.5's supervision-timeout test, which §14.2's `t960` reading promoted. One wrinkle
+to note honestly: it requests min = max, which is the pinned property under suspicion - but pinned at
+**30 ms**, and only if Windows chooses to honour it at all.
+
+##### §14.11 A CHEAP WAY TO MAP WINDOWS' RESPONSE FUNCTION
+
+The `UP` field makes this nearly free, and it needs **no trial at all** - just connect, read the banner,
+disconnect. About a minute per probe.
+
+Flash a sequence of requested ranges and record `UPi` for each: `(6,6)`, `(10,10)`, `(16,16)`,
+`(20,23)`, `(24,24)`, `(25,30)`, `(40,60)`. If `UPi` is 12 for every one of them, Windows has a single
+hard-coded response to being asked and the picture is complete. If it tracks the request anywhere in
+that span, there is a usable range and the confound may be escapable after all.
+
+Worth doing before spending any more 20-minute runs, because it determines which long runs are even
+meaningful.
+
+##### §14.12 IS THIS WINDOWS BEHAVIOUR KNOWN? - searched 2026-09-12
+
+**Partly, and the part that is documented matches us well. The specific thing we measured is not
+documented anywhere found.**
+
+**What IS documented:**
+
+- **Windows accepts an L2CAP parameter-update request and then does not apply it.** Reported in detail
+  on [Nordic DevZone](https://devzone.nordicsemi.com/f/nordic-q-a/27235/win-10-ble-stacks-acting-as-a-central-problems-accepting-ble-connection-parameter-changes)
+  by `ianm`, with sniffer logs: link opens at 20 ms, peripheral requests 40 ms, the L2CAP
+  request/response pair appears **three times**, and the `LL Connection Update Indication` **never
+  follows**. Interval stays at 20 ms. The same peripheral code negotiates correctly against Android.
+  Also on [Microsoft Q&A](https://learn.microsoft.com/en-us/answers/questions/848142/windows-10-ble-connection-parameter-update-issue)
+  and [MSDN](https://social.msdn.microsoft.com/Forums/vstudio/en-US/a6b0526d-f729-46f1-b0c8-35e995dc4bb0/windows-does-not-answer-ble-parameter-update-request?forum=wdk).
+- **A >20 ms threshold.** Requests above ~20 ms, and slave latency >1, "usually don't take" on Win10.
+  **We asked for 25-28.75 ms - above that threshold.**
+- **Nordic's official advice is to NOT use L2CAP requests at all.** David Edwin (Nordic) recommends the
+  **PPCP characteristic** (Preferred Peripheral Connection Parameters) as the way to express
+  preferences to Windows, and says not to send update requests more often than every 30 s.
+- **Windows 11 has exactly three connection-parameter PRESETS**, and no custom values:
+  `BluetoothLEPreferredConnectionParameters` - **Balanced**, **ThroughputOptimized**,
+  **PowerOptimized** ([Microsoft](https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.bluetoothlepreferredconnectionparameters)).
+  Introduced in Windows 11 build 10.0.22000. [btframework](https://www.btframework.com/connparams.htm)
+  states plainly that through this API you **"cannot set any custom values"**, and that on earlier
+  Windows there is no supported way at all.
+  **Microsoft does not publish the actual interval values for the three presets.**
+
+**What is NOT documented anywhere found:** our exact observation - Windows replying **SUCCESS and then
+applying a value we never asked for and had explicitly excluded** (`UPi12` = 15 ms against a requested
+25-28.75 ms). The literature describes "accepts then does nothing". Ours *did* something, just not what
+was asked.
+
+##### §14.13 HYPOTHESIS: Windows is not negotiating, it is SWITCHING PRESETS
+
+**Clearly labelled a hypothesis.** It is not documented, but it fits every measurement we have, and it
+is the simplest thing that does:
+
+> Windows does not treat an L2CAP request as a value to negotiate. It treats it as a **signal that the
+> peripheral wants different parameters**, and responds by switching to one of its three fixed presets.
+> With no request it sits on **Balanced**. Any request is read as "this device wants more throughput",
+> so it switches to **ThroughputOptimized** - whatever number was actually asked for.
+
+| observation | does the model explain it? |
+|---|---|
+| 30 ms on 4/4 connections with no request (`u0`) | yes - Balanced |
+| 15 ms after requesting 7.5 ms (arm A', from CSV) | yes - ThroughputOptimized |
+| 15 ms after requesting 25-28.75 ms (arm C, measured) | yes - same preset, request value irrelevant |
+| Status `SUCCESS` rather than reject | yes - Windows genuinely *did* change something |
+| Requested value ignored entirely | yes - there is nothing to negotiate, only presets |
+| "cannot set any custom values" in Microsoft's own API | consistent - presets are all Windows has |
+
+**It makes a sharp prediction:** §14.11's probe sequence will return `UPi12` for **every** requested
+range. If any probe returns something other than 12, this model is dead.
+
+**And it implies something uncomfortable: we have been doing the one thing guaranteed to hurt us.**
+Asking for a *faster* interval and asking for a *slower* one produce the identical result - Windows'
+fast preset - so the only way to get its slow preset is **never to ask at all.** Which is exactly what
+arm B does, by accident, and exactly why arm B is the only configuration that has ever survived.
+
+##### §14.14 A HOST-SIDE LEVER WE HAVE NEVER CONSIDERED
+
+If §14.13 is right, the firmware is the wrong place to be fighting this. Windows 11 exposes the
+presets directly, and **this machine is Windows 11 Pro 10.0.26200, so the API is available**:
+
+- `BluetoothLEDevice.RequestPreferredConnectionParameters(...)` - the **supported** way to select a
+  preset, from the host side.
+- `BluetoothLEConnectionParameters.ConnectionInterval` - a **read** API. The GUI could log the interval
+  in force without any firmware or library patch at all.
+
+Reachable from the GUI through bleak's WinRT backend (`BleakClient._requester` is the
+`BluetoothLEDevice`). Two things worth knowing before trying it:
+
+1. **We would want `Balanced` or `PowerOptimized`, NOT `ThroughputOptimized`.** Throughput-optimised
+   means a *shorter* interval, which by everything above is the direction that kills the link. This is
+   the opposite of the instinct the name invites.
+2. It is host-side, so it does not travel with the exo - a labmate's laptop would not have it unless
+   the GUI does it. That makes it a **complement** to the firmware fix, not a replacement.
+
+The read API is worth doing regardless: it is a second, independent measurement of the interval, from
+the other end of the link, with no library patch to lose on the next ArduinoBLE update.
+
+##### §14.15 ARM C IS STILL ALIVE AT 5 MINUTES - and that is a problem for §9
+
+§14.9's prediction was that arm C would fail on A''s timescale, because both run at 15 ms. At 5 minutes
+(~1 in 4 under the null, so not yet conclusive) it has not. **If arm C survives long, the interval
+hypothesis is in trouble**, because A' and C would be the same interval with opposite outcomes.
+
+**The gap in the evidence is specific and cheap to close: we never read arm A''s `UP` field.** A' being
+15 ms rests on (a) a CSV gap-histogram mode of 15-20 ms and (b) the *assumption*, from arm C, that
+Windows always lands on 15 ms. If A' actually got something else - or got several update events, which
+`UPn` would show, and which `ianm`'s three-times-repeated request makes plausible - then A' and C are
+not the same condition and §9 survives intact.
+
+**So `B20` with the `UP` field is now the single highest-value flash available**, and it costs about a
+minute. It was already the recommendation; arm C surviving makes it urgent rather than merely useful.
+
+##### §14.16 ARM C SURVIVED 20 MINUTES - AND THE BANNER WAS LYING TO US
+
+**Arm C ran 1,050 s and was cut short by the operator, not by a failure.** And the CSV says it was
+**not** running at the 15 ms its banner reported.
+
+Measured with a burst-aware estimator - group samples separated by <8 ms into one burst (they share a
+connection event), then histogram **burst-start to burst-start** spacing in 1.25 ms BLE units. This is
+the right estimator here because the three arms have very different burst fractions (34-52% of samples
+arrive inside an event), which badly skews any naive inter-sample statistic:
+
+| arm | mean burst-to-burst | bursts/s | samples/burst | modal spacing | outcome |
+|---|---|---|---|---|---|
+| **A' `(6,6)`** | **21.7 ms** | **46.1** | 2.08 | broad, units 12-17 | **DIED at 66 s** |
+| B `(12,24)` | 28.7 ms | 34.9 | 2.53 | units 21-23 | clean 1,309 s |
+| **C `(20,23)`** | **29.6 ms** | **33.7** | 2.81 | **unit 23 = 28.75 ms, sharp (37.5% in two bins)** | **clean 1,050 s** |
+
+**Arm C's sharpest peak is at 28.75 ms, which is EXACTLY the maximum we requested** (`(20,23)` =
+25.0-28.75 ms). Windows honoured the request and picked the slowest value we allowed. Its peak is the
+sharpest of the three arms, which is what an explicitly granted interval should look like.
+
+**So `UPi12` was a TRANSIENT.** Windows went to 15 ms at connection time - which is what the banner
+captured at ~1.9 s - and then moved to 28.75 ms afterwards. The banner refresh is gated on
+`!_tx_subscribed`, so anything after the GUI subscribes is invisible to it. **The "mid-connection change
+we cannot see" limitation, which §14.15 listed as a known gap and declined to build for, turns out to be
+a real and consequential phenomenon rather than a hypothetical.** The CSV caught what the banner could
+not.
+
+##### §14.17 RETRACTED: "my arm C design is void as a confound-breaker"
+
+**That was written off the transient banner reading and it was wrong. Arm C worked exactly as designed.**
+§14.9's original table applies after all, and §14.16 is the row it predicted.
+
+§14.13's preset hypothesis ("any request -> 15 ms, requested value irrelevant") is **dead**: Windows
+honoured the requested range and landed inside it. Windows is negotiating, not switching presets - it
+just takes a detour through 15 ms on the way.
+
+##### §14.18 THE CONFOUND IS BROKEN, AND §9 IS CONFIRMED
+
+This is the result the whole §14 sequence was built to get:
+
+| arm | request sent? | interval in force | outcome |
+|---|---|---|---|
+| A' `(6,6)` | **yes** | **~21.7 ms (fast)** | **DIED, 12/12** |
+| B `(12,24)` | no (`u0`) | ~28.7 ms | clean |
+| C `(20,23)` | **yes** | ~29.6 ms | **clean, 1,050 s** |
+
+**Arm C sends a request and survives. Arm A' sends a request and dies.** The two differ in the interval
+and not in whether a request was sent.
+
+- **"Not asking is what helps" is DEAD.** Arm C asks, and lives.
+- **"The interval value is what matters" is CONFIRMED** by a controlled comparison, not by elimination.
+
+§12.3's argument-from-elimination and §12.5's "NOT VERIFIED" row can both be retired. The mechanism
+question that has been open since §9 was written now has a measured answer at the level of *which
+variable*: **it is the connection interval.**
+
+**Total clean exposure at a relaxed interval is now 6,076 s across four runs** (B: 1,821 + 1,896 + 1,309;
+C: 1,050) against **12/12 failures** at the fast interval.
+
+##### §14.19 WHAT IS STILL OPEN
+
+1. **A''s exact interval.** 21.7 ms mean burst spacing is clearly faster than the survivors' ~29 ms, but
+   the distribution is broad (units 12-17) and does not quantise cleanly at multiples of either 6
+   (7.5 ms) or 12 (15 ms). Host timestamps are too jittery to resolve it, and - now that `UPi12` is
+   known to be a transient - the banner alone will not settle it either. **B20 is still worth the
+   minute, but read its CSV too, not just its banner.**
+2. **Where the threshold is.** We know ~22 ms dies and ~29 ms lives. The boundary is unlocated, and
+   `(12,24)` sits close enough to it to be worth knowing about.
+3. **WHY a faster interval is fatal.** Still unanswered, and §9's old arithmetic cannot be reused: at
+   46 bursts/s rather than the assumed 133 connection events/s, every number in §9 derived from 133
+   is void.
+4. **Why Windows detours through 15 ms at all**, and whether that transient is itself harmful.
+
+##### A NOTE ON THE INSTRUMENT
+
+The banner and the CSV disagreed, and **the CSV was right.** Worth remembering: the banner is a
+single sample taken ~1.9 s into a connection, and the link can move afterwards. The traffic is the
+ground truth for what actually happened during a trial. Any future reading of `CPi`/`UPi` should be
+cross-checked against the burst-spacing estimator above before it is trusted.
+
+##### §14.20 B20 READING - `CPi23_l0_t960_u1_n1,UPi6_t960_s1_n1`. **WINDOWS GRANTED 7.5 ms.**
+
+2026-09-12 17:26, build `B20`, `setConnectionInterval(6, 6)`.
+
+| field | meaning |
+|---|---|
+| `CPi23` | link **opened at 28.75 ms** - NOT the 30 ms seen on all four B21 connections |
+| `u1` | request sent, as expected |
+| `UPs1` | **HCI status 0x00 = SUCCESS** |
+| **`UPi6`** | **the interval granted is 6 x 1.25 = 7.5 ms - the BLE spec MINIMUM** |
+
+**§9 WAS RIGHT ALL ALONG. The link really did run at 7.5 ms.** Windows honoured `(6,6)` completely,
+down to the floor of the specification.
+
+##### §14.21 RETRACTED: "the link never ran at 7.5 ms, on any build"
+
+Written in §14.x earlier today on the strength of arm C's reading, and **wrong**. The reasoning chain
+that produced it:
+
+1. Arm C's banner said `UPi12` (15 ms) against a requested 25-28.75 ms.
+2. From that single data point I generalised to "Windows applies 15 ms to any request" (§14.13).
+3. Arm A' was then *assumed* to be 15 ms, and "7.5 ms" declared false.
+
+Step 2 was an over-generalisation from n=1, and step 1 turned out to be a transient (§14.16). Both the
+preset hypothesis and the "never 7.5 ms" claim are dead. **§9's original account - including its
+133-connection-events-per-second arithmetic - is restored and confirmed.** The earlier note voiding that
+arithmetic is itself void.
+
+**The CSV agrees, once read correctly.** A'-2's mean burst-to-burst spacing was 21.7 ms, which I read as
+"the interval is 15-20 ms". It is not the interval - it is **~3 connection events**: 133 events/s against
+46.1 bursts/s is 2.9 events per burst, and 3 x 7.5 ms = 22.5 ms, against 21.7 ms measured. The broad hump
+at units 12-17 is 2-3 events of 6 units each, smeared by host timestamp jitter. **Burst spacing measures
+events-per-burst x interval, not the interval** - a correction that applies to every use of that
+estimator above.
+
+##### §14.22 THE FINAL PICTURE - all intervals MEASURED, not inferred
+
+| arm | requested | **granted (measured)** | conn events/s | outcome |
+|---|---|---|---|---|
+| **A / A' `(6,6)`** | 7.5 ms | **7.5 ms** (`UPi6`, SUCCESS) | **133** | **12 / 12 FAILED** |
+| B `(12,24)` | nothing sent (`u0`) | ~30 ms | 33 | **clean, 5,026 s** |
+| C `(20,23)` | 25-28.75 ms | **28.75 ms** | 35 | **clean, 1,050 s** |
+
+- **The interval is the variable.** Arm C sends a request and lives; arm A' sends a request and dies.
+- **7.5 ms is fatal. ~29-30 ms is not.** 4x in interval, 4x in connection events per second.
+- **§12 is CLOSED.** Every interval in this table is now a measurement.
+
+##### §14.23 NEW AND OPERATIONALLY IMPORTANT: WINDOWS PERSISTS THE INTERVAL ACROSS CONNECTIONS
+
+`CPi23` is the surprise. Every B21 connection opened at `i24` = 30 ms. This one opened at **`i23` =
+28.75 ms - precisely the value arm C had negotiated in the previous session.** Windows carried the
+negotiated interval forward into a later, separate connection, after a reflash and a GUI restart.
+
+**So "Windows' default" is not a constant - it is the last value it settled on with this device.** That
+has consequences that reach backwards and forwards:
+
+- **The "Windows is deterministic, 4/4 identical" finding (§ above) is conditional.** Those four
+  connections all followed B21 sessions, which never send a request, so 30 ms simply persisted. It was
+  not independence; it was inertia.
+- **TEST ORDER NOW MATTERS, and this is a live hazard.** A `B21` run immediately after a `B20` run may
+  **open at 7.5 ms**. And because 7.5 ms is below `(12,24)`'s minimum of 12, that connection WILL send a
+  request (`u1`) rather than the `u0` every previous B21 connection showed - so it is a materially
+  different condition from the B21 runs that produced 5,026 s of clean running.
+- **Every future reading must record what ran before it.** A banner alone is no longer self-describing.
+- It may also explain otherwise-unaccounted historical variance: sessions inherited whatever the previous
+  session left behind.
+
+**Practical consequence: after any `B20` run, check `CPi` on the next connection before trusting it.** If
+it opens at `i6`, the carry-over is in effect and the run is not comparable to the earlier B21 runs.
+
+##### §14.24 THE PUBLISHED WINDOWS THRESHOLDS DO NOT APPLY TO THIS BUILD
+
+§14.12 collected reports that Win10 will not accept intervals above ~20 ms and will not go below ~15 ms.
+**This Windows 11 build (10.0.26200) did both:** it granted **7.5 ms** (below the reported floor) and
+**28.75 ms** (above the reported ceiling), both with status SUCCESS. Windows 11's stack is evidently more
+compliant than the Win10 reports describe, and those thresholds should not be carried forward into any
+reasoning about this host.
+
+##### §14.25 B20's CSV - 7.5 ms CONFIRMED FROM TRAFFIC, and the 11-minute survival explained
+
+The B20 run was cut by the operator at **637.7 s** with no failure, which looked like a direct
+contradiction of `(6,6)` failing 12/12. It is not. Two separate questions, both answered here.
+
+**Q1: was B20 really at 7.5 ms, or was `UPi6` a transient like arm C's `UPi12`?**
+
+| run | bursts/s | samples/burst | mean burst-to-burst | modal peak | implied interval |
+|---|---|---|---|---|---|
+| A'-2 `(6,6)` DIED 66 s | 46.10 | 2.08 | 21.7 ms | spread u12-u16 | 133.3/46.10 = **2.89 events x 7.5 = 21.7** |
+| **B20 `(6,6)` cut 637.7 s** | **52.23** | **1.84** | **19.1 ms** | **u12-u13, 40% in two bins** | 133.3/52.23 = **2.55 events x 7.5 = 19.1** |
+| C `(20,23)` cut 1,050 s | 33.72 | 2.81 | 29.6 ms | u23 sharp | **1 event x 28.75 = 28.75** |
+| B `(12,24)` cut 1,309 s | 34.85 | 2.53 | 28.7 ms | u21-u23 | ~1 event x ~28 |
+
+**B20 ran FASTER than the run that died** - 19.1 ms mean burst spacing against A'-2's 21.7 ms, 52.2
+bursts/s against 46.1. Its modal peak sits sharply at **2 connection events of 7.5 ms** (u12 = 15.00 ms,
+u13 = 16.25 ms, 40% of all gaps in those two bins), and the arithmetic closes exactly: 133.3 events/s at
+7.5 ms divided by 52.23 bursts/s = 2.55 events per gap, x 7.5 ms = 19.1 ms measured.
+
+**So `UPi6` was NOT a transient. B20 genuinely ran at 7.5 ms, and option (a) is dead.** §14.20's reading
+is confirmed by a second, independent method - the same cross-check that caught arm C's transient now
+vindicates B20's banner.
+
+**Q2: then why did it survive 11 minutes?**
+
+**Because it was cut inside `(6,6)`'s normal failure range.** The 12 recorded `(6,6)` failures are
+exponential-ish with a mean of ~216 s and a **maximum of 789 s**. B20 was stopped at **637.7 s - below
+that maximum.** It had not survived the distribution; it simply had not failed yet when the operator
+ended it.
+
+- P(survive 637.7 s | mean 216 s) = **5.2%**, about 1 in 19.
+- Across 13 `(6,6)` attempts the *expected* number of runs lasting that long is 13 x 0.052 = **0.68**.
+  **Observing one is exactly what the distribution predicts.**
+
+**This run is a statistical fluctuation, not a counter-example.** Had it been allowed to continue it would
+most likely have failed; at 637.7 s the hazard is unchanged, since an exponential process has no memory.
+
+**And option (b) - "7.5 ms is necessary but not sufficient, the host must also be stressed" - is NOT
+established by this run.** It remains possible, but this run is not evidence for it, because the run never
+had to explain anything: its length is ordinary for `(6,6)`.
+
+##### §14.26 WHY THE RELAXED-INTERVAL RUNS *ARE* EVIDENCE, AND THIS ONE IS NOT
+
+The distinction is entirely about whether a run exceeds the fast interval's observed failure range:
+
+| | longest run | vs `(6,6)`'s 789 s maximum |
+|---|---|---|
+| B20 `(6,6)` | 637.7 s | **inside** - proves nothing |
+| C `(20,23)` | 1,050 s | **beyond** |
+| B `(12,24)` | 1,309 s | **beyond** |
+| B `(12,24)` earlier | 1,821 s and 1,896 s | **far beyond** |
+
+Pooling properly: `(6,6)` has **12 failures in ~3,240 s of total exposure**, a rate of one per 270 s.
+The relaxed arms have **0 failures in 6,076 s**, where that rate predicts **22.5**.
+P(0 failures) = e^-22.5 ~ **1.7 x 10^-10**.
+
+**The interval effect survives this run intact.** §14.22's conclusion stands, and the "RESOLVED" header is
+justified - with the proviso recorded here that `(6,6)`'s failure time has a **fat tail reaching at least
+789 s**, so **no single short-to-medium `(6,6)` run can ever demonstrate safety.** Anyone re-testing the
+fast interval needs to beat 789 s before a survival means anything, and realistically several runs.
+
+##### §14.27 THE OPERATOR'S TWO OBJECTIONS, ANSWERED
+
+Both were raised against §14.23 and both were worth raising.
+
+**"If Windows persists the interval, A' followed a `(12,24)` session and should have survived."**
+Persistence sets the **opening** interval only; a request then overrides it. B20's own banner shows both
+steps in one line: `CPi23` (inherited 28.75 ms) -> `UPi6` (request granted, 7.5 ms). A' opening at 30 ms
+and being pulled to 7.5 ms by its own request is exactly what persistence predicts, and it died. No
+contradiction. **However the objection correctly exposed that persistence rests on n=1** - `i23` once,
+after one session that negotiated `i23`, against `i24` four times after sessions that asked for nothing.
+§14.23 was written with more confidence than one observation supports. **Still to test:** reconnect
+several times and watch whether `CPi` holds or drifts.
+
+**"B20 is surviving too."** Answered above: cut at 637.7 s, inside `(6,6)`'s known range, p = 5.2%,
+expected to happen about once in 13 attempts. **The objection was right to demand the CSV** - had B20
+turned out to be running at ~29 ms, §14.20 would have collapsed.
+
+##### §14.28 SECOND B20 SESSION - `CPi6_l0_t960_u0_n1,UPi12_t960_s1_n1`. THREE NEW FACTS.
+
+2026-09-12 17:39, same `B20` build, second session.
+
+| field | meaning |
+|---|---|
+| **`CPi6`** | the link **OPENED at 7.5 ms** - the value the *previous* B20 session negotiated |
+| **`u0`** | **we sent NO request.** 6 is inside `[6,6]`, so `addConnection()`'s test is false |
+| **`UPi12_s1`** | yet an update event arrived anyway: **Windows moved the link to 15 ms, unprompted** |
+
+**1. PERSISTENCE IS CONFIRMED, n=2.** §14.27 downgraded it to a single observation after the operator
+rightly objected. This is the second: `i23` carried over from arm C, and now `i6` carried over from the
+previous B20 session - across a GUI restart. **Windows remembers the negotiated interval per device.**
+
+**2. WINDOWS MOVES THE INTERVAL ON ITS OWN.** With `u0` we asked for nothing, and Windows still issued a
+Connection Update to 15 ms. This is new, and it **re-explains arm C's transient**: the `UPi12` there was
+never a response to our request at all - Windows has its own drift toward ~15 ms. So `UPi12` showing up in
+two completely different configurations is Windows' own behaviour, not a reply to us.
+
+**3. THIS RUN IS NOT A 7.5 ms TEST.** It is running at ~15 ms. Which makes it, by accident, **the missing
+middle rung of the ladder** (§14.19 item 2): we have 7.5 ms fatal and ~29-30 ms clean, and 15 ms untested.
+**Pending its CSV - `UPi` has been a transient before and must always be cross-checked.**
+
+##### §14.29 THE TRAP: CONSECUTIVE `(6,6)` RUNS ARE NOT THE SAME EXPERIMENT
+
+Because of persistence, `(6,6)` is **self-defeating after its first session**:
+
+| session | Windows opens at | inside `[6,6]`? | request? | ends up at |
+|---|---|---|---|---|
+| 1st B20 | 28.75 ms (from arm C) | no | **yes** -> granted | **7.5 ms** |
+| 2nd B20 | **7.5 ms** (from session 1) | **yes** | **no** | Windows drifts to **15 ms** |
+
+`(6,6)` only pins 7.5 ms when Windows happens to open somewhere else. Once it has settled at 7.5 ms, our
+range contains it, nothing is sent, and Windows is free to relax on its own.
+
+**Consequence that reaches backwards:** some of the original 12 `(6,6)` failures may not have been at
+7.5 ms at all. They all failed, so if any ran at 15 ms then **15 ms is also fatal** - which is exactly what
+the current run will tell us.
+
+**And it means every interval claim needs its CSV, not just its banner.** A banner now has three possible
+relationships to reality: what we asked, what Windows opened at, and where Windows drifted to.
+
+##### §14.30 A RISK TO THE SHIPPED FIX - `(12,24)` CANNOT CORRECT A 15 ms CARRY-OVER
+
+**This is the practically important consequence and it was not visible before today.**
+
+`(12,24)` means 15-30 ms. **15 ms is inside that range.** So:
+
+> If Windows ever settles at 15 ms, a `(12,24)` build **sends no request** (`u0`) and **cannot pull the
+> link back up**. The session runs at 15 ms.
+
+Every clean B21 run so far opened at `i24` = 30 ms, because each followed another B21 session - inertia,
+not safety (§14.23). **A `(12,24)` run immediately after a `(6,6)` run can open at 7.5 or 15 ms and stay
+there.** That is a live hazard for the next person who tests in that order, and it is also exactly the
+situation a labmate's laptop could end up in after one bad session.
+
+**RECOMMENDED CHANGE: `setConnectionInterval(20, 24)` = 25-30 ms** instead of `(12, 24)`.
+
+| | `(12,24)` = 15-30 ms | **`(20,24)` = 25-30 ms** |
+|---|---|---|
+| Windows opens at 30 ms | accepts (`u0`) | accepts (`u0`) |
+| Windows opens at 15 ms | **accepts - NO correction** | **outside -> request sent -> pulled up** |
+| Windows opens at 7.5 ms | outside -> corrected | outside -> corrected |
+| Proven survivable? | 5,026 s clean | 28.75 ms proven by arm C (1,050 s) |
+
+`(20,24)` excludes every interval we have reason to distrust while staying inside the band that has
+actually been proven clean. It is strictly safer than `(12,24)` and costs nothing - arm C already
+demonstrated that a request being sent is harmless (§14.18).
+
+**Do not make this change until the current 15 ms run reports.** If 15 ms turns out to be perfectly safe,
+`(12,24)` is fine as it stands and this is unnecessary churn. If 15 ms fails, `(20,24)` becomes mandatory.
+
+##### §14.31 ON HOST STRESS - the operator's observation
+
+The operator notes RAM is still above 90% and the fan unchanged from when the fast failures occurred.
+**That argues against option (b)** ("7.5 ms needs host stress as a co-factor") as an explanation for the
+previous B20 run surviving 637.7 s, and in favour of the simpler account already given in §14.25: that run
+was **cut inside `(6,6)`'s fat tail**, at a 5.2% survival probability, which across 13 attempts is expected
+to happen about once. No host-state explanation is needed, and the unchanged host state removes the only
+motivation for inventing one.
+
+##### §14.32 THE 15 ms RUN DIED AT 118 s. `(12,24)` IS UNSAFE AND IS SUPERSEDED.
+
+The second B20 session - the one Windows had quietly moved to 15 ms (§14.28) - **failed at 118 s**
+(127.8 s GUI-reported minus the 9.6 s supervision lag), with the unchanged fingerprint
+`BLESTALL_n1_w10_s3`, `c2`, `x300`.
+
+**Its interval is confirmed at 15 ms from the traffic, by a hard constraint rather than an inference:
+bursts per second can never exceed connection events per second.**
+
+| run | bursts/s | -> interval must be <= | ~15 ms gaps | ~30 ms gaps | interval | outcome |
+|---|---|---|---|---|---|---|
+| B20a | 52.23 | 19.1 ms | 51.1% | 8.9% | **7.5 ms** | cut 638 s |
+| **B20b** | **41.09** | **24.3 ms** | **12.3%** | **44.8%** | **15 ms** | **DIED 118 s** |
+| C | 33.72 | 29.7 ms | 2.6% | 62.4% | 28.75 ms | clean 1,050 s |
+
+B20b's 41.09 bursts/s **excludes 28.75 ms and 30 ms outright** (only 34.8 and 33.3 events/s exist at
+those intervals), and its gaps are cleanly bimodal at 1x15 and 2x15 ms. Banner and traffic agree.
+
+**THE MEASURED LADDER:**
+
+| interval | outcome |
+|---|---|
+| **7.5 ms** | 12 / 12 failures, mean ~216 s, max 789 s |
+| **15 ms** | **DIED at 118 s** |
+| 28.75 ms | clean 1,050 s |
+| ~30 ms | clean 5,026 s across three runs |
+
+**So §14.30's risk is real, not hypothetical: `(12,24)` = 15-30 ms CONTAINS a fatal interval.** A host
+that has persisted 15 ms is accepted with `u0`, no request is sent, and the firmware cannot pull the link
+back up. **And Windows has 15 ms persisted on this machine right now**, so flashing `(12,24)` next would
+very likely run an entire trial at the interval that just died in under two minutes.
+
+**`(12,24)` is superseded. It survived 5,026 s only because every one of those runs inherited 30 ms from
+a previous 30 ms session - inertia, not protection (§14.23).**
+
+##### §14.32b 15 ms CONFIRMED FATAL, 2 / 2 - replicated immediately
+
+A second run in the identical condition (banner `CPi6_l0_t960_u0_n1,UPi12_t960_s1_n1` again - opened at
+7.5 ms persisted, `u0` so nothing requested, Windows moved it to 15 ms on its own) **failed at ~429 s**
+(438.5 s GUI-reported minus the 9.6 s supervision lag). Same fingerprint yet again:
+`BLESTALL_n1_w10_s3`, `c2`, `x300`.
+
+| run | bursts/s | interval must be <= | ~15 ms gaps | ~30 ms gaps | TTF |
+|---|---|---|---|---|---|
+| 15 ms #1 | 41.09 | 24.3 ms | 12.3% | 44.8% | **118 s** |
+| 15 ms #2 | 38.99 | 25.6 ms | 22.6% | 12.1% | **429 s** |
+| 28.75 ms (C) | 33.72 | 29.7 ms | 2.6% | 62.4% | clean 1,050 s |
+
+Both runs' burst rates **exclude 28.75 ms and 30 ms outright**, and both show the 1x / 2x 15 ms gap
+structure. Banner and traffic agree on both.
+
+**So §14.32 was not resting on a single run.** 15 ms fails at 118 s and 429 s - a spread consistent with
+the same fat-tailed process seen at 7.5 ms, and well inside it.
+
+**UPDATED LADDER, all measured:**
+
+| interval | result |
+|---|---|
+| **7.5 ms** | **12 / 12 failures** (mean ~216 s, max 789 s) |
+| **15 ms** | **2 / 2 failures** (118 s, 429 s) |
+| 28.75 ms | clean 1,050 s |
+| ~30 ms | clean 5,026 s over three runs |
+
+**14 failures at <= 15 ms. Zero failures in 6,076 s at >= 28.75 ms.** The threshold is between 15 and
+28.75 ms, and the decision to abandon `(12,24)` is now backed by two independent failures rather than one.
+
+**Also newly non-zero in this banner:** `w271d` - the Teensy's worst gap between successful RT
+transmissions reached **27.1 s**, where every earlier banner read `w0d`. And `e300x10` is very likely at
+its clamp. Neither changes the conclusion; both are consistent with a longer run spent largely dead.
+
+##### §14.33 PRODUCTION DEFAULT IS NOW `(20, 24)` = 25-30 ms - build `B23`
+
+```c
+#define EXO_BLE_INTERVAL_SEL      0u
+//   0 = (20,24) = 25.0-30.0 ms  -> B23  PRODUCTION DEFAULT
+//   1 = ( 6, 6) =  7.5 ms       -> B20  FATAL, experiment only
+//   2 = (12,24) = 15.0-30.0 ms  -> B21  SUPERSEDED, accepts a fatal 15 ms
+//   3 = (20,23) = 25.0-28.75 ms -> B22  arm C
+```
+
+| Windows opens at | `(12,24)` | **`(20,24)`** |
+|---|---|---|
+| 30 ms | accept (`u0`) | accept (`u0`) |
+| **15 ms** | **accept - NO correction, FATAL** | **outside -> request -> pulled up** |
+| 7.5 ms | outside -> corrected | outside -> corrected |
+
+`(20,24)` excludes every interval measured or suspected fatal while staying inside the band actually
+proven clean. **It is also what recovers this machine from its current 15 ms carry-over.** Arm C already
+established that sending a request is harmless (§14.18), so the correction costs nothing.
+
+Kept as a range rather than pinning `(24,24)`: min == max was the property under suspicion for this whole
+investigation and there is no reason to reintroduce it.
+
+**Refactor while here:** the two-boolean scheme (`EXO_BLE_INTERVAL_PINNED` / `_ARM_C`) had a precedence
+wart - PINNED silently overrode ARM_C - and is replaced by the single `EXO_BLE_INTERVAL_SEL`.
+`EXO_FW_TAG` and `exo_ble_cp_string()`'s `our_min`/`our_max` both derive from it, so the banner, the
+requested range and the compiled interval cannot disagree. Both targets compile.
+
+##### §14.35 FIRST `B23` CONNECTION - `CPi6_l0_t960_u1_n1,UPi24_t960_s1_n1`. THE CORRECTION WORKS.
+
+2026-09-12 17:58, build `B23`, `setConnectionInterval(20, 24)` = 25-30 ms.
+
+| field | meaning |
+|---|---|
+| `CPi6` | opened at **7.5 ms** - persisted from the B20 sessions, exactly the hazard §14.30 described |
+| **`u1`** | **a request WAS sent** - 6 is below our minimum of 20, so the range correctly rejected it |
+| **`UPi24_s1`** | **Windows GRANTED 30.0 ms** |
+
+**This is §14.33's design working on its first attempt, measured rather than hoped for.** The machine was
+sitting on a persisted 7.5 ms - an interval that has failed 12/12 - and `(20,24)` detected it, asked, and
+was granted 30 ms. Under `(12,24)` the same machine would have been *corrected* too (7.5 < 12), but under
+`(12,24)` a **15 ms** carry-over would have been silently accepted, which is what made it unsafe.
+
+**PERSISTENCE CONFIRMED n=3:** `i23` after arm C, `i6` after B20a, `i6` again now. It is a settled fact,
+not the single observation §14.27 had to downgrade it to.
+
+##### §14.36 A CLEAN RULE: WINDOWS GRANTS THE **MAXIMUM** OF THE REQUESTED RANGE
+
+Two independent data points, and they agree:
+
+| requested | granted |
+|---|---|
+| `(20, 23)` = 25.0-28.75 ms | **28.75 ms** - our max |
+| `(20, 24)` = 25.0-30.0 ms | **30.0 ms** - our max |
+
+Windows takes the **slowest value we allow**, which is consistent with a host that prefers to save power.
+That gives the two ends of the range completely separate jobs, and it is worth stating plainly because it
+makes the parameter easy to reason about:
+
+- **`max` is what you actually get.** Set it to the interval you want.
+- **`min` is only a trigger threshold.** It decides what Windows values get corrected: anything faster than
+  `min` falls outside the range, so a request fires. It is **not** a floor you might be given.
+
+So `(20,24)` reads as *"correct anything faster than 25 ms, and when correcting, go to 30 ms."* And
+`(12,24)`'s defect is exactly that its `min` sat **below a measured-fatal value**, so 15 ms was inside the
+accept band. This rule is why `(23,24)` would be the tighter option if 25 ms ever needs excluding too - it
+changes only the trigger, not the outcome.
+
+##### §14.37 THE RESIDUAL RISK - WE CAN ONLY CORRECT AT CONNECTION SETUP
+
+`L2CAPSignalingClass::addConnection()` runs **once, at connect.** Nothing in the firmware can correct the
+interval after that.
+
+And we know Windows moves intervals unprompted: B20b opened at 7.5 ms with `u0` and Windows took it to
+15 ms on its own (§14.28). **If Windows ever drifts a 30 ms link down mid-session, nothing pulls it back,
+and the banner will not show it** - the banner refresh is gated on `!_tx_subscribed`, so it only ever
+reports the first ~2 s of a connection.
+
+**Empirically this has not happened:** four runs at ~28.75-30 ms have stayed clean for 1,050-1,896 s, and
+Windows' observed drift has been *upward* toward whatever we asked for, never downward. But it is unproven,
+and **the CSV burst-rate check is the only way to confirm what a trial actually ran at.** That check should
+stay part of the routine for any run that matters, which is the single most useful habit to come out of
+today.
+
+##### §14.34 WHAT IS SETTLED, AND WHAT IS NOT
+
+**Settled, by measurement:**
+
+- The connection interval is the cause. Arm C sends a request and survives; A' sends one and dies.
+- 7.5 ms and 15 ms are both fatal. 28.75 ms and 30 ms are not.
+- The fatal threshold lies **between 15 ms and 28.75 ms**.
+- Windows persists the negotiated interval per device, across reflashes and GUI restarts (n=2).
+- Windows also moves the interval **on its own**, with no request from us (`u0` + `UPi12`).
+
+**Not settled:**
+
+1. **WHY a faster interval is fatal.** Entirely open. §9's original story was about `_pendingPkt`
+   saturation under 133 connection events/s - but 15 ms is only 66.7 events/s and still kills, so
+   whatever the mechanism is, it bites at half that rate too.
+2. **Where between 15 and 28.75 ms the threshold sits.** `(20,24)` is chosen to stay clear of it rather
+   than to locate it.
+3. **Whether 25 ms is genuinely safe**, or merely untested. Only 28.75 and ~30 ms have run long.
+   `(20,24)` permits 25 ms if Windows picks it. If that ever worries us, `(23,24)` = 28.75-30 ms is the
+   tighter version, confined entirely to proven values.
 
 ##### THE COST OF THE FIX, measured
 

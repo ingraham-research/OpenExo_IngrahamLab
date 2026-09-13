@@ -358,7 +358,7 @@ bool ExoBLE::setup()
     //"fast" as the problem.
     //
     //---- A/B/A CONTROL EXPERIMENT, 2026-09-12 (doc section 14.3) --------------------------------
-    //Which arm is compiled is set by EXO_BLE_INTERVAL_PINNED in SystemReset.h, NOT here, because
+    //Which arm is compiled is set by EXO_BLE_INTERVAL_SEL in SystemReset.h, NOT here, because
     //the build tag in the banner is derived from that same symbol - so a log can never misreport
     //which arm produced it. Flip it there; this file follows.
     //
@@ -369,11 +369,19 @@ bool ExoBLE::setup()
     //by several days AND a library patch AND the ping AND a host reboot. If the failure returns on
     //arm A' and then goes away again on arm B, the interval is the only thing that moved. If it
     //does NOT return, something else was doing the work and section 9 needs rewriting.
-    if (EXO_BLE_INTERVAL_PINNED) {
-        BLE.setConnectionInterval(6, 6);
-    } else {
-        BLE.setConnectionInterval(12, 24);
-    }
+    //Selected by EXO_BLE_INTERVAL_SEL in SystemReset.h, which also derives the build tag. The full
+    //reasoning - and the MEASURED fatality of 7.5 ms and 15 ms - is in the comment block there.
+    //Default is (20,24) = 25-30 ms, chosen so that no host-persisted interval below 25 ms can ever be
+    //silently accepted.
+    #if   EXO_BLE_INTERVAL_SEL == 1u
+        BLE.setConnectionInterval(6, 6);      //7.5 ms - FATAL, experiment only
+    #elif EXO_BLE_INTERVAL_SEL == 2u
+        BLE.setConnectionInterval(12, 24);    //15-30 ms - SUPERSEDED, accepts a fatal 15 ms
+    #elif EXO_BLE_INTERVAL_SEL == 3u
+        BLE.setConnectionInterval(20, 23);    //25-28.75 ms - arm C
+    #else
+        BLE.setConnectionInterval(20, 24);    //25-30 ms - production default
+    #endif
 
     //No-op unless EXO_CRASH_TRAP_SELFTEST is 1 in SystemReset.h. Placed last so a self-test fault
     //happens after the reset-reason string is already parked in ErrorChar, and before advertising -
@@ -452,6 +460,31 @@ bool ExoBLE::handle_updates()
             //Records EXO_STALL_MAGIC and warm-resets, so the next boot's banner says BLESTALL_n.
             //Warm keeps GPREGRET, which is what makes this self-confirming rather than a guess.
             exo_ble_stall_reset(exo_ble_link_diag());
+        }
+
+        //Refresh the banner once the central has ANSWERED our parameter-update request. The
+        //LE Connection Update Complete event (captured by the HCI patch) lands tens to hundreds of
+        //ms AFTER the connection completes, so the write in the connection branch below is too
+        //early to ever contain it - this is what actually gets UPi into the banner.
+        //
+        //Placed BEFORE the unchanged-status early return on purpose: the status does not change
+        //when an update arrives, so anything after that return would never run.
+        //
+        //Gated on !_tx_subscribed, which bounds it to the pre-subscribe window. The GUI reads
+        //ErrorChar BEFORE it subscribes to anything (QtExoDeviceManager :365 read, :389/:392
+        //start_notify), so no notification can be generated here, and the refresh still lands
+        //ahead of that read.
+        if ((current_status > 0) && !_tx_subscribed)
+        {
+            static uint16_t s_cu_seen = 0;
+            if (exo_ble_cu_status != s_cu_seen)
+            {
+                s_cu_seen = exo_ble_cu_status;
+                String banner = s_boot_banner + exo_ble_cp_string();
+                char banner_char[banner.length() + 1];
+                banner.toCharArray(banner_char, banner.length() + 1);
+                _gatt_db.ErrorChar.writeValue(banner_char);
+            }
         }
 
         if (_connected == current_status)
