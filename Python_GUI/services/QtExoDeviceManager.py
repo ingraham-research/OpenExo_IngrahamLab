@@ -19,6 +19,9 @@ try:
 except Exception:
     BLE_AVAILABLE = False
 
+# ConnParamsMonitor: logs the connection interval Windows actually applies (see that module's docstring).
+from .ConnParamsMonitor import ConnParamsMonitor, watch_client
+
 
 UART_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 UART_TX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # Write
@@ -67,6 +70,10 @@ class QtExoDeviceManager(QtCore.QObject):
         
         # Setup logging system
         self._setup_logging()
+
+        # ConnParamsMonitor - needs self.logger, so it is created after _setup_logging().
+        self._conn_params = ConnParamsMonitor(self.logger)
+        self._conn_params_task = None
 
     def _setup_logging(self):
         """Setup file-based logging system for debugging and error tracking."""
@@ -171,6 +178,7 @@ class QtExoDeviceManager(QtCore.QObject):
         self._is_connected = False
         self._is_connecting = False
         self._client = None
+        self._stop_conn_params_watch()  # ConnParamsMonitor
 
         # Only emit signals if this was NOT an intentional disconnect
         if not self._intentional_disconnect:
@@ -185,6 +193,29 @@ class QtExoDeviceManager(QtCore.QObject):
         
         # Reset flag for next time
         self._intentional_disconnect = False
+
+    # ----- ConnParamsMonitor glue -----
+    def _start_conn_params_watch(self, client):
+        """Begin logging Windows' view of this client's connection parameters. Call on the BLE loop thread.
+
+        One watch at a time: a retry inside connect() builds a new BleakClient, so any previous watch is
+        stopped first. Purely observational - see services/ConnParamsMonitor.py.
+        """
+        self._stop_conn_params_watch()
+        try:
+            self._conn_params_task = asyncio.ensure_future(watch_client(client, self._conn_params))
+        except Exception as ex:
+            self.logger.warning("CONN_PARAMS watch could not start: %s", ex)
+
+    def _stop_conn_params_watch(self):
+        """Stop the connection-parameter log. Safe from any thread and safe to call repeatedly."""
+        try:
+            self._conn_params.detach()
+            task, self._conn_params_task = self._conn_params_task, None
+            if task is not None and not task.done() and self._loop is not None:
+                self._loop.call_soon_threadsafe(task.cancel)
+        except Exception:
+            pass
 
     @QtCore.Slot(str)
     def set_mac(self, mac: str):
@@ -330,6 +361,9 @@ class QtExoDeviceManager(QtCore.QObject):
                         pass
 
                 client = BleakClient(target, disconnected_callback=_disc_cb)
+                # ConnParamsMonitor: must start BEFORE connect(). Windows was seen changing the interval during
+                # the GATT service discovery that connect() performs, and the device object exists by then.
+                self._start_conn_params_watch(client)
                 try:
                     ok = await client.connect()
 
@@ -341,6 +375,7 @@ class QtExoDeviceManager(QtCore.QObject):
                     )
                     if not getattr(client, "is_connected", False):
                         self.connectionProgress.emit(0)
+                        self._stop_conn_params_watch()  # ConnParamsMonitor
                         try:
                             await client.disconnect()
                         except Exception:
@@ -407,6 +442,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 except asyncio.CancelledError:
                     self.logger.warning("Connect attempt cancelled for %s", address_hint or str(target))
                     self.connectionProgress.emit(0)
+                    self._stop_conn_params_watch()  # ConnParamsMonitor
                     if self._client is client:
                         self._client = None
                         self._is_connected = False
@@ -418,6 +454,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 except Exception as conn_ex:
                     self.logger.warning("Connect attempt failed for %s: %s", address_hint or str(target), conn_ex)
                     self.connectionProgress.emit(0)
+                    self._stop_conn_params_watch()  # ConnParamsMonitor
                     if self._client is client:
                         self._client = None
                         self._is_connected = False
@@ -563,6 +600,7 @@ class QtExoDeviceManager(QtCore.QObject):
         self._client = None
         
         self.logger.info("Client marked for disconnect, state cleared")
+        self._stop_conn_params_watch()  # ConnParamsMonitor
         
         # Do the actual BLE disconnect in background (non-blocking)
         async def _run_disconnect():

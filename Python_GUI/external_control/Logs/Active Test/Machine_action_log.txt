@@ -1,2 +1,2 @@
 Python time,Elapsed time,Source,Value requested,Value applied
-148618.4093614,0.00,torque percentage,50.0,50.0
+412450.8680908,0.00,torque percentage,50.0,50.0
