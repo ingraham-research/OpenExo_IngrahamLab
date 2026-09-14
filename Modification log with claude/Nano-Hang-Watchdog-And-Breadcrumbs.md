@@ -40,6 +40,18 @@ cause is found and fixed, **all of it should come out** — see §5.
 
 ---
 
+> ## ⚠ 2026-09-13/14 UPDATE - read §15 before trusting the ladder in the block below
+>
+> - **Production B23 `(20,24)` survived a 30-minute real-person walking trial at torque** on the RAM-starved laptop, plus a
+>   30-minute bench trial with the treadmill motors running (§15.1). The operator has cleared it for person trials; the
+>   other-laptop stress test is running (2026-09-14).
+> - **There is no 15 ms rung.** The banner's `UPi` field shows only the FIRST connection update, and Windows makes a fixed
+>   ~1.7 s step to 15 ms during service discovery on almost every connection. The two "15 ms" failures ran at **7.5 ms**
+>   (§15.2-§15.4). **7.5 ms: 15 failures. 28.75-30 ms: never failed.**
+> - **The GUI now logs the interval Windows actually applies, for the whole connection**
+>   (`Windows-Connection-Parameter-Logger.md`). It showed the interval never changes before a `(6,6)` link dies (§15.4).
+> - Retraction ledger rows **#21-#26** record what this overturns.
+
 > ## ✅ RESOLVED 2026-09-12: THE CONNECTION INTERVAL IS THE CAUSE - MEASURED, NOT INFERRED
 >
 > **MEASURED LADDER: 7.5 ms -> 12/12 fail. 15 ms -> 2/2 fail (118 s, 429 s). 28.75 ms -> clean 1,050 s.
@@ -84,16 +96,20 @@ ledger in §0.3 are the index of what is actually true.
 
 **The Nano's mid-trial BLE death is caused by a short connection interval.** Measured, not inferred:
 
+> **⚠ 2026-09-13 CORRECTION (ledger #22, §15.4):** the 15 ms row was identified from the banner's `UPi12`, which
+> only shows the first connection update. Those two links ran at **7.5 ms**. The table below is corrected; the
+> original rows are still in `Nano-Disconnect-EVIDENCE-ONLY.md` §11.1.
+
 | interval in force | result |
 |---|---|
-| **7.5 ms** | **12 / 12 failures** (mean ~216 s, max 789 s) |
-| **15 ms** | **2 / 2 failures** (118 s, 429 s) |
+| **7.5 ms** | **15 failures** - the 12 counted here on 2026-09-12, the two 09-12 runs first recorded as "15 ms" (118 s, 429 s), and one on 2026-09-13 observed with the Windows-side logger (291 s). Mean ~229 s, max 789 s |
+| ~~15 ms~~ | ~~2 / 2 failures~~ - **RETRACTED**, see above. No 15 ms rung exists |
 | 28.75 ms | clean 1,050 s |
-| ~30 ms | clean 5,026 s across three runs, plus B23 ongoing |
+| ~30 ms | clean in every run - ~11,580 s by 2026-09-13, including a 30-minute real-person torque trial (§15.1) |
 
-14 failures at <= 15 ms; **zero failures in 6,076+ s at >= 28.75 ms**. The fatal threshold lies between
-15 ms and 28.75 ms and has not been located. Pooled against the fast-interval failure rate (one per
-270 s), p ~ 2 x 10^-12.
+15 failures at 7.5 ms; **zero failures at >= 28.75 ms**. The fatal threshold lies between **7.5 ms** and 28.75 ms
+and has not been located. (Original 2026-09-12 wording: "14 failures at <= 15 ms ... threshold between 15 ms and
+28.75 ms ... p ~ 2 x 10^-12".)
 
 The causal claim is not merely correlational: **arm C sends an L2CAP parameter-update request and
 survives, while arm A' sends one and dies** (§14.18). That rules out "the act of asking Windows is what
@@ -105,7 +121,8 @@ hurts", which was the one alternative an A/B/A could not exclude.
 |---|---|---|
 | `EXO_BLE_INTERVAL_SEL 0` -> `setConnectionInterval(20, 24)` = 25-30 ms, build **B23** | **THE FIX** | §14.33. `max` is what Windows grants you; `min` is only the trigger that decides what gets corrected (§14.36) |
 | Bounded wait in sketchbook `ArduinoBLE/HCI.cpp` `sendAclPkt` | **KEEP**, report upstream | An unbounded wait on a remote party is a defect regardless of trigger. **Known upstream bug, open since 2019** (§13). Lost on any library update |
-| Connection-parameter readout (`CPi`/`UPi` banner fields) | **KEEP while diagnosing** | Two more sketchbook patches to `HCI.cpp`: the LE Connection Complete capture, and a handler for **LE meta subevent 0x03** which upstream has never implemented (§14.2, §14.28) |
+| Connection-parameter readout (`CPi`/`UPi` banner fields) | **KEEP while diagnosing** | Two more sketchbook patches to `HCI.cpp`: the LE Connection Complete capture, and a handler for **LE meta subevent 0x03** which upstream has never implemented (§14.2, §14.28). **2026-09-13: `UPi` is only the FIRST update in the first ~2.5 s, not the interval in force (ledger #21, §15.2)** |
+| Windows-side connection-parameter logger (`Python_GUI/services/ConnParamsMonitor.py`, GUI only) | **KEEP - production** (committed `a5542b4`) | Logs the interval Windows actually applies, for the whole connection, on Windows 11 hosts. Turns trust in `(20,24)` from "never failed" into "measured on every trial". `Windows-Connection-Parameter-Logger.md` |
 | Hardware watchdog (nRF52840 WDT, 5 s) | **KEEP** - §11.5's "decide" is superseded | Catches presentation **B** (main loop stopped). The community's only remedy for the 2019 upstream bug (§13.4). Costs: breaks uploads, so power-cycle before flashing (§7.0) |
 | BLE link-stall detector (8 s) + GUI 2 s ping + TX busy counter | **KEEP** | Catches presentation **A** (loop alive, link dead, would never re-advertise). **Now also the only protection against a mid-session interval drift, which the fix structurally cannot cover** (§14.37) |
 | CSV exo-time unwrap in `MainWindow.py` | **KEEP** | Unrelated real bug, four months old (§10.2) |
@@ -137,8 +154,20 @@ Ordered as they appear. **If you find any of these asserted in the body, the bod
 | 18 | "Windows' interval choice is deterministic (4/4 identical)" | **reinterpreted** - that was **inertia, not independence**: Windows persists the negotiated interval per device (n=3), and all four runs had inherited 30 ms | §14.23, §14.35 |
 | 19 | §11.5's watchdog "decide - judgement call" | **superseded: KEEP it** | §13.4 |
 | 20 | Published Win10 thresholds ("won't accept >20 ms, won't go below 15 ms") | **do not apply to this host** - Windows 11 10.0.26200 granted both 7.5 ms and 28.75 ms with SUCCESS | §14.24 |
+| 21 | "`UPi` is the interval in force" / "the banner's HCI fields are direct measurements of it" (§0.5c) | **corrected 2026-09-13** - `UPi` is the FIRST connection update only, and the GUI reads the banner once in the first ~2.5 s, exactly when Windows makes its 15 ms discovery step. Accurate about that one event, wrong as "the interval" | §15.2 |
+| 22 | "15 ms -> 2/2 failures (118 s, 429 s)" | **retracted 2026-09-13** - both links ran at 7.5 ms after a ~1.8 s step. Their exact banner was reproduced with the Windows-side logger running, which reported 7.5 ms for the rest of the connection | §15.4 |
+| 23 | §0.4: "15 ms kills at half §9's event rate - no account covers both rungs" | **dissolved** - there is no 15 ms rung. The mechanism is still unknown, but no longer self-contradictory | §15.4 |
+| 24 | #17's reason: "`(12,24)` is superseded because the fatal 15 ms is inside it" | **reason withdrawn** - `(20,24)` stays production because it is the setting validated under load, not because 15 ms is known to be fatal | §15.6 |
+| 25 | "Windows moves the interval on its own" (B20b `u0` + `UPi12`); "arm C's `UPi12` was a transient" | **reinterpreted** - a fixed ~1.6-1.9 s step to 15 ms during service discovery, after which Windows restores the pre-step value. Nothing has moved after it in any logged connection | §15.3 |
+| 26 | "Read the interval from a CSV with burst counting / `bursts/s <= events/s`" (§0.5 item 3) | **superseded** - use the phase-lock method, and never read "no lock at 7.5 ms" as "not 7.5 ms": it can stay blind for minutes | §15.5 |
 
 ### §0.4 THE ONE BIG THING STILL UNKNOWN: *why* a short interval is fatal
+
+> **2026-09-13: the paradox described below is DISSOLVED (ledger #23, §15.4).** There is no 15 ms rung - both "15 ms"
+> failures ran at 7.5 ms - so §9's 133-events/s account no longer has to explain a slower interval killing the link. It is
+> still **unproven**: `_pendingPkt` has never been measured, and the 2026-09-13 `(6,6)` failure shows the interval does not
+> change before the link dies. The fatal threshold now lies somewhere between 7.5 ms and 28.75 ms. The original text is kept
+> below.
 
 **§9's mechanism is in worse shape than when the investigation started, and this should not be glossed
 over.** Its story was `_pendingPkt` saturation driven by 133 connection events/s at 7.5 ms. But **15 ms
@@ -156,12 +185,19 @@ if that ever matters.
    counter-example was a 5.2% draw, expected about once in 13 attempts (§14.25).
 2. **Never trust a banner alone - cross-check the CSV.** `UPi` is one sample from the first ~2 s of a
    connection. Arm C's banner said 15 ms while it actually ran at 28.75 ms (§14.16).
+   **2026-09-13: stronger than that - `UPi` is only the FIRST update (§15.2). On a Windows 11 host read the `CONN_PARAMS`
+   lines in the device-manager log instead; they cover the whole connection.**
 3. **To read the interval from a CSV, use the hard constraint `bursts/s <= connection events/s`**, not the
    modal gap: 2 x 15 ms and 1 x 28.75 ms are degenerate and that degeneracy misled us once (§14.32).
+   **2026-09-13: superseded by the phase-lock method (§15.5, ledger #26).**
 4. **GUI disconnect timestamps overstate time-to-failure by a constant 9.6 s** - the supervision timeout.
    Negligible for long runs, enormous at the short end (§14.x).
 5. **Windows persists the negotiated interval per device**, so **test order matters** and consecutive runs
    of the same build are not necessarily the same experiment (§14.23, §14.29).
+6. **A CSV that shows no phase lock at 7.5 ms is NOT evidence the link was not at 7.5 ms.** On 2026-09-13 Windows reported
+   7.5 ms for two whole trials whose CSVs stayed unlocked for 146 s and 280 s respectively (§15.5).
+7. **Windows inserts a ~1.7 s step to 15 ms while connecting.** Any single-sample interval readout taken during the connect
+   sequence will see it (§15.3).
 
 ### §0.5b B23 VALIDATION RUN - 32.1 min clean, and NO mid-session drift
 
@@ -204,7 +240,8 @@ Q1, and a genuine 15 ms gap cannot exist at a 30 ms interval, so part of that ba
 
 **What this does NOT change:**
 
-- **The ladder in §0.1 is unaffected.** It rests on the banner's **HCI event fields** (`UPi6` = 7.5 ms,
+- **⚠ 2026-09-13: this bullet is WRONG about `UPi12` (ledger #21, #22) - the 15 ms rung it defends does not exist.**
+  **The ladder in §0.1 is unaffected.** It rests on the banner's **HCI event fields** (`UPi6` = 7.5 ms,
   `UPi12` = 15 ms, `UPi24` = 30 ms), read directly off LE Connection Update Complete. Direct measurements,
   not estimates.
 - **Arm C's transient is still correctly diagnosed** (§14.16). That rested on a large *distributional*
@@ -212,7 +249,8 @@ Q1, and a genuine 15 ms gap cannot exist at a 30 ms interval, so part of that ba
 - **Within-run drift checks remain valid**, since they compare the same method against itself.
 
 **Use it as a corroborating instrument, never as a primary measurement.** If an absolute interval is ever
-needed to better than a factor of ~1.3, the banner's `UPi` is the measurement and a sniffer (§14.6) is the
+needed to better than a factor of ~1.3, the banner's `UPi` is the measurement (**2026-09-13: no - use the Windows-side
+`CONN_PARAMS` log, §15.3**) and a sniffer (§14.6) is the
 arbiter. A better CSV estimator would need the burst threshold calibrated against a known interval first.
 
 ### §0.6b DEBUG-FEATURE AUDIT - what to keep and what to discard
@@ -230,12 +268,13 @@ Ordered by verdict, not by file.
 | Hardware watchdog + boot-loop guard | `SystemReset.*`, `ExoCode.ino` | Only thing that recovers a stopped main loop. §11.5's "decide" is superseded by §13.4 |
 | Link-stall detector + 2 s ping + TX busy counter | `ExoBLE.cpp`, `QtExoDeviceManager.py` | Only thing that recovers presentation A - **and now the only cover for a mid-session interval drift, which the fix structurally cannot reach** (§14.37) |
 | CSV exo-time unwrap | `MainWindow.py` | Unrelated four-month-old bug (§10.2) |
+| Windows-side connection-parameter logger (added 2026-09-13) | `Python_GUI/services/ConnParamsMonitor.py` + hooks in `QtExoDeviceManager.py` | Per-trial record of the interval actually in force - the only direct cover for a mid-session change, which the firmware cannot correct. Read-only, costs <~2 ms every 10 s. `Windows-Connection-Parameter-Logger.md` |
 
 #### KEEP FOR NOW - diagnostics that are still earning their keep
 
 | item | why not yet |
 |---|---|
-| `CPi` / `UPi` connection-parameter readout (3 patches in sketchbook `HCI.cpp`) | The *why* is still unknown (§0.4), the fatal threshold is unlocated, and §14.37's mid-session drift is unproven. **This is the instrument that would detect all three.** Revisit once a mechanism is established |
+| `CPi` / `UPi` connection-parameter readout (3 patches in sketchbook `HCI.cpp`) | **2026-09-13: on Windows 11 hosts the GUI-side logger now does this job better (whole connection, no firmware), and `UPi` misreports (ledger #21) - a DECIDE candidate once the other-laptop run is done.** The *why* is still unknown (§0.4), the fatal threshold is unlocated, and §14.37's mid-session drift is unproven. **This is the instrument that would detect all three.** Revisit once a mechanism is established |
 | `EXO_FW_TAG` build tag | Costs nothing and settled "which binary is on the board" repeatedly. §11.3 already suggested keeping it |
 | The 9.6 s supervision-timeout knowledge | Not code - but **`EXO_BLE_STALL_MS` (8 s) is deliberately shorter than it**, which is why failures show `BLESTALL` rather than a stack disconnect. Do not change one without the other |
 
@@ -263,8 +302,11 @@ looks exactly like the bug this investigation was chasing.
 
 ### §0.6 NOT YET DONE
 
-- **Motor stress test at non-zero torque, on a different laptop.** The last gate before §11's removal plan
-  can start. Everything above is zero-torque bench work on one (RF- and RAM-compromised) host.
+- ~~**Motor stress test at non-zero torque, on a different laptop.**~~ **Torque part MET 2026-09-13** - a 30-minute
+  real-person walking trial at torqueScale 50-70 on the RAM-starved laptop (§15.1). **Different laptop: IN PROGRESS
+  2026-09-14** (Windows 11; the connection pattern is already confirmed there, §15.3). This is the last gate before §11's
+  removal plan can start. (Original wording: "Everything above is zero-torque bench work on one (RF- and RAM-compromised)
+  host.")
 - **Report the `sendAclPkt` bound upstream** on issue #45. A patch in the sketchbook dies on every library
   update; upstream is the only durable home for it.
 
@@ -2981,3 +3023,169 @@ trying to count. It belongs in the §11 cleanup phase, after the diagnosis is se
 **None of this blocks tomorrow's labmate stress test.** That run answers a different and more
 immediate question - does the current build survive a real session on a healthy host - and should go
 ahead unchanged, with nothing added that could perturb it.
+
+---
+
+## 15. 2026-09-13/14: VALIDATION UNDER LOAD, WHY `UPi` MISLED US, AND THE WINDOWS CONNECTION PATTERN
+
+**Date:** 2026-09-13 (afternoon and evening) and 2026-09-14.
+**Status:** production B23 `(20,24)` validated under real-person torque on the RAM-starved laptop (n=1); the "15 ms fatal"
+rung is retracted; a Windows-side interval logger now ships in the GUI (committed `a5542b4`). Firmware source is unchanged from
+`d687c77`. Raw numbers, verbatim banners and log sequences: `Nano-Disconnect-EVIDENCE-ONLY.md` §12.
+
+### 15.1 Two 30-minute B23 trials, one with a person at torque
+
+Both on the operator's own laptop - the host measured on 2026-09-12 at CPU under 10% but RAM near 100% during a live trial,
+and the one whose BLE stream has always been worst. Of the two machines, the harder test.
+
+| | RUN1 16:09 | RUN2 16:57 |
+|---|---|---|
+| CSV | `trial_20260913_160933.csv` | `trial_20260913_165734.csv` |
+| condition | bench, **zero torque**, treadmill motors running as an interference source | **real participant walking**, `splineAlt` at torque |
+| banner | `CPi48_u1,UPi24` (opened at 60 ms, pulled to 30) | `CPi24_u0,UPi12` |
+| duration | 1,773 s, ended by End Trial | 1,804 s, ended by End Trial |
+| rate | 87.2 Hz, 158 gaps > 100 ms, max 213 ms | 91.7 Hz, ~310 gaps > 100 ms, max 1.08 s |
+| interval, from CSV phase lock (§15.5) | 30 ms (R 0.75-0.79 in most 2-min blocks; weaker in five) | 30 ms from ~120 s to the end; first ~120 s too disturbed to resolve |
+| result | **no failure** | **no failure** |
+
+**RUN2's load was real.** torqueScale 50 for 24.3 min (desired peak 6.5 Nm, commanded p95 11-12 Nm) and 70 for 4.8 min
+(desired peak 9.1 Nm, commanded p95 13.5-15.5 Nm), commanded peaks at the 30 Nm clamp (0.02-0.17% of samples), ~50 strides
+per minute per leg throughout. Parameters were set through the external-control orchestrator (torqueScale 0 -> 50) and the
+GUI (50 -> 70).
+
+**A deliberate range / body-blocking test** near the end: the CSV shows the stream dropping to ~41 rows/s with gaps up to
+421 ms around exo time 1,760-1,850 s, then recovering fully to ~90 Hz. No failure. That is a mild version of the
+weak-signal condition in upstream issue #45 (§13); n=1.
+
+**The "Disconnected unexpectedly" at the end of RUN2 was the normal End-Trial reboot**, mislabelled by a long-standing GUI
+bug (Bleak fires the disconnect callback twice) - `GUI-End-Trial-Duplicate-Disconnect-Callback.md`. It was not a range drop.
+
+Pooled relaxed-interval exposure: ~11,580 s by the end of RUN2, zero failures.
+
+### 15.2 Why the banner said 15 ms while the trial ran at 30 ms
+
+Three things stack:
+
+1. **The firmware only rewrites the banner on the first update.** The sketchbook `HCI.cpp` patch records every LE Connection
+   Update Complete (interval, timeout, count). But `ExoBLE::handle_updates()` rewrites ErrorChar only when
+   `exo_ble_cu_status` **changes** (`ExoBLE.cpp:477-487`, `if (exo_ble_cu_status != s_cu_seen)`). The first successful
+   update moves it 0 -> 1; every later success leaves it at 1, so nothing after the first update ever reaches the banner.
+2. **The GUI reads the banner once, early.** `QtExoDeviceManager` reads ErrorChar right after Bleak's `connect()` returns and
+   before `start_notify` (`QtExoDeviceManager.py:365`), and never again. Bleak 2.1.1's WinRT `connect()` runs GATT service
+   discovery inside itself, so the read lands ~1.5-2.5 s after the link comes up.
+3. **Windows makes a 15 ms step during service discovery** (§15.3) - inside exactly that window.
+
+So **`UPi` = "the first connection-parameter update, within the first ~2.5 s"**. It was an accurate HCI measurement of that
+event; the error was reading it as "the interval in force" (ledger #21). B22 on 2026-09-12 (`UPi12`, CSV locked at
+28.75 ms) and RUN2 (`UPi12`, CSV locked at 30 ms) were both this.
+
+A firmware-side fix (refresh on `exo_ble_cu_count` changes, report the last update) was considered and not built: it would
+still stop at subscribe, and the Windows-side logger covers the whole connection without touching firmware.
+
+### 15.3 The Windows connection pattern, measured from the Windows side
+
+Instrument: `Windows-Connection-Parameter-Logger.md` - WinRT's own view of the link, event-driven plus a 10 s heartbeat.
+
+| # | 2026-09-13 | firmware | opened at | firmware request | 15 ms step: onset after link-up / length | settled at | banner |
+|---|---|---|---|---|---|---|---|
+| 1 | 18:26 | B23 | 30 ms | none (`u0`) | +1.021 s / 1.620 s | 30 ms | `CPi24_u0,UPi12` |
+| 2 | 18:30 | B23 | 30 ms | none | +1.025 s / 1.588 s | 30 ms | `CPi24_u0,UPi12` |
+| 3 | 18:34 | B23 | 30 ms | none | +1.016 s / 1.618 s | 30 ms | `CPi24_u0,UPi12` |
+| 4 | 18:43 | B20 `(6,6)` | 30 ms | 7.5 ms, granted at +0.353 s | **none** | 7.5 ms | `CPi24_u1,UPi6` |
+| 5 | 18:46 | B20 | 7.5 ms | none | +0.226 s / 1.844 s | 7.5 ms | `CPi6_u0,UPi12` |
+| 6 | 18:47 | B20 | 7.5 ms | none | +0.245 s / 1.828 s | 7.5 ms | `CPi6_u0,UPi12` |
+| 7 | 18:54 | B20 | 7.5 ms | none | +0.231 s / 1.860 s | 7.5 ms | `CPi6_u0,UPi12` |
+| 8 | 19:17 | B23 (reflashed) | 7.5 ms | 30 ms, granted at +0.178 s | +0.598 s / 1.740 s | 30 ms | `CPi6_u1,UPi24` |
+| 9 | 09-14, second Windows 11 laptop | B23 | 45 ms | 30 ms, granted | yes | 30 ms | operator: banner showed 30 ms |
+
+Row 9 is an operator report from a machine whose logs are not on this PC.
+
+**What the rows show:**
+
+1. **Windows opens at the interval it stored for this device** from the last connection (rows 1-8). A host with nothing
+   useful stored opens wherever it likes: 45 ms on the second laptop, 60 ms on the operator's laptop at the first connection
+   of 2026-09-13 (RUN1's `CPi48`) even though 30 ms had been negotiated the evening before - so storage is not permanent;
+   why is not known.
+2. **If that is outside our range, the firmware asks once and Windows grants the top of the range** within ~0.2-0.35 s
+   (rows 4, 8, 9, plus RUN1).
+3. **During service discovery Windows switches to a fixed 15 ms for ~1.6-1.9 s** - 7 of the 8 logged connections plus the
+   second laptop. The value is fixed, not a direction: a speed-up from 30 ms, a slow-down from 7.5 ms. The onset tracks link
+   activity rather than a clock - roughly 31-38 connection events after link-up at every interval (+1.02 s at 30 ms, +0.23 s
+   at 7.5 ms, +0.60 s in the mixed row 8). No published documentation of this was found.
+4. **It then restores the value that was in force just before the step** - row 8 opened at 7.5 ms, was at 30 ms before the
+   step, and returned to 30 ms.
+5. **After that, nothing changed for the rest of any logged connection** - heartbeat every 10 s, through streaming and
+   through a `(6,6)` failure (§15.4).
+
+**The one exception:** row 4 never stepped. It is the only connection whose granted interval (7.5 ms) was already faster than
+15 ms, but with n=1 that is a description, not an explanation. Row 8 shows a granted request does not in general suppress
+the step.
+
+**Production consequence:** every B23 connection spends ~1.7 s at 15 ms while connecting, before the handshake and before
+any trial, and runs at 30 ms from then on.
+
+### 15.4 The 15 ms rung is gone, and `(6,6)` observed dying with the logger on
+
+- **Rows 5-7 reproduce, byte for byte, the banner of the two 2026-09-12 "15 ms" failures** -
+  `CPi6_l0_t960_u0_n1,UPi12_t960_s1_n1`, same host, same firmware - and the Windows log shows the link at **7.5 ms** for the
+  entire connection after a ~1.8 s step. So those two failures ran at 7.5 ms (ledger #22). The ladder becomes:
+  **7.5 ms fatal (15 failures); 28.75 ms and 30 ms never failed.** §0.4's paradox dissolves (ledger #23). The threshold is
+  somewhere between 7.5 ms and 28.75 ms, untested.
+- **`(6,6)` trials on 2026-09-13:** row 4 ran 146 s (ended by the operator), row 5 15 s (operator), row 6 386 s (ended by the
+  operator as the battery died), row 7 **died at 291 s**.
+- **The row 7 failure, with the logger running:** last CSV sample 19:00:02.901, `link lost` 19:00:12.487 - **9.59 s**, the
+  supervision timeout, the same signature as every failure. **The heartbeat reported 7.5 ms every 10 s to the end, and there
+  was no `CHANGED` line.** The interval does not drift before the link dies; the link simply goes silent. Windows still
+  reported 7.5 ms at 19:00:06, 3.4 s after data had stopped, because it treats the parameters as valid until the timeout
+  expires.
+- **Caveat that does not fit:** the 118 s run of 2026-09-12 has a CSV arrival pattern unlike 2026-09-13's certified 7.5 ms
+  trials - 81% of connection-event starts 26-34 ms apart and a weak, drifting phase-lock peak near 29.5 ms (R 0.26), where
+  the 7.5 ms trials show 12-20% in that band and no peak. It is also not a clean 30 ms link, which locks sharply at exactly
+  30.000 ms (R 0.78). Unexplained, n=1. The 429 s run matches the 7.5 ms profile.
+- **`(6,6)` survived noticeably longer on 2026-09-13** than on 2026-09-11/12 (~14 min of exposure before its first failure).
+  Not investigated - the operator's priority is that production does not fail, not whether `(6,6)` does. Host RAM pressure is
+  the obvious candidate.
+
+### 15.5 Reading the interval from a trial CSV: the phase-lock method, and its blind spot
+
+- **Method.** Take the CSV `epoch` column, cut it into 2 s windows, compute `R(T) = |mean(exp(2*pi*i*t/T))|` for each
+  candidate interval `T`, and take the median over windows. A true interval `T0` shows high `R` at `T0` and at its divisors,
+  and low `R` at its multiples. Scan the legal BLE intervals (1.25 ms steps), or a 0.125 ms grid to see whether a peak sits
+  exactly on a legal value.
+- **Calibration.** B22 (28.75 ms): R(28.75) 0.78, R(30) 0.05. Clean 30 ms runs peak at exactly 30.000 ms (R 0.45-0.78) and
+  fall off 0.125 ms either side. Windows' 15.625 ms timer tick was tested as a confound and ruled out.
+- **Blind spot (measured 2026-09-13):** at 7.5 ms, host timestamp jitter can hide the lock for minutes. Windows reported
+  7.5 ms throughout row 4's and row 6's trials, yet row 4's CSV never locked (R <= 0.14) and row 6's locked only after 280 s
+  (R 0.54-0.69). **No lock is not evidence against a short interval** (method note 6).
+- **Where it stands now:** it supersedes burst counting (ledger #26) but is a secondary instrument. On Windows 11 hosts the
+  `CONN_PARAMS` log is the measurement.
+
+### 15.6 What this means for trust in `(20,24)`
+
+- **None of the evidence for it depends on `UPi`.** The interval in force was measured directly from traffic on every long
+  clean run, and since 2026-09-13 by Windows itself on every connection. The outcome record is zero failures at
+  28.75-30 ms. The A/B/A reversal on one host (§14.3) and arm C (§14.18) show the setting causes the difference.
+- **It is not mechanistic.** Why 7.5 ms is fatal is unknown, and the threshold is unlocated. Trust is empirical and causal,
+  with the interval now recorded per trial - not a proof.
+- **`(12,24)`'s supersession loses its stated reason** (ledger #24): it rested on 15 ms being fatal. `(20,24)` remains
+  production because it is the configuration validated under load; there is no reason to widen it.
+- **§14.37's residual risk** (Windows moving the interval mid-session, which the firmware cannot correct) is now continuously
+  recorded, and has not occurred in any logged connection.
+
+### 15.7 Side findings
+
+- **"Disconnected unexpectedly" after End Trial** is a duplicate Bleak callback, 11 occurrences since July -
+  `GUI-End-Trial-Duplicate-Disconnect-Callback.md`. Not fixed.
+- **Handshake controller-list loss was not made worse** by the relaxed interval or §8's 50 ms bounded wait: 1 warning in 41
+  connections on B19-B23 builds, against 23 in 163 (14.1%) before B19. Small counts, and that check misses losses inside a
+  single row (`BLE-Handshake-Controller-List-Loss.md`).
+
+### 15.8 Status and what is left
+
+- **Production:** B23, firmware source identical to `d687c77`, reflashed 2026-09-13 19:17. Post-flash check passed: banner
+  B23, the stored 7.5 ms pulled up to 30 ms, 30 ms heartbeat.
+- **Committed:** the logger (`Python_GUI/services/ConnParamsMonitor.py` and its hooks in `QtExoDeviceManager.py`), in
+  `a5542b4`. This documentation update (§15, ledger #21-#26, the §0 annotations) is not yet committed.
+- **In progress:** the other-laptop stress test (§0.6).
+- **Still open:** why a short interval kills the link; where the threshold is; row 4's missing step; the 2026-09-12 118 s
+  run's arrival pattern; reporting the `sendAclPkt` bound upstream (§13); §11's removal plan, gated on the other-laptop run.

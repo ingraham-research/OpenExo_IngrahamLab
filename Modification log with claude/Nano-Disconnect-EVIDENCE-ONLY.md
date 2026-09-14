@@ -7,7 +7,7 @@ out to be wrong, and it became hard to tell which statements were measured and w
 **Rule for this file:** if it was not directly observed, measured, or read out of a file, it does not
 belong here. Theories live in `Nano-Hang-Watchdog-And-Breadcrumbs.md`.
 
-**Last updated:** 2026-09-11.
+**Last updated:** 2026-09-14 (§12 added; the §11 correction banner added).
 
 ---
 
@@ -388,6 +388,12 @@ polldo (Arduino), 2020-07-02, **failing to reproduce**:
 
 # §11. MEASURED CONNECTION INTERVALS AND OUTCOMES - 2026-09-12
 
+> **2026-09-13 note - observations recorded in §12:** the `UPi` banner field records only the FIRST connection-parameter
+> update of a connection (read from `ExoBLE.cpp:477-487`). The **15 ms** row in §11.1 was identified from `UPi12` alone. On
+> 2026-09-13 the same banner, `CPi6_l0_t960_u0_n1,UPi12_t960_s1_n1`, was reproduced three times on the same host and
+> firmware with a Windows-side log running, and that log reported 7.5 ms for each connection after a ~1.8 s period at
+> 15 ms (§12.3). The rows below are left exactly as originally written.
+
 **All of this is measurement, which is why it belongs in this document.** Intervals are read either from
 the HCI event fields surfaced in the connect banner (`CPi` = LE Connection Complete, `UPi` = LE Connection
 Update Complete) or from trial-CSV packet timing. Where both exist they agree.
@@ -454,3 +460,161 @@ sample. No ramp, no rising gap distribution, no warning.
 - Whether the interval stays put **mid-session**. The banner only covers the first ~2 s of a connection,
   and `addConnection()` runs once, at connect.
 - `_pendingPkt` / `_maxPkt` at runtime; the negotiated ATT MTU; the Nano's program counter at a freeze.
+
+---
+
+# §12. MEASUREMENTS 2026-09-13 AND 2026-09-14
+
+All times local. "Windows-side log" = the `CONN_PARAMS` lines written by `Python_GUI/services/ConnParamsMonitor.py` into the
+device-manager log (see `Windows-Connection-Parameter-Logger.md`), which read WinRT
+`BluetoothLEDevice.GetConnectionParameters()` on each connection-parameter / status event and every 10 s.
+
+## 12.1 Trials
+
+| CSV | firmware | condition | duration | how it ended | rows | rate | gaps > 100 ms | max gap |
+|---|---|---|---|---|---|---|---|---|
+| `trial_20260913_160933.csv` | B23 | bench, zero torque, treadmill motors running | 1,773.4 s | End Trial | 154,650 | 87.2 Hz | 158 | 213 ms |
+| `trial_20260913_165734.csv` | B23 | real participant walking, `splineAlt` at torque | 1,804.3 s | End Trial | 165,512 | 91.7 Hz | ~310 | 1,081 ms |
+| `trial_20260913_184405.csv` | B20 `(6,6)` | bench | 146 s | End Trial | 14,021 | 96.1 Hz | 1 | 118 ms |
+| `trial_20260913_184703.csv` | B20 | bench | 15 s | End Trial | 1,434 | 95.8 Hz | 0 | 39 ms |
+| `trial_20260913_184745.csv` | B20 | bench | 386.3 s | End Trial `'Z'` at 18:54:13.390 (operator: battery dying) | 37,104 | 96.0 Hz | 7 in the first 330 s | 136 ms in the first 330 s |
+| `trial_20260913_185510.csv` | B20 | bench | 291.3 s | **link lost** | 27,965 | 96.0 Hz | not computed | not computed |
+| `trial_20260913_191826.csv` | B23 (reflashed) | bench | 64.2 s recorded | log ends 19:19:33 with no End Trial and no disconnect entry | 6,130 | 95.4 Hz | not computed | not computed |
+
+No failure occurred in any B23 trial.
+
+**`trial_20260913_165734.csv`, torque by torqueScale segment** (parameter-write times from the device-manager log):
+
+| segment | trial time | desired p95 / max (L, R) | commanded p95 / max | at 30 Nm clamp (L / R) | measured p95 (L / R) | stance onsets per minute (L / R) |
+|---|---|---|---|---|---|---|
+| controller not yet engaged | 0-51.7 s | 0 / 0 | 0 / 0 | 0 / 0 | 5.4 / 4.3 Nm | 12.8 / 10.5 |
+| torqueScale 0 | 51.7-61.2 s | 0 / 0 | 13.6-13.9 / 27.8-30.0 Nm | 0 / 0.23% | 4.6 / 4.7 Nm | 56.9 / 50.6 |
+| torqueScale 50 | 61.2-1,518.1 s (24.3 min) | 5.8 / 6.5 Nm | 12.2 (L), 11.1 (R) / 30.0 Nm | 0.02% / 0.02% | 5.4 / 5.4 Nm | 50.0 / 50.0 |
+| torqueScale 70 | 1,518.1-1,804.3 s (4.8 min) | 8.1 / 9.1 Nm | 15.5 (L), 13.5 (R) / 30.0 Nm | 0.02% / 0.17% | 6.8 / 7.4 Nm | 49.1 / 49.1 |
+
+`trial_20260913_160933.csv`: desired and commanded torque 0.00 Nm on both sides for the whole trial.
+
+**`trial_20260913_165734.csv`, stream around the operator's range test** (operator: walked far from the laptop with the
+participant between, "towards 1700-1750" on the plot), rows/s in 10 s blocks of exo time:
+1,740: 94.9 - 1,750: 90.5 - **1,760: 67.7 - 1,770: 60.1 - 1,780: 71.6 - 1,790: 71.9 - 1,800: 71.1 - 1,810: 56.1 -
+1,820: 40.7 - 1,830: 41.8 - 1,840: 71.2** - 1,850: 89.5 - 1,860: 92.7 - 1,870: 89.3 - 1,880: 92.0. Largest gap in that span
+421 ms. Six largest gaps of the whole trial (trial s / ms): 1,326.3 / 1,081; 45.1 / 783; 718.5 / 756; 13.8 / 543;
+8.4 / 500; 701.4 / 454.
+
+## 12.2 Connect banners, verbatim
+
+| time | banner |
+|---|---|
+| 16:09:24 | `RST:0x00000001:RESETPIN,B23_b255_rt1_fw1,I2Cf0k_e0x10_c0_t109d_w0d_x0,CPi48_l0_t960_u1_n1,UPi24_t960_s1_n1` |
+| 16:57:00 | `RST:0x00000001:RESETPIN,B23_b255_rt1_fw1,I2Cf0k_e0x10_c0_t107d_w0d_x0,CPi24_l0_t960_u0_n1,UPi12_t960_s1_n1` |
+| 18:26:02 | `RST:0x00000001:RESETPIN,B23_b255_rt1_fw1,I2Cf0k_e0x10_c0_t108d_w0d_x0,CPi24_l0_t960_u0_n1,UPi12_t960_s1_n1` |
+| 18:30:52 | `RST:0x00000001:RESETPIN,B23_b255_rt1_fw1,I2Cf0k_e0x10_c0_t107d_w0d_x0,CPi24_l0_t960_u0_n1,UPi12_t960_s1_n1` |
+| 18:34:08 | `RST:0x00000001:RESETPIN,B23_b255_rt1_fw1,I2Cf0k_e0x10_c0_t107d_w0d_x0,CPi24_l0_t960_u0_n1,UPi12_t960_s1_n1` |
+| 18:43:49 | `RST:0x00000001:RESETPIN,B20_b255_rt1_fw1,I2Cf0k_e0x10_c0_t107d_w0d_x0,CPi24_l0_t960_u1_n1,UPi6_t960_s1_n1` |
+| 18:46:49 | `RST:0x00000004:SREQ,B20_b255_rt1_fw1,I2Cf0k_e0x10_c0_t107d_w0d_x0,CPi6_l0_t960_u0_n1,UPi12_t960_s1_n1` |
+| 18:47:37 | `RST:0x00000004:SREQ,B20_b255_rt1_fw1,I2Cf0k_e0x10_c0_t106d_w0d_x0,CPi6_l0_t960_u0_n1,UPi12_t960_s1_n1` |
+| 18:54:57 | `RST:0x00000001:RESETPIN,B20_b255_rt1_fw1,I2Cf0k_e0x10_c0_t107d_w0d_x0,CPi6_l0_t960_u0_n1,UPi12_t960_s1_n1` |
+| 19:18:00 | `RST:0x00000001:RESETPIN,B23_b255_rt1_fw1,I2Cf0k_e0x10_c0_t107d_w0d_x0,CPi6_l0_t960_u1_n1,UPi24_t960_s1_n1` |
+
+## 12.3 Windows-side log, per connection (2026-09-13)
+
+Timestamps are seconds within the minute shown. "Link up" = first non-zero reading. Every reading had latency 0 and
+timeout 9,600 ms.
+
+| connection | device log | link up | then | banner read |
+|---|---|---|---|---|
+| 18:26 B23 | `device_manager_20260913_182554.log` | 01.300 at 30 ms | 02.321 -> 15 ms; 03.941 -> 30 ms | 02.774 |
+| 18:30 B23 | `device_manager_20260913_183042.log` | 51.256 at 30 ms | 52.281 -> 15 ms; 53.869 -> 30 ms | 52.673 |
+| 18:34 B23 | `device_manager_20260913_183335.log` | 06.991 at 30 ms | 08.007 -> 15 ms; 09.625 -> 30 ms | 08.455 |
+| 18:43 B20 | `device_manager_20260913_184340.log` | 48.591 at 30 ms | 48.944 -> 7.5 ms; no further change | 49.524 |
+| 18:46 B20 | same log | 48.319 at 7.5 ms | 48.545 -> 15 ms; 50.389 -> 7.5 ms | 49.129 |
+| 18:47 B20 | same log | 36.512 at 7.5 ms | 36.757 -> 15 ms; 38.585 -> 7.5 ms | 37.311 |
+| 18:54 B20 | `device_manager_20260913_185448.log` | 56.608 at 7.5 ms | 56.839 -> 15 ms; 58.699 -> 7.5 ms | 57.440 |
+| 19:17 B23 | `device_manager_20260913_191753.log` | 59.629 at 7.5 ms | 59.807 -> 30 ms; 00.227 (19:18) -> 15 ms; 01.967 -> 30 ms | 00.783 |
+
+- In every connection, every heartbeat after the last change repeated the settled value, for the full logged duration
+  (longest: the 18:47 connection, through a 386 s trial).
+- No reading changed after the connect sequence in any connection.
+- Before the link existed, every `[attach]` read returned interval 0, latency 0, timeout 0.
+- WinRT read durations: 0.01-0.21 ms at 30 ms (0.77 ms once at attach); 0.01-2.34 ms at 7.5 ms while the RT stream was
+  running.
+
+**Operator report, 2026-09-14, second Windows 11 laptop (logs not on this PC):** the link started at 45 ms, went to 30 ms,
+then to 15 ms during the connection sequence, then back to 30 ms and stayed there; the banner read 30 ms.
+
+## 12.4 The `(6,6)` failure of 2026-09-13, with the Windows-side log running
+
+```
+18:55:10.574  beginTrial() called                                    (device_manager_20260913_185448.log)
+18:55:11.622  first CSV sample                                       (trial_20260913_185510.csv)
+18:59:56.325  CONN_PARAMS [heartbeat] interval=7.50ms latency=0 timeout=9600ms
+19:00:02.901  last CSV sample
+19:00:06.326  CONN_PARAMS [heartbeat] interval=7.50ms latency=0 timeout=9600ms read=0.03ms
+19:00:12.481  CONN_PARAMS [status] no active link (Windows reports zeros) read=0.36ms
+19:00:12.482  CONN_PARAMS [event] no active link (Windows reports zeros) read=0.74ms
+19:00:12.487  Device disconnected. Reason: link lost, Intentional: False
+```
+
+- Last CSV sample to `link lost`: **9.586 s**.
+- Every heartbeat from the connect sequence to 19:00:06.326 read 7.5 ms. No `CHANGED` line after 18:54:58.699.
+- The board was reflashed without reconnecting first, so no post-failure banner was read.
+
+## 12.5 CSV phase-lock readings
+
+`R(T) = |mean(exp(2*pi*i*t/T))|` over 2 s windows of the `epoch` column, median over windows. Values near 0.07 are the noise
+floor.
+
+| CSV | interval reported by Windows (where logged) | reading |
+|---|---|---|
+| `trial_20260912_170437.csv` (B22) | - | R(28.75) 0.78, R(30) 0.05 |
+| `trial_20260912_163701.csv` (B21) | - | R(30) 0.78, R(15) 0.35; 0.125 ms grid: peak exactly 30.000 |
+| `trial_20260912_175832.csv` (B23) | - | R(30) 0.46 |
+| `trial_20260912_172644.csv` (B20, `UPi6`) | - | R(7.5) 0.82-0.85 in 10 s blocks from 20 s on |
+| `trial_20260913_160933.csv` (RUN1) | - | R(30) 0.75-0.79 in most 2-min blocks, dips to 0.16-0.38 in five; 60-360 s: peak 30.000 R 0.78 |
+| `trial_20260913_165734.csv` (RUN2) | - | 2-min blocks: R(30) 0.13 at 0-120 s; 0.39-0.51 from 120 s to 1,320 s; 0.28, 0.40, 0.41, 0.18, 0.17 after |
+| `trial_20260913_184405.csv` | 7.5 ms throughout | R(7.5) <= 0.14 in every 20 s block; no peak above 0.11 on the 10-50 ms grid |
+| `trial_20260913_184745.csv` | 7.5 ms throughout | R(7.5) <= 0.13 in every 20 s block to 280 s; 0.54, 0.59, 0.69 at 280, 300, 320 s |
+| `trial_20260912_173932.csv` (died 118 s) | - | no lock at any legal interval; 0.125 ms grid, 40-118 s: 29.500 R 0.26, 29.375 R 0.23, 29.625 R 0.22 |
+| `trial_20260912_174229.csv` (died 430 s) | - | no lock at any legal interval (all <= 0.25 in 60 s blocks) |
+
+R at 15.625, 31.25 and 46.875 ms (Windows timer-tick multiples) was <= 0.17 in both 2026-09-12 failure CSVs.
+
+**Connection-event start gaps** (a start = first sample after > 4 ms of silence), % of start-to-start gaps in each band:
+
+| segment | 12-18 ms | 20-25 ms | 26-34 ms | 40-50 ms |
+|---|---|---|---|---|
+| `trial_20260913_184405.csv` (Windows: 7.5 ms) | 33.9 | 17.5 | 20.1 | 0.9 |
+| `trial_20260913_184745.csv`, 0-280 s (Windows: 7.5 ms, no lock) | 45.9 | 9.6 | 12.2 | 3.2 |
+| `trial_20260913_184745.csv`, 280 s on (Windows: 7.5 ms, locked) | 35.2 | 2.5 | 1.1 | 0.3 |
+| `trial_20260912_173932.csv`, 40-118 s | 0.1 | 8.5 | 81.0 | 0.2 |
+| `trial_20260912_174229.csv` | 28.6 | 23.6 | 13.3 | 1.9 |
+| `trial_20260913_160933.csv`, 60-360 s (30 ms) | 0.9 | 11.8 | 49.3 | 0.2 |
+
+## 12.6 GUI log counts
+
+**"Controller list looks incomplete" warnings per connection**, pairing each `app_crash_*.log` with its device-manager log,
+grouped by the build tag in the banner (counted up to the 18:30 session of 2026-09-13):
+
+| builds | sessions | connections | warnings | rate |
+|---|---|---|---|---|
+| no build tag (before B19) | 90 | 163 | 23 | 14.1% |
+| B9-B18 and B20 | 13 | 25 | 0 | 0% |
+| B19, B21, B22 | 6 | 11 | 0 | 0% |
+| B23 | 5 | 5 | 1 (18:30:56, `Ankle(R) (36) missing constantT`) | 20% |
+
+**Two disconnect-callback lines within 50 ms** (`Intentional: True` then `Intentional: False`) - 11 occurrences in 10
+device-manager logs: 2026-07-06 20:56:16, 07-07 14:44:44, 07-21 14:39:58, 08-12 17:40:46, 08-20 15:53:13 and 15:55:52,
+08-25 15:58:49, 08-26 15:00:11, 09-09 13:27:22, 09-12 16:47:36, 09-13 17:27:49 (gaps 0-7 ms).
+
+End of `trial_20260913_165734.csv`: CSV closed 17:27:39.787; `'Z'` delivered 17:27:39.800; GUI `disconnect()` 17:27:45.895;
+callbacks 17:27:49.837 (`True`) and 17:27:49.839 (`False`). Torque-scale writes to joint 68 then failed with `Not connected`
+at 17:27:49.881, 17:27:55.016 and 17:28:00.167.
+
+## 12.7 Now measured, and still not
+
+**Now measured (Windows 11 hosts, from 2026-09-13):** the interval in force for the whole connection, including mid-session;
+what Windows does during the connect sequence.
+
+**Still not measured:** where between 7.5 ms and 28.75 ms the fatal threshold sits; why the 18:43 `(6,6)` connection had no
+15 ms step; what the 2026-09-12 118 s run's link was doing; `_pendingPkt` / `_maxPkt`; the Nano's program counter at a
+freeze; a post-failure banner for the 2026-09-13 `(6,6)` failure.
