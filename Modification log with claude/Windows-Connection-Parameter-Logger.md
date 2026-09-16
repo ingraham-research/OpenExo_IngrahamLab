@@ -7,8 +7,9 @@ each tagged `# ConnParamsMonitor`. **GUI only** - no firmware change, no protoco
 **Status:** **In production use, committed in `a5542b4` (2026-09-14).** Both files parse and import. The monitor was exercised against fakes (a full
 30 -> 15 -> 30 ms cycle, read failures, a non-WinRT backend, a Windows-10-like device) and against the real WinRT device
 object for `EXOBLE_d1a71e`. Bench-validated on **9 real connections on 2026-09-13** (B23 and B20 firmware, including one
-`(6,6)` link failure) and on a **second Windows 11 laptop on 2026-09-14** (operator report). **Not yet run through a full
-30-minute trial** at time of writing. **No automated tests** - the operator waived them for this change.
+`(6,6)` link failure) and on a **second Windows 11 laptop on 2026-09-14**: a 20-minute bench trial, then a **26+ minute session worn by the
+operator with the external controller driving torque**, heartbeat at 30 ms throughout (operator report). **Longest run so
+far: 26+ minutes.** **No automated tests** - the operator waived them for this change.
 
 Findings it produced: `Nano-Hang-Watchdog-And-Breadcrumbs.md` §15. Raw logs: `Nano-Disconnect-EVIDENCE-ONLY.md` §12.
 
@@ -107,7 +108,10 @@ is the interval the link died on.**
 - **It cannot break the connection.** Every WinRT call is wrapped; nothing it does can raise into the connect or disconnect
   paths.
 - **Measured cost:** a read takes <= 0.2 ms at a 30 ms interval (up to 0.8 ms at attach), and up to 2.3 ms at 7.5 ms while
-  the RT stream is running. Once every 10 s plus a handful of events per connection. About 6 log lines a minute - fewer than
+  the RT stream is running. **On the second laptop, reads reached 15 ms while streaming** (11 of ~134 heartbeats above
+  3 ms). The heartbeat read runs on the GUI's BLE thread, so a slow read delays incoming notifications by that long - it does
+  not drop them. If that ever matters, move the heartbeat read off that thread. Once every 10 s plus a handful of events per
+  connection. About 6 log lines a minute - fewer than
   the ping's existing DEBUG line every 2 s.
 
 ## 6. Limits

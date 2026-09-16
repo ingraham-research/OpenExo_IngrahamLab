@@ -480,6 +480,7 @@ device-manager log (see `Windows-Connection-Parameter-Logger.md`), which read Wi
 | `trial_20260913_184745.csv` | B20 | bench | 386.3 s | End Trial `'Z'` at 18:54:13.390 (operator: battery dying) | 37,104 | 96.0 Hz | 7 in the first 330 s | 136 ms in the first 330 s |
 | `trial_20260913_185510.csv` | B20 | bench | 291.3 s | **link lost** | 27,965 | 96.0 Hz | not computed | not computed |
 | `trial_20260913_191826.csv` | B23 (reflashed) | bench | 64.2 s recorded | log ends 19:19:33 with no End Trial and no disconnect entry | 6,130 | 95.4 Hz | not computed | not computed |
+| `trial_20260914_140122.csv` (second laptop) | B23 | bench, zero torque | 1,189 s | End Trial `'Z'` at 14:21:13.396 | 94,547 | 79.5 rows/s | not computable - `epoch` has 1 s resolution in this copy (§12.8) | - |
 
 No failure occurred in any B23 trial.
 
@@ -515,6 +516,7 @@ participant between, "towards 1700-1750" on the plot), rows/s in 10 s blocks of 
 | 18:47:37 | `RST:0x00000004:SREQ,B20_b255_rt1_fw1,I2Cf0k_e0x10_c0_t106d_w0d_x0,CPi6_l0_t960_u0_n1,UPi12_t960_s1_n1` |
 | 18:54:57 | `RST:0x00000001:RESETPIN,B20_b255_rt1_fw1,I2Cf0k_e0x10_c0_t107d_w0d_x0,CPi6_l0_t960_u0_n1,UPi12_t960_s1_n1` |
 | 19:18:00 | `RST:0x00000001:RESETPIN,B23_b255_rt1_fw1,I2Cf0k_e0x10_c0_t107d_w0d_x0,CPi6_l0_t960_u1_n1,UPi24_t960_s1_n1` |
+| 09-14 13:58:42 (second laptop) | `RST:0x00000001:RESETPIN,B23_b255_rt1_fw1,I2Cf0k_e0x10_c0_t109d_w0d_x0,CPi36_l0_t960_u1_n1,UPi24_t960_s1_n1` |
 
 ## 12.3 Windows-side log, per connection (2026-09-13)
 
@@ -539,8 +541,11 @@ timeout 9,600 ms.
 - WinRT read durations: 0.01-0.21 ms at 30 ms (0.77 ms once at attach); 0.01-2.34 ms at 7.5 ms while the RT stream was
   running.
 
-**Operator report, 2026-09-14, second Windows 11 laptop (logs not on this PC):** the link started at 45 ms, went to 30 ms,
-then to 15 ms during the connection sequence, then back to 30 ms and stayed there; the banner read 30 ms.
+**2026-09-14, second Windows 11 laptop** (terminal output pasted by the operator; `device_manager_20260914_135830.log` is on
+that laptop, not this PC): attach 13:58:40.444, zeros; link up 13:58:41.175 at 45 ms; 41.753 -> 30 ms; 42.158 -> 15 ms;
+banner read 42.789; 44.004 -> 30 ms. Every heartbeat from 13:58:50.446 to 14:21:11.708 read 30.00 ms, and no reading changed
+after 13:58:44.004. WinRT read durations 0.02-14.95 ms, 11 heartbeats above 3 ms. End Trial `'Z'` 14:21:13.396; GUI
+`disconnect()` 14:21:19.503; a single disconnect callback, `Intentional: True`, at 14:21:23.245.
 
 ## 12.4 The `(6,6)` failure of 2026-09-13, with the Windows-side log running
 
@@ -618,3 +623,55 @@ what Windows does during the connect sequence.
 **Still not measured:** where between 7.5 ms and 28.75 ms the fatal threshold sits; why the 18:43 `(6,6)` connection had no
 15 ms step; what the 2026-09-12 118 s run's link was doing; `_pendingPkt` / `_maxPkt`; the Nano's program counter at a
 freeze; a post-failure banner for the 2026-09-13 `(6,6)` failure.
+
+## 12.8 Second-laptop CSV and data delivery on the Teensy clock
+
+**Format of `trial_20260914_140122.csv` as found on this PC:**
+
+```
+epoch,mark,Desired Torque (L),Measured Torque (L),Desired Torque (R),Measured Torque (R),Toe FSR (L),In Stance (L),Toe FSR (R),In Stance (R),Commanded Torque (L),Commanded Torque (R),Status,Exoskeleton time (seconds)
+1789419684,0,0,0.05,0,0.28,0,0,0,0,0,0,5,201.1
+```
+
+Every other trial CSV from this GUI writes six decimals, e.g. `1789340974.645777,0,0.000000,0.100000,...`
+(`trial_20260913_160933.csv`). In this copy the `epoch` column holds whole seconds only. Desired and commanded torque are
+0.00 Nm throughout.
+
+**Samples delivered, from the `Exoskeleton time (seconds)` column** (nominal RT period 9 ms = 111.1 Hz; a hole = a step in
+exo time above 100 ms):
+
+| CSV | host | rows | exo span | rows/s | % of 111.1 Hz | holes > 100 ms | total hole time | longest hole | worst 5-min block |
+|---|---|---|---|---|---|---|---|---|---|
+| `trial_20260914_140122.csv` | second laptop, bench | 94,547 | 1,189.4 s | 79.5 | 71.6% | 2 | 0.2 s | 0.10 s | 78.6 rows/s |
+| `trial_20260913_160933.csv` | operator's laptop, bench | 154,650 | 1,773.3 s | 87.2 | 78.5% | 57 | 6.8 s | 0.20 s | 82.3 rows/s |
+| `trial_20260913_165734.csv` | operator's laptop, person | 165,512 | 1,804.2 s | 91.7 | 82.6% | 68 | 10.3 s | 0.45 s | 82.0 rows/s |
+| `trial_20260912_175832.csv` | operator's laptop, bench | 184,407 | 1,926.5 s | 95.7 | 86.2% | 0 | 0.0 s | 0.00 s | 95.5 rows/s |
+
+## 12.9 Second laptop, worn session, 2026-09-14 - operator report and pasted parameter log
+
+**Operator report:** the exo was worn by the operator for the whole session; the session lasted 26+ minutes and was ended
+with End Trial; the logger's heartbeat read 30 ms until the end; `main_external_control.py` was run multiple times with
+multiple controllers, mostly in UDP mode. The terminal output was not kept. The device-manager log and the trial CSV are on
+that laptop, not this PC.
+
+**`Python_GUI/external_control/Logs/Active Test/Param_write_log.txt` from that laptop, verbatim** (the file is overwritten
+each orchestrator session, so this is the last session only):
+
+```
+Python time,Target,Value,Result,Attempts
+1789428536.7199788, Ankle(L) TorqScale, 0.0, accepted, 1
+1789428542.3954585, Ankle(R) TorqScale, 0.0, accepted, 2
+1789428542.687822, Ankle(L) PlantarNm, 14.0, accepted, 1
+1789428543.0301085, Ankle(R) PlantarNm, 14.0, accepted, 1
+1789428543.467759, Ankle(L) DorsiNm, 7.466666666666667, accepted, 1
+1789428543.8213584, Ankle(R) DorsiNm, 7.466666666666667, accepted, 1
+1789428548.599465, Ankle(L) TorqScale, 50.0, accepted, 1
+1789428549.0521646, Ankle(R) TorqScale, 50.0, accepted, 1
+1789428676.6550918, Ankle(L) TorqScale, 0.0, accepted, 1
+1789428677.0294697, Ankle(R) TorqScale, 0.0, accepted, 1
+```
+
+- First entry 16:28:56.720 local, last 16:31:17.029.
+- Ten writes; nine accepted on the first attempt, one (Ankle(R) TorqScale 0.0) on the second, 5.68 s after the preceding
+  entry. `DEFAULT_ACK_TIMEOUT = 5.0` s in `OpenExoLink_utilities.py`.
+- TorqScale 50.0 held from 16:29:08.6 to 16:31:16.7 (~128 s) in this session.

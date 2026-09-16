@@ -1,7 +1,7 @@
 /*
   Callback LED
 
-  This example creates a BLE peripheral with service that contains a
+  This example creates a Bluetooth® Low Energy peripheral with service that contains a
   characteristic to control an LED. The callback features of the
   library are used.
 
@@ -9,7 +9,7 @@
   - Arduino MKR WiFi 1010, Arduino Uno WiFi Rev2 board, Arduino Nano 33 IoT,
     Arduino Nano 33 BLE, or Arduino Nano 33 BLE Sense board.
 
-  You can use a generic BLE central app, like LightBlue (iOS and Android) or
+  You can use a generic Bluetooth® Low Energy central app, like LightBlue (iOS and Android) or
   nRF Connect (Android), to interact with the services and characteristics
   created in this sketch.
 
@@ -28,12 +28,12 @@ const int ledPin = LED_BUILTIN; // pin to use for the LED
 void setup() {
   Serial.begin(9600);
   while (!Serial);
-  
+
   pinMode(ledPin, OUTPUT); // use the LED pin as an output
 
   // begin initialization
   if (!BLE.begin()) {
-    logger::println("starting BLE failed!");
+    Serial.println("starting Bluetooth® Low Energy module failed!");
 
     while (1);
   }
@@ -61,35 +61,39 @@ void setup() {
   // start advertising
   BLE.advertise();
 
-  logger::println(("Bluetooth device active, waiting for connections..."));
+  Serial.println(("Bluetooth® device active, waiting for connections..."));
 }
 
 void loop() {
-  // poll for BLE events
+  // poll for Bluetooth® Low Energy events
   BLE.poll();
 }
 
 void blePeripheralConnectHandler(BLEDevice central) {
   // central connected event handler
-  logger::print("Connected event, central: ");
-  logger::println(central.address());
+  Serial.print("Connected event, central: ");
+  Serial.println(central.address());
 }
 
 void blePeripheralDisconnectHandler(BLEDevice central) {
   // central disconnected event handler
-  logger::print("Disconnected event, central: ");
-  logger::println(central.address());
+  Serial.print("Disconnected event, central: ");
+  Serial.println(central.address());
 }
 
 void switchCharacteristicWritten(BLEDevice central, BLECharacteristic characteristic) {
+  // unused parameters
+  (void)central;
+  (void)characteristic;
+
   // central wrote new value to characteristic, update LED
-  logger::print("Characteristic event, written: ");
+  Serial.print("Characteristic event, written: ");
 
   if (switchCharacteristic.value()) {
-    logger::println("LED on");
+    Serial.println("LED on");
     digitalWrite(ledPin, HIGH);
   } else {
-    logger::println("LED off");
+    Serial.println("LED off");
     digitalWrite(ledPin, LOW);
   }
 }

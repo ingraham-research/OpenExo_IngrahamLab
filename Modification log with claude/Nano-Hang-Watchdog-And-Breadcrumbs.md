@@ -44,7 +44,8 @@ cause is found and fixed, **all of it should come out** — see §5.
 >
 > - **Production B23 `(20,24)` survived a 30-minute real-person walking trial at torque** on the RAM-starved laptop, plus a
 >   30-minute bench trial with the treadmill motors running (§15.1). The operator has cleared it for person trials; the
->   other-laptop stress test is running (2026-09-14).
+>   20-minute bench run and a 26+ minute session WORN by the operator with the external controller driving torque, both on a
+>   second Windows 11 laptop, were also clean at 30 ms throughout (2026-09-14, §15.9-§15.10).
 > - **There is no 15 ms rung.** The banner's `UPi` field shows only the FIRST connection update, and Windows makes a fixed
 >   ~1.7 s step to 15 ms during service discovery on almost every connection. The two "15 ms" failures ran at **7.5 ms**
 >   (§15.2-§15.4). **7.5 ms: 15 failures. 28.75-30 ms: never failed.**
@@ -120,7 +121,7 @@ hurts", which was the one alternative an A/B/A could not exclude.
 | item | status | why |
 |---|---|---|
 | `EXO_BLE_INTERVAL_SEL 0` -> `setConnectionInterval(20, 24)` = 25-30 ms, build **B23** | **THE FIX** | §14.33. `max` is what Windows grants you; `min` is only the trigger that decides what gets corrected (§14.36) |
-| Bounded wait in sketchbook `ArduinoBLE/HCI.cpp` `sendAclPkt` | **KEEP**, report upstream | An unbounded wait on a remote party is a defect regardless of trigger. **Known upstream bug, open since 2019** (§13). Lost on any library update |
+| Bounded wait in sketchbook `ArduinoBLE/HCI.cpp` `sendAclPkt` | **KEEP**, report upstream | An unbounded wait on a remote party is a defect regardless of trigger. **Known upstream bug, open since 2019** (§13). **2026-09-15: the patched library is now vendored at `Libraries/ArduinoBLE`, so it is in git - but the build uses your sketchbook copy, so a library update there still needs restoring from the repo** |
 | Connection-parameter readout (`CPi`/`UPi` banner fields) | **KEEP while diagnosing** | Two more sketchbook patches to `HCI.cpp`: the LE Connection Complete capture, and a handler for **LE meta subevent 0x03** which upstream has never implemented (§14.2, §14.28). **2026-09-13: `UPi` is only the FIRST update in the first ~2.5 s, not the interval in force (ledger #21, §15.2)** |
 | Windows-side connection-parameter logger (`Python_GUI/services/ConnParamsMonitor.py`, GUI only) | **KEEP - production** (committed `a5542b4`) | Logs the interval Windows actually applies, for the whole connection, on Windows 11 hosts. Turns trust in `(20,24)` from "never failed" into "measured on every trial". `Windows-Connection-Parameter-Logger.md` |
 | Hardware watchdog (nRF52840 WDT, 5 s) | **KEEP** - §11.5's "decide" is superseded | Catches presentation **B** (main loop stopped). The community's only remedy for the 2019 upstream bug (§13.4). Costs: breaks uploads, so power-cycle before flashing (§7.0) |
@@ -264,11 +265,11 @@ Ordered by verdict, not by file.
 | item | where | why it stays |
 |---|---|---|
 | `setConnectionInterval(20, 24)` + the `EXO_BLE_INTERVAL_SEL` selector | `SystemReset.h`, `ExoBLE.cpp` | **The fix.** Keep the selector too: it documents the measured ladder and makes a re-test one character |
-| Bounded wait in `sendAclPkt` | sketchbook `ArduinoBLE/HCI.cpp` | Upstream bug open since 2019 (§13). **Report upstream** - a sketchbook patch dies on every library update |
+| Bounded wait in `sendAclPkt` | sketchbook `ArduinoBLE/HCI.cpp`; patched copy vendored at `Libraries/ArduinoBLE` since 2026-09-15 | Upstream bug open since 2019 (§13). **Report upstream** - a sketchbook patch still dies on a library update, but can now be restored from the repo |
 | Hardware watchdog + boot-loop guard | `SystemReset.*`, `ExoCode.ino` | Only thing that recovers a stopped main loop. §11.5's "decide" is superseded by §13.4 |
 | Link-stall detector + 2 s ping + TX busy counter | `ExoBLE.cpp`, `QtExoDeviceManager.py` | Only thing that recovers presentation A - **and now the only cover for a mid-session interval drift, which the fix structurally cannot reach** (§14.37) |
 | CSV exo-time unwrap | `MainWindow.py` | Unrelated four-month-old bug (§10.2) |
-| Windows-side connection-parameter logger (added 2026-09-13) | `Python_GUI/services/ConnParamsMonitor.py` + hooks in `QtExoDeviceManager.py` | Per-trial record of the interval actually in force - the only direct cover for a mid-session change, which the firmware cannot correct. Read-only, costs <~2 ms every 10 s. `Windows-Connection-Parameter-Logger.md` |
+| Windows-side connection-parameter logger (added 2026-09-13) | `Python_GUI/services/ConnParamsMonitor.py` + hooks in `QtExoDeviceManager.py` | Per-trial record of the interval actually in force - the only direct cover for a mid-session change, which the firmware cannot correct. Read-only; one read every 10 s, measured at up to ~15 ms on the second laptop (§15.9). `Windows-Connection-Parameter-Logger.md` |
 
 #### KEEP FOR NOW - diagnostics that are still earning their keep
 
@@ -303,9 +304,10 @@ looks exactly like the bug this investigation was chasing.
 ### §0.6 NOT YET DONE
 
 - ~~**Motor stress test at non-zero torque, on a different laptop.**~~ **Torque part MET 2026-09-13** - a 30-minute
-  real-person walking trial at torqueScale 50-70 on the RAM-starved laptop (§15.1). **Different laptop: IN PROGRESS
-  2026-09-14** (Windows 11; the connection pattern is already confirmed there, §15.3). This is the last gate before §11's
-  removal plan can start. (Original wording: "Everything above is zero-torque bench work on one (RF- and RAM-compromised)
+  real-person walking trial at torqueScale 50-70 on the RAM-starved laptop (§15.1). **Different laptop: DONE
+  2026-09-14** - a 20-minute zero-torque bench trial on a second Windows 11 laptop, clean, at 30 ms throughout (§15.9).
+  The same day a **26+ minute session worn by the operator on that laptop, with torque driven by the external controller,**
+  combined both in one run (§15.10). **This gate - the one §11's removal plan was waiting on - is fully met.** (Original wording: "Everything above is zero-torque bench work on one (RF- and RAM-compromised)
   host.")
 - **Report the `sendAclPkt` bound upstream** on issue #45. A patch in the sketchbook dies on every library
   update; upstream is the only durable home for it.
@@ -1134,6 +1136,13 @@ library version starts checking it, make sure it does not respond by retrying �
 entire point.
 
 ### 8.4 This is outside version control
+
+> **⚠ 2026-09-15: NO LONGER TRUE - the patched library is now IN the repo.** `Libraries/ArduinoBLE` (which held an
+> unpatched 1.2.1) was replaced with the patched 2.1.0, `HCI.cpp.orig-openexo-backup` included, so the patch is in git
+> history and can be reinstalled on any machine. **The BUILD still uses the sketchbook copy**, so the second bullet below
+> still applies to whichever machine you build on - restore from `Libraries/ArduinoBLE` when it happens.
+> `ExoCode.ino`'s header, the build note above the `extern "C"` block in `SystemReset.h`, `Libraries/README.md` and the
+> setup step in `Documentation/README.md` all say so now. The original text is kept below.
 
 The build uses the **sketchbook** copy of ArduinoBLE (2.1.0), not the 1.2.1 vendored in this repo's
 `Libraries/` folder — see `arduino-toolchain-on-this-pc`. So this change:
@@ -3096,9 +3105,9 @@ Instrument: `Windows-Connection-Parameter-Logger.md` - WinRT's own view of the l
 | 6 | 18:47 | B20 | 7.5 ms | none | +0.245 s / 1.828 s | 7.5 ms | `CPi6_u0,UPi12` |
 | 7 | 18:54 | B20 | 7.5 ms | none | +0.231 s / 1.860 s | 7.5 ms | `CPi6_u0,UPi12` |
 | 8 | 19:17 | B23 (reflashed) | 7.5 ms | 30 ms, granted at +0.178 s | +0.598 s / 1.740 s | 30 ms | `CPi6_u1,UPi24` |
-| 9 | 09-14, second Windows 11 laptop | B23 | 45 ms | 30 ms, granted | yes | 30 ms | operator: banner showed 30 ms |
+| 9 | 09-14 13:58, second Windows 11 laptop | B23 | 45 ms | 30 ms, granted at +0.578 s | +0.983 s / 1.846 s | 30 ms | `CPi36_u1,UPi24` |
 
-Row 9 is an operator report from a machine whose logs are not on this PC.
+Row 9 comes from the second laptop's terminal output, pasted by the operator; its log files are not on this PC.
 
 **What the rows show:**
 
@@ -3106,12 +3115,12 @@ Row 9 is an operator report from a machine whose logs are not on this PC.
    useful stored opens wherever it likes: 45 ms on the second laptop, 60 ms on the operator's laptop at the first connection
    of 2026-09-13 (RUN1's `CPi48`) even though 30 ms had been negotiated the evening before - so storage is not permanent;
    why is not known.
-2. **If that is outside our range, the firmware asks once and Windows grants the top of the range** within ~0.2-0.35 s
+2. **If that is outside our range, the firmware asks once and Windows grants the top of the range** within ~0.2-0.6 s
    (rows 4, 8, 9, plus RUN1).
-3. **During service discovery Windows switches to a fixed 15 ms for ~1.6-1.9 s** - 7 of the 8 logged connections plus the
-   second laptop. The value is fixed, not a direction: a speed-up from 30 ms, a slow-down from 7.5 ms. The onset tracks link
-   activity rather than a clock - roughly 31-38 connection events after link-up at every interval (+1.02 s at 30 ms, +0.23 s
-   at 7.5 ms, +0.60 s in the mixed row 8). No published documentation of this was found.
+3. **During service discovery Windows switches to a fixed 15 ms for ~1.6-1.9 s** - 8 of the 9 logged connections, on both
+   laptops. The value is fixed, not a direction: a speed-up from 30 ms, a slow-down from 7.5 ms. The onset tracks link
+   activity rather than a clock - roughly 26-38 connection events after link-up at every interval (+1.02 s at 30 ms, +0.23 s
+   at 7.5 ms, +0.60 s in the mixed row 8, +0.98 s in the mixed row 9). No published documentation of this was found.
 4. **It then restores the value that was in force just before the step** - row 8 opened at 7.5 ms, was at 30 ms before the
    step, and returned to 30 ms.
 5. **After that, nothing changed for the rest of any logged connection** - heartbeat every 10 s, through streaming and
@@ -3186,6 +3195,56 @@ any trial, and runs at 30 ms from then on.
   B23, the stored 7.5 ms pulled up to 30 ms, 30 ms heartbeat.
 - **Committed:** the logger (`Python_GUI/services/ConnParamsMonitor.py` and its hooks in `QtExoDeviceManager.py`), in
   `a5542b4`. This documentation update (§15, ledger #21-#26, the §0 annotations) is not yet committed.
-- **In progress:** the other-laptop stress test (§0.6).
+- **Done 2026-09-14:** the other-laptop runs - a 20-minute bench trial (§15.9) and a 26+ minute worn session with torque
+  (§15.10).
 - **Still open:** why a short interval kills the link; where the threshold is; row 4's missing step; the 2026-09-12 118 s
-  run's arrival pattern; reporting the `sendAclPkt` bound upstream (§13); §11's removal plan, gated on the other-laptop run.
+  run's arrival pattern; reporting the `sendAclPkt` bound upstream (§13); §11's removal plan - its gate is now met (§0.6); when to start is the operator's call.
+
+### 15.9 Second laptop, 2026-09-14: 20 minutes clean
+
+A labmate's Windows 11 laptop running the current GUI including the logger (Python 3.13.14 from the Microsoft Store, not
+the conda environment used on the operator's laptop), B23 firmware, bench, **zero torque**.
+
+| | |
+|---|---|
+| connection (§15.3 row 9) | opened at 45 ms -> 30 ms (request granted, +0.578 s) -> 15 ms step (+0.983 s, lasting 1.846 s) -> 30 ms. Banner `CPi36_u1,UPi24`: the first update was our request being granted, so on this connection the banner happened to show the right interval |
+| trial | `trial_20260914_140122.csv`, 14:01:24 to End Trial 14:21:13 - **1,189 s, no failure** |
+| interval | 30.00 ms on every heartbeat for the whole connection; no `CHANGED` line after the connect sequence |
+| data delivered, Teensy exo-time clock | 79.5 rows/s = 71.6% of the nominal 111 Hz, worst 5-minute block 78.6 rows/s; only **2** exo-time holes over 100 ms (max 0.10 s) |
+| same measure on the operator's laptop, B23 | 87.2 / 91.7 / 95.7 rows/s (78.5-86.2%), 0-68 holes, max 0.45 s |
+| logger read time | up to 14.95 ms; 11 of ~134 heartbeats above 3 ms (operator's laptop: up to 2.3 ms) |
+| end | End Trial `'Z'`, one disconnect callback, `Intentional: True` |
+
+**What it adds.** The fix held on a second machine, and Windows' connection pattern is the same there. That laptop's stream
+is *smoother* - almost no holes - but carries fewer samples per second: a steady ~72% delivery rather than bursts of loss.
+Why is not known. A Bluetooth controller that fits fewer packets into each 30 ms connection event would produce exactly this
+pattern, but that is untested.
+
+**CSV caveat.** In the copy on this PC every number has lost the GUI's six-decimal format (`1789419684` instead of
+`1789340974.645777`, `0.05` instead of `0.050000`), so the `epoch` column has one-second resolution. The file was almost
+certainly re-saved by a spreadsheet program after the GUI wrote it. Row counts and the exo-time column are unaffected, but
+host-side gaps and the phase-lock method (§15.5) cannot be computed from it. The original on that laptop may still be intact.
+
+**Gate status.** §0.6 asked for a non-zero-torque stress test on a different laptop. Torque (§15.1, operator's laptop) and
+the second laptop (this run, zero torque) have both been covered, in separate runs. **Superseded the same day by §15.10,
+which combined them in one run.**
+
+### 15.10 Second laptop, 2026-09-14: 26+ minutes worn, with torque driven by the external controller
+
+**Source:** operator report, plus the external-control orchestrator's `Param_write_log.txt` from that laptop (pasted,
+verbatim in `Nano-Disconnect-EVIDENCE-ONLY.md` §12.9). The terminal output was not kept; the device-manager log (which holds
+every `CONN_PARAMS` line) and the trial CSV are on that laptop, not this PC.
+
+- **Worn by the operator for the whole session** - real use, not the bench. B23 firmware, the same laptop as §15.9.
+- **26+ minutes, no failure**, ended manually with End Trial.
+- **The logger's heartbeat read 30 ms for the whole session**, watched by the operator to the end.
+- **The heaviest parameter traffic of any validation run:** `main_external_control.py` was run several times, with several
+  controllers, mostly in UDP mode.
+- The parameter log holds only the last orchestrator session, because the file is overwritten each session: 16:28:56 to
+  16:31:17 local - torqueScale 0, then plantar 14 Nm and dorsi 7.47 Nm, torqueScale 50 for ~2 minutes, then back to 0.
+- **One of those ten writes needed a second attempt:** Ankle(R) torqueScale 0 was accepted 5.7 s after the left side, which
+  is the orchestrator's 5 s ack timeout (`DEFAULT_ACK_TIMEOUT`, `OpenExoLink_utilities.py`) plus a resend. Its
+  confirm-and-retry recovered it. Whether the write or only its acknowledgement went missing is not known.
+
+**Gate status: fully met in one run** - a person, torque, the second laptop and the external controller together, 26+
+minutes at 30 ms with no failure.

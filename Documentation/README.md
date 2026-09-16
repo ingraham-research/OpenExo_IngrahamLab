@@ -1088,6 +1088,7 @@ First, you will need to connect the physical components.
 4. The control board may have multiple microcontrollers on it they should all be flashed with ExoCode.ino through the Arduino IDE.  The compiler will select the correct parts of the code to use if you select the correct microcontroller.    
     - Update /ExoCode/src/Config.h BOARD_VERSION with the version number found on the control board before compiling. 
     - Update the libraries. Move the files/folders in the [Libraries Folder](/Libraries). To your local Folder C:\User\\\[USER]\Documents\Arduino\libraries\ or system equivalent.  Details on the libraries that are used are used can be found in [Libraries Folder](/Libraries/README.md).
+        - **ArduinoBLE in that folder is a MODIFIED copy (2.1.0 plus three local patches) and the Nano firmware will not link without it - do not replace it with the Library Manager version.** See [Libraries Folder](/Libraries/README.md) and the build note above the `extern "C"` block in `ExoCode/src/SystemReset.h`.
     - [Arduino Instructions](https://docs.google.com/document/d/1ToLq6Zqv58Q4YEmf4SzqJDKCTp52LUaKgYg5vNmHdaI/edit?usp=sharing)
 5. Lastly, is the SD card.
     - Transfer the content of the SD Card folder to the micro SD card. 

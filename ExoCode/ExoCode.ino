@@ -4,6 +4,14 @@
    P. Stegall Jan 2022
 */  
 
+/*
+   NOTE - NANO BUILD: this firmware needs the patched ArduinoBLE 2.1.0 that ships in this repo at
+   Libraries/ArduinoBLE (one file differs from upstream: src/utility/HCI.cpp). Install it into your sketchbook
+   libraries folder as usual; with a stock ArduinoBLE the Nano build fails with
+   "undefined reference to `exo_ble_cp_interval'". For why, and how to check, see the comment above the
+   extern "C" block in src/SystemReset.h.
+*/
+
 //Teensy Operation
 #if defined(ARDUINO_TEENSY36) | defined(ARDUINO_TEENSY41)
 

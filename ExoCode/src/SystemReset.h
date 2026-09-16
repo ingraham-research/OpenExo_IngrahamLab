@@ -678,6 +678,41 @@ inline String exo_link_stats_string()
 //boundary. If ArduinoBLE is ever updated or reinstalled these vanish and the LINK FAILS TO BUILD -
 //which is deliberate: a silent revert to "we have no idea what the interval is" is exactly the
 //situation section 12 was written about.
+//
+//=== BUILD NOTE: THE NANO NEEDS A LOCALLY PATCHED ArduinoBLE ======================================
+//GOT A LINK ERROR LIKE  undefined reference to `exo_ble_cp_interval'  (or any exo_ble_cp_* / exo_ble_cu_*)?
+//Your ArduinoBLE is not the patched one. (The note at the top of ExoCode.ino points here.)
+//
+//The Nano build uses ArduinoBLE 2.1.0 with ONE FILE MODIFIED:
+//    <sketchbook>/libraries/ArduinoBLE/src/utility/HCI.cpp
+//    (on Windows usually C:\Users\<user>\Documents\Arduino\libraries\ArduinoBLE\src\utility\HCI.cpp)
+//A stock ArduinoBLE is not enough. THE PATCHED COPY IS TRACKED IN THIS REPO at Libraries/ArduinoBLE (put there
+//2026-09-15, replacing the stale unpatched 1.2.1 that used to sit in that folder), so the setup step in
+//Documentation/README.md - copy Libraries/* into your sketchbook - now installs the right one.
+//NOTE: the BUILD uses your sketchbook copy, not the repo copy. The repo copy is what you install from, and what
+//to restore from if an ArduinoBLE update overwrites the patch.
+//
+//The patch (2026-09-11/12) adds 215 lines and removes none. Each change is marked "LOCAL MODIFICATION" in
+//HCI.cpp with its own explanation and revert steps, and the untouched original sits beside it as
+//HCI.cpp.orig-openexo-backup.
+//  1. HCIClass::sendAclPkt() - upstream waits forever for the Bluetooth controller to free a packet slot
+//     (`while (_pendingPkt >= _maxPkt) poll();`, arduino-libraries/ArduinoBLE issue #45). The patch gives up
+//     after ARDUINOBLE_ACL_WAIT_TIMEOUT_MS (50 ms) and drops that one packet instead of hanging the Nano.
+//     Changes behaviour. Not needed to link, but without it the Nano can freeze when the BLE link stalls.
+//  2. LE Connection Complete - records the interval, latency and supervision timeout the PC chose into
+//     exo_ble_cp_*. Record only.
+//  3. LE Connection Update Complete (HCI LE meta subevent 0x03, ignored upstream) - records the updated
+//     parameters into exo_ble_cu_*. Record only.
+//Changes 2 and 3 define the symbols declared just below, hence the link error without them. The Teensy build
+//never references them and is unaffected.
+//
+//Updating or reinstalling ArduinoBLE silently removes the patch. To check it is still there:
+//    grep -c ARDUINOBLE_ACL_WAIT_TIMEOUT_MS <sketchbook>/libraries/ArduinoBLE/src/utility/HCI.cpp   (0 = gone)
+//To build on another machine, install this repo's Libraries/ArduinoBLE into the sketchbook (or copy just its
+//src/utility/HCI.cpp over an existing ArduinoBLE 2.1.0). If an update wipes the patch, restore it from there.
+//Background: "Modification log with claude/Nano-Hang-Watchdog-And-Breadcrumbs.md"
+//§8 (bounded wait), §13 (upstream bug), §14.2 and §15.2-§15.3 (connection-parameter capture).
+//==================================================================================================
 extern "C" {
     extern volatile uint16_t exo_ble_cp_interval;
     extern volatile uint16_t exo_ble_cp_latency;

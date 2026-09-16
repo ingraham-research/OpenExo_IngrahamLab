@@ -1,7 +1,7 @@
 /*
   SensorTag Button
 
-  This example scans for BLE peripherals until a TI SensorTag is discovered.
+  This example scans for Bluetooth® Low Energy peripherals until a TI SensorTag is discovered.
   It then connects to it, discovers the attributes of the 0xffe0 service,
   subscribes to the Simple Key Characteristic (UUID 0xffe1). When a button is
   pressed on the SensorTag a notification is received and the button state is
@@ -23,13 +23,13 @@ void setup() {
 
   // begin initialization
   if (!BLE.begin()) {
-    logger::println("starting BLE failed!");
+    Serial.println("starting Bluetooth® Low Energy module failed!");
 
     while (1);
   }
 
-  logger::println("BLE Central - SensorTag button");
-  logger::println("Make sure to turn on the device.");
+  Serial.println("Bluetooth® Low Energy Central - SensorTag button");
+  Serial.println("Make sure to turn on the device.");
 
   // start scanning for peripheral
   BLE.scan();
@@ -41,13 +41,13 @@ void loop() {
 
   if (peripheral) {
     // discovered a peripheral, print out address, local name, and advertised service
-    logger::print("Found ");
-    logger::print(peripheral.address());
-    logger::print(" '");
-    logger::print(peripheral.localName());
-    logger::print("' ");
-    logger::print(peripheral.advertisedServiceUuid());
-    logger::println();
+    Serial.print("Found ");
+    Serial.print(peripheral.address());
+    Serial.print(" '");
+    Serial.print(peripheral.localName());
+    Serial.print("' ");
+    Serial.print(peripheral.advertisedServiceUuid());
+    Serial.println();
 
     // Check if the peripheral is a SensorTag, the local name will be:
     // "CC2650 SensorTag"
@@ -65,20 +65,20 @@ void loop() {
 
 void monitorSensorTagButtons(BLEDevice peripheral) {
   // connect to the peripheral
-  logger::println("Connecting ...");
+  Serial.println("Connecting ...");
   if (peripheral.connect()) {
-    logger::println("Connected");
+    Serial.println("Connected");
   } else {
-    logger::println("Failed to connect!");
+    Serial.println("Failed to connect!");
     return;
   }
 
   // discover peripheral attributes
-  logger::println("Discovering service 0xffe0 ...");
+  Serial.println("Discovering service 0xffe0 ...");
   if (peripheral.discoverService("ffe0")) {
-    logger::println("Service discovered");
+    Serial.println("Service discovered");
   } else {
-    logger::println("Attribute discovery failed.");
+    Serial.println("Attribute discovery failed.");
     peripheral.disconnect();
 
     while (1);
@@ -89,22 +89,22 @@ void monitorSensorTagButtons(BLEDevice peripheral) {
   BLECharacteristic simpleKeyCharacteristic = peripheral.characteristic("ffe1");
 
   // subscribe to the simple key characteristic
-  logger::println("Subscribing to simple key characteristic ...");
+  Serial.println("Subscribing to simple key characteristic ...");
   if (!simpleKeyCharacteristic) {
-    logger::println("no simple key characteristic found!");
+    Serial.println("no simple key characteristic found!");
     peripheral.disconnect();
     return;
   } else if (!simpleKeyCharacteristic.canSubscribe()) {
-    logger::println("simple key characteristic is not subscribable!");
+    Serial.println("simple key characteristic is not subscribable!");
     peripheral.disconnect();
     return;
   } else if (!simpleKeyCharacteristic.subscribe()) {
-    logger::println("subscription failed!");
+    Serial.println("subscription failed!");
     peripheral.disconnect();
     return;
   } else {
-    logger::println("Subscribed");
-    logger::println("Press the right and left buttons on your SensorTag.");
+    Serial.println("Subscribed");
+    Serial.println("Press the right and left buttons on your SensorTag.");
   }
 
   while (peripheral.connected()) {
@@ -114,20 +114,20 @@ void monitorSensorTagButtons(BLEDevice peripheral) {
     if (simpleKeyCharacteristic.valueUpdated()) {
       // yes, get the value, characteristic is 1 byte so use byte value
       byte value = 0;
-      
+
       simpleKeyCharacteristic.readValue(value);
 
       if (value & 0x01) {
         // first bit corresponds to the right button
-        logger::println("Right button pressed");
+        Serial.println("Right button pressed");
       }
 
       if (value & 0x02) {
         // second bit corresponds to the left button
-        logger::println("Left button pressed");
+        Serial.println("Left button pressed");
       }
     }
   }
 
-  logger::println("SensorTag disconnected!");
+  Serial.println("SensorTag disconnected!");
 }
