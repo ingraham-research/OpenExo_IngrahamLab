@@ -3248,3 +3248,37 @@ every `CONN_PARAMS` line) and the trial CSV are on that laptop, not this PC.
 
 **Gate status: fully met in one run** - a person, torque, the second laptop and the external controller together, 26+
 minutes at 30 ms with no failure.
+
+### 15.11 OPEN QUESTION: did the ArduinoBLE *version* ever matter?
+
+Raised by the operator on 2026-09-15, while vendoring the patched library: this repo had been carrying ArduinoBLE **1.2.1**
+all along, while every disconnect we ever investigated ran on the sketchbook **2.1.0**. Could 1.2.1 simply not have the
+problem? **Not excluded, and not pursued** - production is validated and the ack issue is the next priority. Recorded here so
+it is not lost. Observations behind it: `Nano-Disconnect-EVIDENCE-ONLY.md` §12.10.
+
+**What supports it:**
+
+- The Arduino toolchain downloaded `ArduinoBLE-2.1.0.zip` on **2026-07-06 at 14:00**. The first unintentional disconnect
+  anywhere in the GUI log record is **2026-07-06 at 20:54**, about seven hours later. The record starts 2026-07-02 and holds
+  none before that download.
+- Every failure in this investigation ran on 2.1.0. **1.2.1 has never been tested on this hardware** - and the sketchbook's
+  previous version was 1.5.0 (downloaded 2026-01-26), so 1.2.1 may never have run on this PC at all.
+
+**What argues against it:**
+
+- 1.2.1 carries the same machinery: `BLELocalDevice::setConnectionInterval` -> `L2CAPSignalingClass::addConnection`, the same
+  `updateParameters` test, the same `CONNECTION_PARAMETER_UPDATE_REQUEST`, and the same unbounded
+  `while (_pendingPkt >= _maxPkt) poll();`. No obvious route by which it avoids 7.5 ms.
+- `setConnectionInterval(6, 6)` has been in `ExoBLE.cpp` since the very first commit (`248fa9f`, 2023-04-13, inherited from
+  upstream), so the request predates every library version on this machine.
+- Within 2.1.0 the interval alone decides the outcome - 12/12 failures at 7.5 ms, zero in 8,000+ s at ~30 ms, reversed back
+  and forth in a single session (§0.1, §14.3). A library-version explanation has to account for that too.
+- The pre-2.1.0 window is four days of unknown usage, and several of the early "unintentional" disconnects are the End-Trial
+  duplicate-callback artefact (`GUI-End-Trial-Duplicate-Disconnect-Callback.md`), not failures at all.
+
+**How to settle it, bench only, zero torque, nobody wearing the exo:** install unpatched 1.2.1, set
+`EXO_BLE_INTERVAL_SEL 1` = `(6,6)`, and run trials. 1.2.1 lacks our capture patch, so the firmware needs either those three
+patches ported to it or a ~10-line shim defining the eight `exo_ble_cp_*` / `exo_ble_cu_*` volatiles so it links; the
+interval reading then comes from the GUI-side logger, which does not depend on the firmware at all
+(`Windows-Connection-Parameter-Logger.md`). **A failure inside ~4 minutes clears the library. Surviving past 789 s,
+repeatedly, means the library matters** - see §0.5 method note 1 before calling any single run a survival.

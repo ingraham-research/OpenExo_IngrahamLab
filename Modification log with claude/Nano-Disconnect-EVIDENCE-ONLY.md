@@ -675,3 +675,25 @@ Python time,Target,Value,Result,Attempts
 - Ten writes; nine accepted on the first attempt, one (Ankle(R) TorqScale 0.0) on the second, 5.68 s after the preceding
   entry. `DEFAULT_ACK_TIMEOUT = 5.0` s in `OpenExoLink_utilities.py`.
 - TorqScale 50.0 held from 16:29:08.6 to 16:31:16.7 (~128 s) in this session.
+
+## 12.10 ArduinoBLE version history on the development PC, and the early-July disconnects
+
+Gathered 2026-09-15 for the open question in `Nano-Hang-Watchdog-And-Breadcrumbs.md` §15.11.
+
+- Library zips kept by the Arduino toolchain in `F:\Random storage\Arduino15\staging\libraries`:
+  **`ArduinoBLE-1.5.0.zip` dated 2026-01-26 14:25** and **`ArduinoBLE-2.1.0.zip` dated 2026-07-06 14:00**. No 1.2.1 zip.
+- Every file in the sketchbook `ArduinoBLE` carries mtime **2026-07-14 11:32**, except the two we touched: `HCI.cpp`
+  2026-09-12 and `HCI.cpp.orig-openexo-backup` 2026-09-11. Its `library.properties` says `version=2.1.0`; the copy this repo
+  carried until 2026-09-15 said `version=1.2.1`.
+- GUI device-manager logs run from `device_manager_20260702_155947.log` onward. The **first** line reading
+  `Reason: link lost, Intentional: False` anywhere in that record is **2026-07-06 20:54:16**.
+- Counts of that line: **10** across the 31 logs dated before 2026-07-14, **92** across the 125 logs from 2026-07-14 on.
+  Several of the 10 occur within ~10 s of an `End-trial reset 'Z'` (2026-07-08 17:28:59 -> 17:29:09;
+  2026-07-10 18:26:35 -> 18:26:45). Others have a trial running and no `'Z'` (2026-07-06 20:54:23 trial start ->
+  20:56:16 link lost; 2026-07-07 14:42:37 -> 14:44:44).
+- The early-July disconnects were on Nano MACs `C0:63:FA:86:05:F4` and `65:43:3E:4B:42:FA`, not the
+  `D1:A7:1E:F3:E6:43` used from September onward.
+- Read from the 1.2.1 source as this repo carried it until 2026-09-15: `BLELocalDevice.cpp:321` `setConnectionInterval()`
+  forwards to `L2CAPSignaling`; `L2CAPSignaling.cpp:38` `addConnection()` holds the same `updateParameters` test and sends
+  `CONNECTION_PARAMETER_UPDATE_REQUEST` (0x12); `HCI.cpp:418` has `while (_pendingPkt >= _maxPkt) {`.
+- `ExoCode/src/ExoBLE.cpp` has contained `BLE.setConnectionInterval(6, 6)` since commit `248fa9f` (2023-04-13).
