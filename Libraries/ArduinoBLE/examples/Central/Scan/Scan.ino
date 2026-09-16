@@ -1,7 +1,7 @@
 /*
   Scan
 
-  This example scans for BLE peripherals and prints out their advertising details:
+  This example scans for Bluetooth® Low Energy peripherals and prints out their advertising details:
   address, local name, advertised service UUID's.
 
   The circuit:
@@ -19,12 +19,12 @@ void setup() {
 
   // begin initialization
   if (!BLE.begin()) {
-    logger::println("starting BLE failed!");
+    Serial.println("starting Bluetooth® Low Energy module failed!");
 
     while (1);
   }
 
-  logger::println("BLE Central scan");
+  Serial.println("Bluetooth® Low Energy Central scan");
 
   // start scanning for peripheral
   BLE.scan();
@@ -36,33 +36,33 @@ void loop() {
 
   if (peripheral) {
     // discovered a peripheral
-    logger::println("Discovered a peripheral");
-    logger::println("-----------------------");
+    Serial.println("Discovered a peripheral");
+    Serial.println("-----------------------");
 
     // print address
-    logger::print("Address: ");
-    logger::println(peripheral.address());
+    Serial.print("Address: ");
+    Serial.println(peripheral.address());
 
     // print the local name, if present
     if (peripheral.hasLocalName()) {
-      logger::print("Local Name: ");
-      logger::println(peripheral.localName());
+      Serial.print("Local Name: ");
+      Serial.println(peripheral.localName());
     }
 
     // print the advertised service UUIDs, if present
     if (peripheral.hasAdvertisedServiceUuid()) {
-      logger::print("Service UUIDs: ");
+      Serial.print("Service UUIDs: ");
       for (int i = 0; i < peripheral.advertisedServiceUuidCount(); i++) {
-        logger::print(peripheral.advertisedServiceUuid(i));
-        logger::print(" ");
+        Serial.print(peripheral.advertisedServiceUuid(i));
+        Serial.print(" ");
       }
-      logger::println();
+      Serial.println();
     }
 
     // print the RSSI
-    logger::print("RSSI: ");
-    logger::println(peripheral.rssi());
+    Serial.print("RSSI: ");
+    Serial.println(peripheral.rssi());
 
-    logger::println();
+    Serial.println();
   }
 }

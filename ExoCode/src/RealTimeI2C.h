@@ -57,6 +57,31 @@ namespace rt_data
     static bool new_rt_msg = false;
 };
 
+//RT I2C health, kept by the Teensy (the I2C master). See the note at the endTransmission() call in
+//RealTimeI2C.cpp. Reported to the Nano over UART on request - the Teensy survives a Nano reboot, so
+//these counters describe what the link looked like THROUGH the failure.
+#if defined(ARDUINO_TEENSY36) || defined(ARDUINO_TEENSY41)
+namespace rt_i2c_stats
+{
+    extern volatile uint32_t frames_sent;   //RT frames handed to Wire since boot
+    extern volatile uint32_t error_count;   //how many endTransmission() calls returned non-zero
+    extern volatile uint32_t last_ok_ms;    //millis() of the last successful transmission
+    extern volatile uint8_t  last_error;    //most recent non-zero return code
+    //Longest interval ever observed between two SUCCESSFUL transmissions. Unlike "ms since last
+    //success", this survives the Nano's ~18-26 s reboot and still describes the worst moment,
+    //so it is the field that actually reports the failure window rather than the recovery.
+    extern volatile uint32_t worst_gap_ms;
+    //Longest RUN of back-to-back failures. This is the field that separates the chronic ~13% loss
+    //(random singles and pairs) from a real outage (hundreds in a row). A total error count cannot
+    //tell those apart, which is exactly what B14's e285x10 could not answer.
+    extern volatile uint32_t max_consec_err;
+    extern volatile uint32_t cur_consec_err;
+    //False until the first successful transmission. Without it the first success computes its gap
+    //against last_ok_ms == 0, i.e. against boot, which is what pinned B14's w at the 300 cap.
+    extern volatile bool     had_first_ok;
+}
+#endif
+
 namespace real_time_i2c
 {
     /**

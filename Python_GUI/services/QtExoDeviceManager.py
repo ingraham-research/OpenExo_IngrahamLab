@@ -19,6 +19,9 @@ try:
 except Exception:
     BLE_AVAILABLE = False
 
+# ConnParamsMonitor: logs the connection interval Windows actually applies (see that module's docstring).
+from .ConnParamsMonitor import ConnParamsMonitor, watch_client
+
 
 UART_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 UART_TX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # Write
@@ -55,6 +58,9 @@ class QtExoDeviceManager(QtCore.QObject):
         self._error_notify_enabled = False
         self._intentional_disconnect = False  # Track if disconnect was intentional
         self._next_connect_timeout_s: Optional[float] = None  # one-shot connect timeout override
+        # Non-zero while a writer coroutine is part-way through a command sequence. Advisory only:
+        # nothing ever WAITS on it. Read by pingDevice(). See _submit_tx().
+        self._tx_busy = 0
         # Persistent asyncio loop running in a background thread
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
@@ -64,6 +70,10 @@ class QtExoDeviceManager(QtCore.QObject):
         
         # Setup logging system
         self._setup_logging()
+
+        # ConnParamsMonitor - needs self.logger, so it is created after _setup_logging().
+        self._conn_params = ConnParamsMonitor(self.logger)
+        self._conn_params_task = None
 
     def _setup_logging(self):
         """Setup file-based logging system for debugging and error tracking."""
@@ -168,6 +178,7 @@ class QtExoDeviceManager(QtCore.QObject):
         self._is_connected = False
         self._is_connecting = False
         self._client = None
+        self._stop_conn_params_watch()  # ConnParamsMonitor
 
         # Only emit signals if this was NOT an intentional disconnect
         if not self._intentional_disconnect:
@@ -182,6 +193,29 @@ class QtExoDeviceManager(QtCore.QObject):
         
         # Reset flag for next time
         self._intentional_disconnect = False
+
+    # ----- ConnParamsMonitor glue -----
+    def _start_conn_params_watch(self, client):
+        """Begin logging Windows' view of this client's connection parameters. Call on the BLE loop thread.
+
+        One watch at a time: a retry inside connect() builds a new BleakClient, so any previous watch is
+        stopped first. Purely observational - see services/ConnParamsMonitor.py.
+        """
+        self._stop_conn_params_watch()
+        try:
+            self._conn_params_task = asyncio.ensure_future(watch_client(client, self._conn_params))
+        except Exception as ex:
+            self.logger.warning("CONN_PARAMS watch could not start: %s", ex)
+
+    def _stop_conn_params_watch(self):
+        """Stop the connection-parameter log. Safe from any thread and safe to call repeatedly."""
+        try:
+            self._conn_params.detach()
+            task, self._conn_params_task = self._conn_params_task, None
+            if task is not None and not task.done() and self._loop is not None:
+                self._loop.call_soon_threadsafe(task.cancel)
+        except Exception:
+            pass
 
     @QtCore.Slot(str)
     def set_mac(self, mac: str):
@@ -327,6 +361,9 @@ class QtExoDeviceManager(QtCore.QObject):
                         pass
 
                 client = BleakClient(target, disconnected_callback=_disc_cb)
+                # ConnParamsMonitor: must start BEFORE connect(). Windows was seen changing the interval during
+                # the GATT service discovery that connect() performs, and the device object exists by then.
+                self._start_conn_params_watch(client)
                 try:
                     ok = await client.connect()
 
@@ -338,6 +375,7 @@ class QtExoDeviceManager(QtCore.QObject):
                     )
                     if not getattr(client, "is_connected", False):
                         self.connectionProgress.emit(0)
+                        self._stop_conn_params_watch()  # ConnParamsMonitor
                         try:
                             await client.disconnect()
                         except Exception:
@@ -404,6 +442,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 except asyncio.CancelledError:
                     self.logger.warning("Connect attempt cancelled for %s", address_hint or str(target))
                     self.connectionProgress.emit(0)
+                    self._stop_conn_params_watch()  # ConnParamsMonitor
                     if self._client is client:
                         self._client = None
                         self._is_connected = False
@@ -415,6 +454,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 except Exception as conn_ex:
                     self.logger.warning("Connect attempt failed for %s: %s", address_hint or str(target), conn_ex)
                     self.connectionProgress.emit(0)
+                    self._stop_conn_params_watch()  # ConnParamsMonitor
                     if self._client is client:
                         self._client = None
                         self._is_connected = False
@@ -560,6 +600,7 @@ class QtExoDeviceManager(QtCore.QObject):
         self._client = None
         
         self.logger.info("Client marked for disconnect, state cleared")
+        self._stop_conn_params_watch()  # ConnParamsMonitor
         
         # Do the actual BLE disconnect in background (non-blocking)
         async def _run_disconnect():
@@ -683,6 +724,60 @@ class QtExoDeviceManager(QtCore.QObject):
         self.logger.debug("Connection check passed")
         return True
 
+    def _submit_tx(self, coro):
+        """Submit a coroutine that WRITES to the Nano, marking the TX path busy while it runs.
+
+        WHY THIS EXISTS: a single logical command is often several separate BLE writes. A parameter
+        update is five - the command byte 'f' and then four 8-byte doubles:
+
+            await write(b"f"); for val in (...): await write(struct.pack("<d", val))
+
+        Every `await` yields to the event loop, so any other writer scheduled at that moment runs
+        BETWEEN them and injects its bytes into the middle of the payload.
+
+        The Nano cannot recover from that. BleParser is a state machine: once it has seen a command
+        byte it buffers everything until it has collected exactly `expecting * 8` bytes -
+
+            if (_bytes_collected == _working_message.expecting * 8) { ...complete... }
+
+        - an exact equality. One stray byte makes that 33 instead of 32, which is never equal, so
+        `_waiting_for_data` stays true forever and every subsequent command byte is swallowed as
+        payload. Worse, it keeps appending into `byte _buffer[64]` (BleParser.h), so at 65 bytes it
+        runs off the end of the array.
+
+        This was introduced by the 2 s liveness ping added 2026-09-11, which writes to the same
+        characteristic on a timer and will happily land mid-sequence. But the hazard predates it:
+        any two overlapping command sequences could already corrupt each other, which matters for
+        the external control loop in Python_GUI/external_control/ because it sends parameter updates
+        back to back.
+
+        WHY A COUNTER AND NOT A LOCK: an earlier version of this used an asyncio.Lock that writers
+        held for their whole sequence, which also stopped two command sequences interleaving with
+        each other. That was abandoned deliberately. Writers here can block for a long time -
+        beginTrial() holds an `await asyncio.sleep(1)`, send_end_trial_sequence() waits up to 2 s on
+        a write-with-response - and bleak's write_gatt_char is known on WinRT to occasionally never
+        return at all (see the comment in send_end_trial_sequence). With a lock, one hung write
+        would block EVERY later command for the rest of the session. A counter cannot do that: it is
+        advisory, nothing waits on it, and the `finally` guarantees it unwinds.
+
+        The trade is explicit: this fixes the ping-versus-command collision, and leaves the
+        pre-existing hazard of two overlapping COMMAND sequences exactly as it has always been.
+        That hazard predates the ping and has never been observed; if it ever needs fixing, do it by
+        making callers not overlap, not by making writes wait on each other.
+
+        Deliberately NOT applied to _submit() generally: connect, scan and disconnect coroutines are
+        not writers.
+        """
+        async def _marked():
+            self._tx_busy += 1
+            try:
+                return await coro
+            finally:
+                # finally, not a plain decrement: if a write hangs or raises, the counter must still
+                # come back down or pings would be suppressed for the rest of the session.
+                self._tx_busy -= 1
+        return self._submit(_marked())
+
     def _submit(self, coro):
         """Submit coroutine to event loop with error handling and logging."""
         try:
@@ -764,7 +859,41 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
+
+    @QtCore.Slot()
+    def pingDevice(self):
+        """Send the liveness ping. Fire-and-forget, deliberately quiet.
+
+        The firmware treats 'p' as a no-op whose only job is to prove the link still carries data
+        end to end. If the Nano stops hearing these for EXO_BLE_STALL_MS it records a marker and
+        warm-reboots itself, which is what lets it recover from a stalled link instead of sitting
+        there believing it is still connected.
+
+        Logs nothing on the happy path: this fires every 2 s for the whole session. Failures are
+        swallowed too - a failed write IS the condition the firmware is watching for, and the
+        reconnect machinery already reports real disconnects.
+        """
+        if not self._is_connected or self._client is None or self._loop is None:
+            return
+
+        # Skip if a command sequence is part-way through. A ping is a single byte and cannot be
+        # corrupted itself, but it CAN land between a command byte and its data payload, which
+        # wedges the Nano's parser - see _submit_tx(). Skipping costs nothing: any inbound byte
+        # refreshes the firmware's link-stall timer, so commands keep it fed on their own.
+        if self._tx_busy:
+            return
+
+        async def _do():
+            try:
+                await self._client.write_gatt_char(UART_TX_UUID, b"p", response=False)
+            except Exception:
+                pass
+
+        try:
+            self._submit_tx(_do())
+        except Exception:
+            pass
 
     @QtCore.Slot()
     def calibrateTorque(self):
@@ -784,7 +913,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 self.logger.exception(f"Error in calibrateTorque: {ex}")
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def calibrateFSRs(self):
@@ -804,7 +933,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 self.logger.exception(f"Error in calibrateFSRs: {ex}")
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def motorOff(self):
@@ -818,7 +947,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def motorOn(self):
@@ -832,7 +961,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot(list)
     def updateTorqueValues(self, parameter_list: list):
@@ -865,7 +994,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot(float, float)
     def sendFsrValues(self, left_fsr: float, right_fsr: float):
@@ -884,7 +1013,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def sendPresetFsrValues(self):
@@ -901,7 +1030,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def stopTrial(self):
@@ -915,7 +1044,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def switchToAssist(self):
@@ -929,7 +1058,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def switchToResist(self):
@@ -943,7 +1072,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot(float)
     def sendStiffness(self, stiffness: float):
@@ -959,7 +1088,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot(object)
     def newStiffness(self, stiffnessInput):
@@ -982,7 +1111,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def send_acknowledgement(self):
@@ -996,7 +1125,7 @@ class QtExoDeviceManager(QtCore.QObject):
             except Exception as ex:
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     @QtCore.Slot()
     def beginTrial(self):
@@ -1031,7 +1160,7 @@ class QtExoDeviceManager(QtCore.QObject):
                 self.logger.exception(f"Error in beginTrial: {ex}")
                 self.error.emit(str(ex))
 
-        self._submit(_do())
+        self._submit_tx(_do())
 
     def _ensure_loop(self):
         if self._loop and self._loop_thread and self._loop_thread.is_alive():

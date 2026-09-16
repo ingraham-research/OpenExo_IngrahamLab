@@ -1,5 +1,29 @@
 # Mid-Trial Plot Freeze and Auto-Disconnect — the Nano Goes Radio-Silent
 
+> # ✅ SUPERSEDED 2026-09-12 - THE ROOT CAUSE IS NOW KNOWN
+>
+> **The mid-trial BLE death is caused by a short connection interval.** Measured: **7.5 ms fails 12/12**,
+> **15 ms fails 2/2**, while **28.75 ms and ~30 ms have run 6,076+ s with zero failures**. The fix is
+> `setConnectionInterval(20, 24)` = 25-30 ms in `ExoBLE.cpp` (build B23).
+>
+> **Read `Nano-Hang-Watchdog-And-Breadcrumbs.md` §0 first** - it carries the authoritative status and a
+> retraction ledger for every superseded claim across this whole investigation.
+>
+> **This document is kept for its reasoning and its raw observations, not its conclusions.** Specific
+> things in here that are now known to be wrong or incomplete are listed at the end of this banner.
+>
+> **Superseded here specifically:**
+> - "The root cause is NOT yet identified" - it is now: the connection interval (§0.1 of the main doc).
+> - Anything treating **RF marginality** as the prime suspect. The link dies on a bench at ~1 m with a
+>   strong signal; what matters is the interval, not the range.
+> - The instrument shipped here (`RESETREAS` readout) turned out to be **confounded on this board** -
+>   power-on reads as `RESETPIN`. See `Nano-Reset-Pin-Spurious-Reset.md`, itself corrected.
+> - The "two presentations" framing survives and is still the right one: **A** = loop alive / link dead,
+>   **B** = loop stopped. Both are real and they need different recovery mechanisms.
+
+---
+
+
 **Date:** 2026-09-02
 **Scope:** Diagnosis spans `Python_GUI/services/QtExoDeviceManager.py`, `Python_GUI/MainWindow.py`,
 `ExoCode/src/ExoBLE.cpp`, `ExoCode/src/ComsMCU.cpp`, `ExoCode/src/RealTimeI2C.cpp`,

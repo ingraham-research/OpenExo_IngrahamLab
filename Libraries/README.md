@@ -30,3 +30,14 @@
             ```SPISettings bluefruitSPI(1000000, MSBFIRST, SPI_MODE0);```  
             
             Due to teensy speed issue
+
+## ArduinoBLE
+- Git: https://github.com/arduino-libraries/ArduinoBLE
+- Version: 2.1.0 (this folder previously held an unpatched 1.2.1; replaced 2026-09-15)
+- Modifications: **YES, and the Nano firmware will not link without them. Do not replace this folder with the Library Manager version.**
+    - `src/utility/HCI.cpp` - three changes, each marked `LOCAL MODIFICATION` in the file with its own explanation and revert steps. The untouched original is kept beside it as `HCI.cpp.orig-openexo-backup`.
+        1. `HCIClass::sendAclPkt()` now waits at most `ARDUINOBLE_ACL_WAIT_TIMEOUT_MS` (50 ms) for the Bluetooth controller to free a packet slot, and drops that packet instead of waiting forever. Upstream bug [ArduinoBLE issue #45](https://github.com/arduino-libraries/ArduinoBLE/issues/45), open since 2019 - the unbounded wait hangs the Nano when the BLE link stalls. **This one changes behaviour.**
+        2. LE Connection Complete - records the connection parameters the central chose into `exo_ble_cp_*`. Record only.
+        3. LE Connection Update Complete (HCI LE meta subevent 0x03, which upstream does not handle at all) - records the updated parameters into `exo_ble_cu_*`. Record only.
+    - Changes 2 and 3 define the symbols declared `extern` in `ExoCode/src/SystemReset.h` and reported in the connect banner as `CPi`/`UPi`. Without them the Nano build fails with ``undefined reference to `exo_ble_cp_interval'``. The full explanation lives in the build note above that `extern "C"` block, and in `Modification log with claude/Nano-Hang-Watchdog-And-Breadcrumbs.md` (§8, §13, §14.2, §15.2-§15.3).
+    - To check that a sketchbook install still has the patch: `grep -c ARDUINOBLE_ACL_WAIT_TIMEOUT_MS <sketchbook>/libraries/ArduinoBLE/src/utility/HCI.cpp` - 0 means it is gone, and it can be restored from this folder.

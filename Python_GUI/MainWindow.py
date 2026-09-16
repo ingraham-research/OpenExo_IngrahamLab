@@ -24,6 +24,13 @@ from remote.service import RemoteControlService
 from Widgets.ShutdownDialog import ShutdownDialog
 
 
+# The firmware packs every real-time channel as int16 x100, so "Exoskeleton time (seconds)" wraps
+# every 65536/100 s (+327.67 -> -327.68). Mirrors ActiveTrialPage._EXO_TIME_WRAP_SPAN, kept separate
+# so the CSV path does not depend on importing a plot page.
+_CSV_EXO_WRAP_SPAN = 65536 / 100.0              # 655.36 s, one full int16 range of the x100 clock
+_CSV_EXO_WRAP_HALF = _CSV_EXO_WRAP_SPAN / 2.0   # 327.68 s, wrap-detection threshold
+
+
 class MainWindow(QtWidgets.QMainWindow):
     _PARAM_UPDATE_REASONS = {
         1: "invalid message",
@@ -88,6 +95,17 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self.logger.error(f"Failed to bind device manager to scan page: {e}")
             self.logger.debug(traceback.format_exc())
+        # BLE link-liveness ping. The firmware needs to hear from us periodically: in the observed
+        # failure the Nano keeps running normally but nothing reaches it, and because it never
+        # processes the disconnect it sits believing it is still connected and never re-advertises,
+        # so the GUI cannot find it again. These pings are what let it notice and reboot itself.
+        # 2 s against the firmware's 8 s EXO_BLE_STALL_MS - four misses before it acts.
+        # Runs unconditionally; pingDevice() is a no-op while disconnected.
+        self._ble_ping_timer = QtCore.QTimer(self)
+        self._ble_ping_timer.setInterval(2000)
+        self._ble_ping_timer.timeout.connect(self.qt_dev.pingDevice)
+        self._ble_ping_timer.start()
+
         self.rt_bridge = RtBridge(self)
         # Wire bytes to parser and route RT data to plots
         self.qt_dev.dataReceived.connect(self.rt_bridge.feed_bytes)
@@ -105,6 +123,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._csv_file = None
         self._csv_writer = None
         self._csv_header_written = False
+        # Exo-clock unwrap state for the CSV. Every real-time channel is packed int16 x100, so the
+        # exo clock wraps every 655.36 s. The PLOT was fixed for this in
+        # ActiveTrialPage._x_for_sample; the CSV was not, so any trial over ~5.5 min wrote a
+        # sawtooth time column - a 30 min trial came out with a NEGATIVE span. Same correction,
+        # tracked separately because the CSV's lifetime is per file, not per plot.
+        self._csv_exo_idx = None        # exo-time channel index, resolved when the header is written
+        self._csv_exo_prev_raw = None   # previous RAW value, for wrap detection
+        self._csv_exo_offset = 0.0      # cumulative wraps, seconds
         # Channel indices written to the CSV, fixed when the header is written so header and rows
         # can never disagree. See _csv_channel_indices().
         self._csv_indices = []
@@ -265,6 +291,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     # means the CSV follows whatever the firmware advertises, and survived the
                     # channel renumbering that moved battery to index 12.
                     self._csv_indices = self._csv_channel_indices(values)
+                    # Which channel is the exo clock, so the row writer can undo its int16 wrap.
+                    # Matched by NAME for the same reason the channel selection is: the index moves
+                    # whenever the firmware payload changes.
+                    self._csv_exo_idx = None
+                    if self._param_names:
+                        try:
+                            self._csv_exo_idx = self._param_names.index("Exoskeleton time (seconds)")
+                        except ValueError:
+                            self._csv_exo_idx = None
                     if self._param_names:
                         header.extend(self._param_names[i] for i in self._csv_indices)
                     else:
@@ -280,8 +315,34 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Write row using the same channel selection as the header, so they can never
                 # drift apart (a row shorter/longer than the header silently misaligns columns).
                 epoch_time = time.time()
+
+                # Undo the exo clock's int16 wrap before writing. A drop of more than half the span
+                # is a wrap, not time running backwards, so carry a cumulative offset.
+                #
+                # A genuine Nano reboot mid-trial also looks like a large drop. It is deliberately
+                # NOT re-anchored here: doing so would splice two boots into one smooth monotonic
+                # column and hide the fact that the device restarted. Letting the offset accumulate
+                # keeps that discontinuity visible, which is what you want when reading a trial the
+                # device rebooted through - and with the watchdog and link-stall detector in place,
+                # that now happens routinely.
+                exo_unwrapped = None
+                if self._csv_exo_idx is not None and self._csv_exo_idx < len(values):
+                    raw = values[self._csv_exo_idx]
+                    if (self._csv_exo_prev_raw is not None
+                            and (raw - self._csv_exo_prev_raw) < -_CSV_EXO_WRAP_HALF):
+                        self._csv_exo_offset += _CSV_EXO_WRAP_SPAN
+                    self._csv_exo_prev_raw = raw
+                    exo_unwrapped = raw + self._csv_exo_offset
+
+                def _cell(i):
+                    if i >= len(values):
+                        return ""
+                    if i == self._csv_exo_idx and exo_unwrapped is not None:
+                        return f"{exo_unwrapped:.6f}"
+                    return f"{values[i]:.6f}"
+
                 row = [f"{epoch_time:.6f}", str(self._mark_counter)] + [
-                    f"{values[i]:.6f}" if i < len(values) else "" for i in self._csv_indices]
+                    _cell(i) for i in self._csv_indices]
                 try:
                     self._csv_writer.writerow(row)
                 except Exception as e:
@@ -648,6 +709,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._csv_file = None
             self._csv_writer = None
             self._csv_header_written = False
+            self._csv_exo_idx = None
+            self._csv_exo_prev_raw = None
+            self._csv_exo_offset = 0.0
             self._t0 = None
             self._csv_path_last = None
 
@@ -766,6 +830,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._csv_file = None
                 self._csv_writer = None
                 self._csv_header_written = False
+                self._csv_exo_idx = None
+                self._csv_exo_prev_raw = None
+                self._csv_exo_offset = 0.0
                 self._t0 = None
                 self._mark_counter = 0  # Reset mark counter
                 try:
@@ -848,6 +915,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._csv_file = None
                 self._csv_writer = None
                 self._csv_header_written = False
+                self._csv_exo_idx = None
+                self._csv_exo_prev_raw = None
+                self._csv_exo_offset = 0.0
                 self._t0 = None
                 self._mark_counter = 0  # Reset mark counter
                 try:
@@ -893,6 +963,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._csv_file = None
                 self._csv_writer = None
                 self._csv_header_written = False
+                self._csv_exo_idx = None
+                self._csv_exo_prev_raw = None
+                self._csv_exo_offset = 0.0
                 self._t0 = None
                 self._csv_path_last = None
             
@@ -1119,9 +1192,14 @@ class MainWindow(QtWidgets.QMainWindow):
         "PORBOR":   "power-on or BROWNOUT. No crash was recorded. If nobody power-cycled it,\n"
                     "             this is a power event - or a hang that needed a manual cycle.",
         "LOCKUP":   "CPU LOCKUP - a hard fault escalated. This is a firmware crash.",
-        "SREQ":     "software reset (NVIC_SystemReset). Expected right after an End Trial 'Z';\n"
-                    "             unexpected otherwise - could be an Mbed fault handler reboot.",
-        "DOG":      "watchdog timeout - but this firmware configures no watchdog. Investigate.",
+        "SREQ":     "software reset (NVIC_SystemReset). Expected in THREE cases, and the rest of\n"
+                    "             this line says which: BLESTALL_n = our BLE link-stall detector\n"
+                    "             rebooted the Nano because the GUI went silent while the stack\n"
+                    "             still thought it was connected (NOT an error - the recovery\n"
+                    "             working as designed); CRASH_0x = an Mbed fault handler reboot;\n"
+                    "             and a bare SREQ right after an End Trial 'Z'. A bare SREQ with\n"
+                    "             no End Trial and no suffix is the only unexplained case.",
+        "DOG":      "watchdog timeout - the Nano stopped feeding the dog and rebooted itself. The STAGE_n on this line says which loop() phase it died in; STAGE_7 (ARMED) means it died on the boot path before the first full pass.",
         "RESETPIN": "reset pin - the button was pressed, or the board was re-flashed.",
         "VBUS":     "USB VBUS detected - board woke on USB power being applied.",
     }
@@ -1150,6 +1228,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 names = parts[2] if len(parts) > 2 else ""
                 lines = [f" RESETREAS = {code}  ({names})"]
                 for name in [n for n in names.split(",") if n]:
+                    # CRASH_0x<err>_n<count> is appended by SystemReset.h when the PREVIOUS boot
+                    # ended in a trapped mbed fault (hard fault, failed assert, out of memory,
+                    # stack overflow) rather than a normal reset. This is the one reset reason that
+                    # means the firmware died on its own, so call it out loudly.
+                    if name.startswith("CRASH_"):
+                        try:
+                            err, cnt = name[len("CRASH_"):].split("_n")
+                        except ValueError:
+                            err, cnt = name[len("CRASH_"):], "?"
+                        lines_extra = [
+                            "   *** THE NANO CRASHED AND REBOOTED ITSELF ***",
+                            f"       mbed error code {err}, consecutive crash #{cnt}.",
+                            "       It recovered on its own, with no power cycle. This is a real",
+                            "       firmware fault - not a power-on. See ExoCode/src/SystemReset.h.",
+                        ]
+                        lines.extend(lines_extra)
+                        continue
                     meaning = self._RESET_REASON_MEANING.get(name)
                     if meaning:
                         lines.append(f"   {name}: {meaning}")
@@ -1219,6 +1314,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._csv_file = None
                 self._csv_writer = None
                 self._csv_header_written = False
+                self._csv_exo_idx = None
+                self._csv_exo_prev_raw = None
+                self._csv_exo_offset = 0.0
                 self._t0 = None
                 self._mark_counter = 0  # Reset mark counter
                 try:
@@ -1255,6 +1353,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._csv_file = open(fname, "w", newline="")
             self._csv_writer = csv.writer(self._csv_file)
             self._csv_header_written = False
+            self._csv_exo_idx = None
+            self._csv_exo_prev_raw = None
+            self._csv_exo_offset = 0.0
             self._t0 = None
             self._mark_counter = 0  # Reset mark counter for new trial
             self._csv_path_last = fname

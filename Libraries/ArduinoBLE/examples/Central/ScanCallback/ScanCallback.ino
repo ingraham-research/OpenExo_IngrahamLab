@@ -1,7 +1,7 @@
 /*
   Scan Callback
 
-  This example scans for BLE peripherals and prints out their advertising details:
+  This example scans for Bluetooth® Low Energy peripherals and prints out their advertising details:
   address, local name, advertised service UUIDs. Unlike the Scan example, it uses
   the callback style APIs and disables filtering so the peripheral discovery is
   reported for every single advertisement it makes.
@@ -21,12 +21,12 @@ void setup() {
 
   // begin initialization
   if (!BLE.begin()) {
-    logger::println("starting BLE failed!");
+    Serial.println("starting Bluetooth® Low Energy module failed!");
 
     while (1);
   }
 
-  logger::println("BLE Central scan callback");
+  Serial.println("Bluetooth® Low Energy Central scan callback");
 
   // set the discovered event handle
   BLE.setEventHandler(BLEDiscovered, bleCentralDiscoverHandler);
@@ -42,32 +42,32 @@ void loop() {
 
 void bleCentralDiscoverHandler(BLEDevice peripheral) {
   // discovered a peripheral
-  logger::println("Discovered a peripheral");
-  logger::println("-----------------------");
+  Serial.println("Discovered a peripheral");
+  Serial.println("-----------------------");
 
   // print address
-  logger::print("Address: ");
-  logger::println(peripheral.address());
+  Serial.print("Address: ");
+  Serial.println(peripheral.address());
 
   // print the local name, if present
   if (peripheral.hasLocalName()) {
-    logger::print("Local Name: ");
-    logger::println(peripheral.localName());
+    Serial.print("Local Name: ");
+    Serial.println(peripheral.localName());
   }
 
   // print the advertised service UUIDs, if present
   if (peripheral.hasAdvertisedServiceUuid()) {
-    logger::print("Service UUIDs: ");
+    Serial.print("Service UUIDs: ");
     for (int i = 0; i < peripheral.advertisedServiceUuidCount(); i++) {
-      logger::print(peripheral.advertisedServiceUuid(i));
-      logger::print(" ");
+      Serial.print(peripheral.advertisedServiceUuid(i));
+      Serial.print(" ");
     }
-    logger::println();
+    Serial.println();
   }
 
   // print the RSSI
-  logger::print("RSSI: ");
-  logger::println(peripheral.rssi());
+  Serial.print("RSSI: ");
+  Serial.println(peripheral.rssi());
 
-  logger::println();
+  Serial.println();
 }

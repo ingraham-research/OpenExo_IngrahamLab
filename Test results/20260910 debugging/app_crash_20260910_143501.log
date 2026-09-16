@@ -1,0 +1,61 @@
+2026-09-10 14:35:01.182 | INFO     | OpenExo              | setup_crash_logger        | ====================================================================================================
+2026-09-10 14:35:01.182 | INFO     | OpenExo              | setup_crash_logger        | OpenExo Application Started
+2026-09-10 14:35:01.182 | INFO     | OpenExo              | setup_crash_logger        | Crash log file: c:\Users\apfis\OneDrive\Documents\GitHub\OpenExo_IngrahamLab\Python_GUI\Saved_Data\logs\app_crash_20260910_143501.log
+2026-09-10 14:35:01.182 | INFO     | OpenExo              | setup_crash_logger        | Python version: 3.13.14 (tags/v3.13.14:fd17997, Jun 10 2026, 13:03:48) [MSC v.1944 64 bit (AMD64)]
+2026-09-10 14:35:01.182 | INFO     | OpenExo              | setup_crash_logger        | ====================================================================================================
+2026-09-10 14:35:01.182 | INFO     | OpenExo              | setup_crash_logger        | Global exception handler installed - all crashes will be logged
+2026-09-10 14:35:01.182 | INFO     | OpenExo              | main                      | Creating QApplication...
+2026-09-10 14:35:01.256 | INFO     | OpenExo              | main                      | Applying dark stylesheet...
+2026-09-10 14:35:01.259 | INFO     | OpenExo              | main                      | Creating MainWindow...
+2026-09-10 14:35:01.270 | INFO     | OpenExo.MainWindow   | __init__                  | Initializing MainWindow...
+2026-09-10 14:35:03.061 | INFO     | OpenExo.RtBridge     | __init__                  | Initializing RtBridge...
+2026-09-10 14:35:03.062 | INFO     | OpenExo.MainWindow   | __init__                  | Device manager log file: c:\Users\apfis\OneDrive\Documents\GitHub\OpenExo_IngrahamLab\Python_GUI\Saved_Data\logs\device_manager_20260910_143503.log
+2026-09-10 14:35:03.076 | INFO     | OpenExo.RemoteControl | __init__                  | Remote control bound to 127.0.0.1:9750
+2026-09-10 14:35:03.077 | INFO     | OpenExo.MainWindow   | __init__                  | Remote control active on udp://127.0.0.1:9750
+2026-09-10 14:35:03.077 | INFO     | OpenExo              | main                      | Showing MainWindow...
+2026-09-10 14:35:03.211 | INFO     | OpenExo              | main                      | Application ready - entering event loop
+2026-09-10 14:37:24.025 | WARNING  | OpenExo.MainWindow   | _on_reset_reason          | Nano last reset reason: RST:0x00000001:RESETPIN
+2026-09-10 14:37:27.870 | INFO     | OpenExo.MainWindow   | _on_handshake             | Handshake payload received
+2026-09-10 14:37:27.910 | INFO     | OpenExo.MainWindow   | _on_param_names           | Received 13 parameter names
+2026-09-10 14:37:27.930 | INFO     | OpenExo.MainWindow   | _on_controller_matrix     | Received controller matrix with 18 entries
+2026-09-10 14:37:27.953 | INFO     | OpenExo.RtBridge     | _emit_matrix_completeness | Controller list looks complete (18 entries)
+2026-09-10 14:37:27.954 | INFO     | OpenExo.MainWindow   | _on_controller_values     | Controller value DB from device: 18 raw keys, 18 entries after matrix alignment
+2026-09-10 14:37:27.961 | INFO     | OpenExo.MainWindow   | _on_dev_connected         | Device connected: Saved device 65:43:3E:4B:42:FA
+2026-09-10 14:38:06.423 | INFO     | OpenExo.MainWindow   | _start_csv_auto           | Started CSV logging to: c:\Users\apfis\OneDrive\Documents\GitHub\OpenExo_IngrahamLab\Python_GUI\Saved_Data\trial_20260910_143806.csv
+2026-09-10 14:40:14.226 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 68, 13, 10, 0.0]
+2026-09-10 14:40:14.728 | INFO     | OpenExo.RtBridge     | feed_bytes                | [shutdown-debug] cmd='a' event_info='Sa5' event_data='6800n1300n1000n100n0n'
+2026-09-10 14:40:14.760 | INFO     | OpenExo.MainWindow   | _on_param_update_ack      | Parameter update accepted: joint=68 controller=13 index=10
+2026-09-10 14:40:14.820 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 36, 13, 10, 0.0]
+2026-09-10 14:40:15.246 | INFO     | OpenExo.RtBridge     | feed_bytes                | [shutdown-debug] cmd='a' event_info='Sa5' event_data='3600n1300n1000n100n0n'
+2026-09-10 14:40:15.246 | INFO     | OpenExo.MainWindow   | _on_param_update_ack      | Parameter update accepted: joint=36 controller=13 index=10
+2026-09-10 14:40:15.308 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 68, 13, 0, 11.0]
+2026-09-10 14:40:15.696 | INFO     | OpenExo.RtBridge     | feed_bytes                | [shutdown-debug] cmd='a' event_info='Sa5' event_data='6800n1300n0n100n0n'
+2026-09-10 14:40:15.697 | INFO     | OpenExo.MainWindow   | _on_param_update_ack      | Parameter update accepted: joint=68 controller=13 index=0
+2026-09-10 14:40:15.759 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 36, 13, 0, 11.0]
+2026-09-10 14:40:16.157 | INFO     | OpenExo.RtBridge     | feed_bytes                | [shutdown-debug] cmd='a' event_info='Sa5' event_data='3600n1300n0n100n0n'
+2026-09-10 14:40:16.158 | INFO     | OpenExo.MainWindow   | _on_param_update_ack      | Parameter update accepted: joint=36 controller=13 index=0
+2026-09-10 14:40:16.207 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 68, 13, 1, 5.866666666666666]
+2026-09-10 14:40:16.570 | INFO     | OpenExo.RtBridge     | feed_bytes                | [shutdown-debug] cmd='a' event_info='Sa5' event_data='6800n1300n100n100n0n'
+2026-09-10 14:40:16.571 | INFO     | OpenExo.MainWindow   | _on_param_update_ack      | Parameter update accepted: joint=68 controller=13 index=1
+2026-09-10 14:40:16.613 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 36, 13, 1, 5.866666666666666]
+2026-09-10 14:40:17.001 | INFO     | OpenExo.RtBridge     | feed_bytes                | [shutdown-debug] cmd='a' event_info='Sa5' event_data='3600n1300n100n100n0n'
+2026-09-10 14:40:17.002 | INFO     | OpenExo.MainWindow   | _on_param_update_ack      | Parameter update accepted: joint=36 controller=13 index=1
+2026-09-10 14:40:22.195 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 68, 13, 10, 100.0]
+2026-09-10 14:40:22.591 | INFO     | OpenExo.RtBridge     | feed_bytes                | [shutdown-debug] cmd='a' event_info='Sa5' event_data='6800n1300n1000n100n0n'
+2026-09-10 14:40:22.592 | INFO     | OpenExo.MainWindow   | _on_param_update_ack      | Parameter update accepted: joint=68 controller=13 index=10
+2026-09-10 14:40:22.632 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 36, 13, 10, 100.0]
+2026-09-10 14:40:22.990 | INFO     | OpenExo.RtBridge     | feed_bytes                | [shutdown-debug] cmd='a' event_info='Sa5' event_data='3600n1300n1000n100n0n'
+2026-09-10 14:40:22.991 | INFO     | OpenExo.MainWindow   | _on_param_update_ack      | Parameter update accepted: joint=36 controller=13 index=10
+2026-09-10 14:42:06.115 | WARNING  | OpenExo.MainWindow   | _on_dev_disconnected      | Device disconnected unexpectedly
+2026-09-10 14:42:06.129 | INFO     | OpenExo.MainWindow   | _on_dev_disconnected      | Device already disconnected - skipping motor off/stop trial commands
+2026-09-10 14:42:06.133 | INFO     | OpenExo.MainWindow   | _on_dev_disconnected      | CSV closed after disconnect: c:\Users\apfis\OneDrive\Documents\GitHub\OpenExo_IngrahamLab\Python_GUI\Saved_Data\trial_20260910_143806.csv
+2026-09-10 14:42:06.167 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 68, 13, 10, 0.0]
+2026-09-10 14:42:06.169 | ERROR    | OpenExo.MainWindow   | _on_dev_error             | Device error: Not connected
+2026-09-10 14:42:11.173 | WARNING  | OpenExo.MainWindow   | _on_param_update_timeout  | Parameter update timed out waiting for ack: joint=68 controller=13 index=10
+2026-09-10 14:42:11.347 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 68, 13, 10, 0.0]
+2026-09-10 14:42:11.350 | ERROR    | OpenExo.MainWindow   | _on_dev_error             | Device error: Not connected
+2026-09-10 14:42:16.350 | WARNING  | OpenExo.MainWindow   | _on_param_update_timeout  | Parameter update timed out waiting for ack: joint=68 controller=13 index=10
+2026-09-10 14:42:16.489 | INFO     | OpenExo.MainWindow   | _apply_param_update       | Applying param update: [False, 68, 13, 10, 0.0]
+2026-09-10 14:42:16.492 | ERROR    | OpenExo.MainWindow   | _on_dev_error             | Device error: Not connected
+2026-09-10 14:42:21.499 | WARNING  | OpenExo.MainWindow   | _on_param_update_timeout  | Parameter update timed out waiting for ack: joint=68 controller=13 index=10
+2026-09-10 14:43:06.427 | ERROR    | OpenExo.MainWindow   | _on_dev_error             | Device error: Max attempts reached. Could not connect.

@@ -4,6 +4,14 @@
    P. Stegall Jan 2022
 */  
 
+/*
+   NOTE - NANO BUILD: this firmware needs the patched ArduinoBLE 2.1.0 that ships in this repo at
+   Libraries/ArduinoBLE (one file differs from upstream: src/utility/HCI.cpp). Install it into your sketchbook
+   libraries folder as usual; with a stock ArduinoBLE the Nano build fails with
+   "undefined reference to `exo_ble_cp_interval'". For why, and how to check, see the comment above the
+   extern "C" block in src/SystemReset.h.
+*/
+
 //Teensy Operation
 #if defined(ARDUINO_TEENSY36) | defined(ARDUINO_TEENSY41)
 
@@ -736,6 +744,7 @@ void loop()
 #include "src/uart_commands.h"
 #include "src/UART_msg_t.h"
 #include "src/ComsLed.h"
+#include "src/SystemReset.h"
 #include "src/RealTimeI2C.h"
 #include "src/GetBulkChar.h"
 
@@ -785,8 +794,15 @@ namespace config_info
 void setup()
 {
     Serial.begin(115200);
+
+    //FIRST ACTION: latch the previous boot's breadcrumb before this boot overwrites it, then
+    //start stamping immediately. Everything from here on has a stage, so a trip anywhere on the
+    //boot path now names a location instead of reporting the useless STAGE_0.
+    (void)exo_wdt_stage_record();
+    exo_wdt_stage(EXO_STAGE_SETUP_ENTRY);
 	
 	long initialTime = millis();
+	exo_wdt_stage(EXO_STAGE_BULK_READ);
 	readSingleMessageBlocking();
 	long time_spent = millis() - initialTime;
 	//delay(5000);
@@ -805,6 +821,7 @@ void setup()
     
     //Get the SD card config from the teensy, this has a timeout
     UARTHandler* handler = UARTHandler::get_instance();
+    exo_wdt_stage(EXO_STAGE_GET_CONFIG);
     const bool timed_out = UART_command_utils::get_config(handler, config_info::config_to_send, (float)UART_times::CONFIG_TIMEOUT);
 
     //Creates new instance of LED on communication board (Nano)
@@ -826,11 +843,22 @@ void setup()
         led->set_color(0, 255, 0);
     }
 
+    //Ask the Teensy what the RT I2C link has looked like. It survives Nano reboots, so after a
+    //watchdog or stall reset these counters describe the failure we just went through. Short
+    //timeout: this is diagnostics, and it must never be what holds up the boot.
+    exo_wdt_stage(EXO_STAGE_LINK_STATS);
+    UART_command_utils::get_link_stats(handler, 1500.0f);
+
     #if REAL_TIME_I2C
       logger::print("Init I2C");  
+      exo_wdt_stage(EXO_STAGE_I2C_INIT);
       real_time_i2c::init();
       logger::print("Setup->End Setup");
     #endif
+
+    //Latching now happens at the TOP of setup() - see there. Arming is deliberately not done here
+    //either; see the note at the end of loop().
+    exo_wdt_stage(EXO_STAGE_SETUP_DONE);
 }
 
 void loop()
@@ -846,8 +874,17 @@ void loop()
         
     #endif
 
+    //Feed around the one-time constructions below. On the FIRST pass these run before the loop
+    //reaches its normal feed, and a watchdog that survived a warm reset is already counting - the
+    //nRF52840 WDT is not cleared by NVIC_SystemReset, only by a power-on reset or by firing.
+    exo_wdt_feed();
+    exo_wdt_stage(EXO_STAGE_CTOR_EXODATA);
+
     //Constructs a new ExoData object with configuration
     static ExoData* exo_data = new ExoData(config_info::config_to_send);
+
+    exo_wdt_feed();
+    exo_wdt_stage(EXO_STAGE_CTOR_COMSMCU);
     
     #if MAIN_DEBUG
         if (first_run)
@@ -857,7 +894,10 @@ void loop()
     #endif
 
     //Constructs a new ComsMCU object with the exo data and the configuration information
+    //(its constructor runs ExoBLE::setup(), which feeds internally around BLE.begin()).
     static ComsMCU* mcu = new ComsMCU(exo_data, config_info::config_to_send);
+
+    exo_wdt_feed();
     
     #if MAIN_DEBUG
         if (first_run)
@@ -866,12 +906,40 @@ void loop()
         }
     #endif
 
-    //Performs key communication protocols
+    //Feed the watchdog once per pass, from loop() itself - NOT from a callback. ArduinoBLE runs
+    //Cordio in its own RTOS thread which survives a stalled loop(), so feeding from anything that
+    //outlives the hang would defeat the point. loop() is what we proved stops. See SystemReset.h.
+    exo_wdt_feed();
+
+    //Performs key communication protocols. Each stage stamps a breadcrumb into GPREGRET2, which
+    //survives the warm watchdog reset - so the next boot reports the last phase reached before the
+    //hang, as ",STAGE_n" on the reset-reason string.
+    exo_wdt_stage(EXO_STAGE_HANDLE_BLE);
     mcu->handle_ble();
+
+    exo_wdt_stage(EXO_STAGE_LOCAL_SAMPLE);
     mcu->local_sample();
+
+    exo_wdt_stage(EXO_STAGE_UPDATE_UART);
     mcu->update_UART();
+
+    exo_wdt_stage(EXO_STAGE_UPDATE_GUI);
     mcu->update_gui();
+
+    exo_wdt_stage(EXO_STAGE_HANDLE_ERRORS);
     mcu->handle_errors();
+
+    exo_wdt_stage(EXO_STAGE_LOOP_TOP);   //Reached the end cleanly; anything else means we died mid-phase
+
+    //Arm the watchdog only after ONE COMPLETE loop pass. It used to be armed at the end of setup(),
+    //which was wrong: the first pass constructs ExoData and ComsMCU, and the ComsMCU constructor
+    //runs ExoBLE::setup() - BLE.begin(), GATT registration, advertising - with nothing feeding the
+    //dog. That window tripped it for real, and because exo_crash_record() zeroes GPREGRET2 inside
+    //the same window the banner came back as the uninformative "DOG,STAGE_0_dog1".
+    //Arming here means every one-time construction is finished and the loop has proven it can
+    //complete a pass before the dog can ever bite. exo_wdt_start() is idempotent (it returns early
+    //if RUNSTATUS shows it already running), so calling it every pass costs one register read.
+    exo_wdt_start();
 
     #if MAIN_DEBUG
         static float then = millis();

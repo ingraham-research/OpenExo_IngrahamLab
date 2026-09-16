@@ -1,7 +1,7 @@
 /*
   Peripheral Explorer
 
-  This example scans for BLE peripherals until one with a particular name ("LED")
+  This example scans for Bluetooth® Low Energy peripherals until one with a particular name ("LED")
   is found. Then connects, and discovers + prints all the peripheral's attributes.
 
   The circuit:
@@ -22,12 +22,12 @@ void setup() {
 
   // begin initialization
   if (!BLE.begin()) {
-    logger::println("starting BLE failed!");
+    Serial.println("starting Bluetooth® Low Energy module failed!");
 
     while (1);
   }
 
-  logger::println("BLE Central - Peripheral Explorer");
+  Serial.println("Bluetooth® Low Energy Central - Peripheral Explorer");
 
   // start scanning for peripherals
   BLE.scan();
@@ -39,13 +39,13 @@ void loop() {
 
   if (peripheral) {
     // discovered a peripheral, print out address, local name, and advertised service
-    logger::print("Found ");
-    logger::print(peripheral.address());
-    logger::print(" '");
-    logger::print(peripheral.localName());
-    logger::print("' ");
-    logger::print(peripheral.advertisedServiceUuid());
-    logger::println();
+    Serial.print("Found ");
+    Serial.print(peripheral.address());
+    Serial.print(" '");
+    Serial.print(peripheral.localName());
+    Serial.print("' ");
+    Serial.print(peripheral.advertisedServiceUuid());
+    Serial.println();
 
     // see if peripheral is a LED
     if (peripheral.localName() == "LED") {
@@ -64,32 +64,32 @@ void loop() {
 
 void explorerPeripheral(BLEDevice peripheral) {
   // connect to the peripheral
-  logger::println("Connecting ...");
+  Serial.println("Connecting ...");
 
   if (peripheral.connect()) {
-    logger::println("Connected");
+    Serial.println("Connected");
   } else {
-    logger::println("Failed to connect!");
+    Serial.println("Failed to connect!");
     return;
   }
 
   // discover peripheral attributes
-  logger::println("Discovering attributes ...");
+  Serial.println("Discovering attributes ...");
   if (peripheral.discoverAttributes()) {
-    logger::println("Attributes discovered");
+    Serial.println("Attributes discovered");
   } else {
-    logger::println("Attribute discovery failed!");
+    Serial.println("Attribute discovery failed!");
     peripheral.disconnect();
     return;
   }
 
   // read and print device name of peripheral
-  logger::println();
-  logger::print("Device name: ");
-  logger::println(peripheral.deviceName());
-  logger::print("Appearance: 0x");
-  logger::println(peripheral.appearance(), HEX);
-  logger::println();
+  Serial.println();
+  Serial.print("Device name: ");
+  Serial.println(peripheral.deviceName());
+  Serial.print("Appearance: 0x");
+  Serial.println(peripheral.appearance(), HEX);
+  Serial.println();
 
   // loop the services of the peripheral and explore each
   for (int i = 0; i < peripheral.serviceCount(); i++) {
@@ -98,18 +98,18 @@ void explorerPeripheral(BLEDevice peripheral) {
     exploreService(service);
   }
 
-  logger::println();
+  Serial.println();
 
   // we are done exploring, disconnect
-  logger::println("Disconnecting ...");
+  Serial.println("Disconnecting ...");
   peripheral.disconnect();
-  logger::println("Disconnected");
+  Serial.println("Disconnected");
 }
 
 void exploreService(BLEService service) {
   // print the UUID of the service
-  logger::print("Service ");
-  logger::println(service.uuid());
+  Serial.print("Service ");
+  Serial.println(service.uuid());
 
   // loop the characteristics of the service and explore each
   for (int i = 0; i < service.characteristicCount(); i++) {
@@ -121,10 +121,10 @@ void exploreService(BLEService service) {
 
 void exploreCharacteristic(BLECharacteristic characteristic) {
   // print the UUID and properties of the characteristic
-  logger::print("\tCharacteristic ");
-  logger::print(characteristic.uuid());
-  logger::print(", properties 0x");
-  logger::print(characteristic.properties(), HEX);
+  Serial.print("\tCharacteristic ");
+  Serial.print(characteristic.uuid());
+  Serial.print(", properties 0x");
+  Serial.print(characteristic.properties(), HEX);
 
   // check if the characteristic is readable
   if (characteristic.canRead()) {
@@ -133,11 +133,11 @@ void exploreCharacteristic(BLECharacteristic characteristic) {
 
     if (characteristic.valueLength() > 0) {
       // print out the value of the characteristic
-      logger::print(", value 0x");
+      Serial.print(", value 0x");
       printData(characteristic.value(), characteristic.valueLength());
     }
   }
-  logger::println();
+  Serial.println();
 
   // loop the descriptors of the characteristic and explore each
   for (int i = 0; i < characteristic.descriptorCount(); i++) {
@@ -149,17 +149,17 @@ void exploreCharacteristic(BLECharacteristic characteristic) {
 
 void exploreDescriptor(BLEDescriptor descriptor) {
   // print the UUID of the descriptor
-  logger::print("\t\tDescriptor ");
-  logger::print(descriptor.uuid());
+  Serial.print("\t\tDescriptor ");
+  Serial.print(descriptor.uuid());
 
   // read the descriptor value
   descriptor.read();
 
   // print out the value of the descriptor
-  logger::print(", value 0x");
+  Serial.print(", value 0x");
   printData(descriptor.value(), descriptor.valueLength());
 
-  logger::println();
+  Serial.println();
 }
 
 void printData(const unsigned char data[], int length) {
@@ -167,9 +167,9 @@ void printData(const unsigned char data[], int length) {
     unsigned char b = data[i];
 
     if (b < 16) {
-      logger::print("0");
+      Serial.print("0");
     }
 
-    logger::print(b, HEX);
+    Serial.print(b, HEX);
   }
 }

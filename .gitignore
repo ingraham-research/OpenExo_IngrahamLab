@@ -8,3 +8,8 @@ ExoCode/src/.vs
 ExoCode/.vscode
 */.vs
 Libraries/ArduinoBLE/extras/arduino-ble-parser.py
+
+# Generated run logs from the external control code. These are produced fresh on every run
+# and are experiment output, not source - they should not follow the repo around.
+Python_GUI/external_control/Logs/Stress test/
+

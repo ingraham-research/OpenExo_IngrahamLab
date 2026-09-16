@@ -306,6 +306,7 @@ def main():
 
         #Loop state only UDP mode uses
         pending_udp_timing = None           #Newest UDP timing we have not been allowed to write yet
+        pending_udp_zero = False            #A disable-assistance request waiting on the rate limiter
         last_udp_write_time = 0             #When we last let a UDP update through to the exo
         working_torque_percentage = new_torque_percentage  #What we restore to when assistance resumes
         new_torque_percentage = None        #Hold at zero until a timing value arrives, like the hip exo
@@ -397,13 +398,37 @@ def main():
                         #value simply replaces it - what we want is the latest commanded state, not a
                         #replay of every value the sender ever produced
                         pending_udp_timing = _incoming_timing_value
+                        pending_udp_zero = False    #A real timing supersedes an unsent disable request.
+                                                    #Without this a queued zero would fire in the same
+                                                    #pass that restores assistance, and the two would
+                                                    #fight over new_torque_percentage.
                     else:  #A negative timing value means we want to disable assistance for now
-                        #This one is a safety command, so it goes straight through: no rate limiting, and
-                        #no chance of a later timing coalescing it away while it sits pending
-                        print("Received command from UDP to temporarily disable assistance")
-                        pending_udp_timing = None
+                        pending_udp_timing = None       #A stale timing must not outlive a disable command
                         peak_timing_value = _incoming_timing_value
+                        #Ask for zero, but do NOT write it here. Two guards below decide whether it is
+                        #actually worth a BLE round trip. This used to write unconditionally on every
+                        #loop pass, which is how a sender stuck at 200 Hz turned into 20 writes/s of
+                        #a value the exo was already holding.
+                        pending_udp_zero = True
+
+                #Zero-torque request. Two conditions have to be met before this costs a BLE round trip.
+                #
+                #  1) NOT ALREADY ZERO. action_map.last_applied_action is only assigned after EVERY joint
+                #     has acknowledged (ActionMap_utilities.apply_torque_percentage), so `== 0` means zero
+                #     is confirmed on BOTH legs, not just requested. It starts as None, so the first zero
+                #     is never skipped, and a half-applied write leaves it at its previous value - in both
+                #     of those cases we correctly fall through and write.
+                #  2) RATE LIMIT. Same 0.5 s budget as a timing update, because it costs the link exactly
+                #     the same. The request is HELD rather than dropped, so a disable command is never
+                #     lost - it just waits its turn, at most udp_min_write_interval.
+                if pending_udp_zero:
+                    if action_map.last_applied_action == 0:
+                        pending_udp_zero = False        #Already there on both legs. Nothing to send.
+                    elif loop_start_time - last_udp_write_time >= udp_min_write_interval:
+                        print("Received command from UDP to temporarily disable assistance")
                         new_torque_percentage = 0.0
+                        last_udp_write_time = loop_start_time
+                        pending_udp_zero = False
 
                 #Every UDP update costs a BLE round trip here (on the hip exo it was just a local variable),
                 #so a chatty sender must not queue up writes faster than the link can retire them

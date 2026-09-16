@@ -229,7 +229,13 @@ void ComsMCU::update_gui()
             rt_data_msg.data[_mark_index] = my_mark;
         }
 
-        _exo_ble->send_message(rt_data_msg);
+        //Bisect round 2: everything above still runs (I2C receive, unpacking, life_pulse) - only
+        //the BLE forward is suppressed. See RT_BLE_FORWARD in Config.h.
+        #if RT_BLE_FORWARD
+            _exo_ble->send_message(rt_data_msg);
+        #else
+            (void)rt_data_msg;
+        #endif
 
         #if COMSMCU_DEBUG
             logger::println("ComsMCU::update_gui->sent message");
@@ -317,6 +323,11 @@ void ComsMCU::_process_complete_gui_command(BleMessage* msg)
 
     switch (msg->command)
     {
+    case ble_names::ping:
+        //Deliberate no-op. Arriving at all is the entire payload: on_rx_recieved() has already
+        //stamped the RX time, which is what the link-stall detector reads. Listed here only so the
+        //parser does not log it as an unknown command every 2 s.
+        break;
     case ble_names::start:
         ble_handlers::start(_data, msg);
         break;

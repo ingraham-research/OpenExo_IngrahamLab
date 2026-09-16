@@ -1,9 +1,9 @@
 /*
   LED Control
 
-  This example scans for BLE peripherals until one with the advertised service
+  This example scans for Bluetooth® Low Energy peripherals until one with the advertised service
   "19b10000-e8f2-537e-4f6c-d104768a1214" UUID is found. Once discovered and connected,
-  it will remotely control the BLE Peripheral's LED, when the button is pressed or released.
+  it will remotely control the Bluetooth® Low Energy peripheral's LED, when the button is pressed or released.
 
   The circuit:
   - Arduino MKR WiFi 1010, Arduino Uno WiFi Rev2 board, Arduino Nano 33 IoT,
@@ -29,10 +29,14 @@ void setup() {
   // configure the button pin as input
   pinMode(buttonPin, INPUT);
 
-  // initialize the BLE hardware
-  BLE.begin();
+  // initialize the Bluetooth® Low Energy hardware
+  if (!BLE.begin()) {
+    Serial.println("starting Bluetooth® Low Energy module failed!");
 
-  logger::println("BLE Central - LED control");
+    while (1);
+  }
+
+  Serial.println("Bluetooth® Low Energy Central - LED control");
 
   // start scanning for peripherals
   BLE.scanForUuid("19b10000-e8f2-537e-4f6c-d104768a1214");
@@ -44,13 +48,13 @@ void loop() {
 
   if (peripheral) {
     // discovered a peripheral, print out address, local name, and advertised service
-    logger::print("Found ");
-    logger::print(peripheral.address());
-    logger::print(" '");
-    logger::print(peripheral.localName());
-    logger::print("' ");
-    logger::print(peripheral.advertisedServiceUuid());
-    logger::println();
+    Serial.print("Found ");
+    Serial.print(peripheral.address());
+    Serial.print(" '");
+    Serial.print(peripheral.localName());
+    Serial.print("' ");
+    Serial.print(peripheral.advertisedServiceUuid());
+    Serial.println();
 
     if (peripheral.localName() != "LED") {
       return;
@@ -68,21 +72,21 @@ void loop() {
 
 void controlLed(BLEDevice peripheral) {
   // connect to the peripheral
-  logger::println("Connecting ...");
+  Serial.println("Connecting ...");
 
   if (peripheral.connect()) {
-    logger::println("Connected");
+    Serial.println("Connected");
   } else {
-    logger::println("Failed to connect!");
+    Serial.println("Failed to connect!");
     return;
   }
 
   // discover peripheral attributes
-  logger::println("Discovering attributes ...");
+  Serial.println("Discovering attributes ...");
   if (peripheral.discoverAttributes()) {
-    logger::println("Attributes discovered");
+    Serial.println("Attributes discovered");
   } else {
-    logger::println("Attribute discovery failed!");
+    Serial.println("Attribute discovery failed!");
     peripheral.disconnect();
     return;
   }
@@ -91,11 +95,11 @@ void controlLed(BLEDevice peripheral) {
   BLECharacteristic ledCharacteristic = peripheral.characteristic("19b10001-e8f2-537e-4f6c-d104768a1214");
 
   if (!ledCharacteristic) {
-    logger::println("Peripheral does not have LED characteristic!");
+    Serial.println("Peripheral does not have LED characteristic!");
     peripheral.disconnect();
     return;
   } else if (!ledCharacteristic.canWrite()) {
-    logger::println("Peripheral does not have a writable LED characteristic!");
+    Serial.println("Peripheral does not have a writable LED characteristic!");
     peripheral.disconnect();
     return;
   }
@@ -111,12 +115,12 @@ void controlLed(BLEDevice peripheral) {
       oldButtonState = buttonState;
 
       if (buttonState) {
-        logger::println("button pressed");
+        Serial.println("button pressed");
 
         // button is pressed, write 0x01 to turn the LED on
         ledCharacteristic.writeValue((byte)0x01);
       } else {
-        logger::println("button released");
+        Serial.println("button released");
 
         // button is released, write 0x00 to turn the LED off
         ledCharacteristic.writeValue((byte)0x00);
@@ -124,5 +128,5 @@ void controlLed(BLEDevice peripheral) {
     }
   }
 
-  logger::println("Peripheral disconnected");
+  Serial.println("Peripheral disconnected");
 }
