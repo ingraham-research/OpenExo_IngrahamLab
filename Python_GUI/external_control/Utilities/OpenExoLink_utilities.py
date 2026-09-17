@@ -7,10 +7,21 @@
 #   1) The firmware acknowledges a parameter write with NUMERIC ids only (joint id, controller id,
 #      parameter index) and carries no request id. So to know whether OUR write landed, we have to
 #      resolve names to numbers ourselves and match on that triple.
-#   2) SILENCE IS THE ONLY FAILURE SIGNAL. A dropped BLE write produces no negative acknowledgement,
-#      and the GUI returns "ok" to a set_param even with no exo connected - "ok" only means the GUI
-#      queued a BLE write. Only the ack means the firmware stored the value.
+#   2) SILENCE IS NOT THE ONLY FAILURE SIGNAL, but it is the most common one. A dropped BLE write produces no
+#      negative acknowledgement, and the GUI returns "ok" to a set_param even with no exo connected - "ok" only
+#      means the GUI queued a BLE write. Only the ack means the firmware stored the value.
+#   3) Some acks arrive GARBLED. When the Nano cannot parse the Teensy's UART ack it sends up a fake
+#      "rejected, reason 1 (invalid message)" instead, keeping only the fields it parsed before the damage
+#      (ExoCode/src/ComsMCU.cpp _send_param_update_ack). The Teensy may well have applied the value, so such an
+#      ack means "unknown", not "refused" - we resend. See "Modification log with claude/ACK-Loss-Investigation.md".
+#   4) Acks carry no value, so an ack can only be matched to a write by address and timing. Every attempt is
+#      tracked until an ack pays it off (oldest first), and is written off just before it is resent. KNOWN
+#      LIMIT: an ack arriving later than ack_timeout can still be taken as the confirmation of the next write
+#      to the same parameter. Keeping attempts open longer would close that gap, but on a lossy link every lost
+#      ack would then tax every later write, until writes start giving up. No ack later than 0.48 s has been
+#      seen (2026-09-16). The real fix is echoing the value in the ack (firmware).
 #V0.1 2026 Sep
+#V0.2 2026 Sep: garbled-ack resend, per-attempt logging, attempt bookkeeping, 1 s / 5 attempt defaults
 
 import os
 import socket
@@ -28,12 +39,22 @@ from client import ExoRemote, RemoteError  # noqa: E402
 LEFT_ANKLE_JOINT_ID = 68
 RIGHT_ANKLE_JOINT_ID = 36
 
-#How long we listen for an ack before calling the write lost, and how many times we resend
-DEFAULT_ACK_TIMEOUT = 5.0
-DEFAULT_MAX_RETRIES = 3
+#How long we listen for an ack before resending, and how many attempts we make in total.
+#1 s: every unilateral write in the GUI logs up to 2026-09-16 (2215 of them) was acked within 453 ms
+DEFAULT_ACK_TIMEOUT = 1.0
+DEFAULT_MAX_RETRIES = 5
 
 #Poll granularity while waiting on the socket. Small enough to feel instant, large enough not to spin
-ACK_POLL_INTERVAL = 0.2
+ACK_POLL_INTERVAL = 0.05
+
+#An unanswered attempt is written off this long BEFORE it is resent, so an attempt can never still be open
+#when its successor goes out. Capped at half the timeout, so it stays strictly shorter for any ack_timeout.
+#An ack landing inside this margin is not credited and the write is resent as usual - with every ack seen so
+#far under 0.48 s, the 0.9-1.0 s band is empty in practice
+ACK_WRITE_OFF_MARGIN = 0.1
+
+#The reason code the firmware uses for "invalid message". See point 3 at the top of this file
+GARBLED_REASON_CODE = 1
 
 
 class OpenExoLinkError(Exception):
@@ -45,19 +66,35 @@ class OpenExoLinkError(Exception):
         self.reason = reason    #The firmware's rejection reason string, if it was the exo that refused
 
 
+class _AckTrackingRemote(ExoRemote):
+    """ExoRemote that hands EVERY ack frame to a callback the moment it is read, whichever receive call read it
+    (set_param's own wait for the GUI's ok reply, or our polling). The stock client only keeps the most recent
+    ack, so two acks landing inside one of its waits would silently lose the first."""
+
+    def __init__(self, *args, on_ack=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.on_ack = on_ack
+
+    def _absorb(self, msg):
+        super()._absorb(msg)
+        if msg.get("stream") == "ack" and self.on_ack is not None:
+            self.on_ack(msg)
+
+
 class OpenExoLink:
     """This class owns the UDP connection to the GUI and turns "set this parameter to this value" into
     a confirmed write. It resolves human-readable names into the numeric ids the firmware acks with,
-    sends the write, waits for the matching ack, and retries on silence.
+    sends the write, waits for the matching ack, and retries on silence or on a garbled ack.
 
     Inputs:
     host, port: where the GUI's remote service is listening. Localhost only by default (see
         Python_GUI/utils/config.py RemoteConfig)
     timeout: how long we wait for the GUI's own ok/error reply to a command
     ack_timeout: how long we wait for the EXO's acknowledgement of a parameter write
-    max_retries: how many times we resend a write that was met with silence
+    max_retries: how many attempts we make at a write before giving up (silence and garbled acks both use one up)
     verbose: if 1, print every write and every ack to the terminal
-    logfile: an already-open (by main_external_control), line-buffered file to mirror the write/ack history into. Optional
+    logfile: an already-open (by main_external_control), line-buffered file to mirror the write/ack history into,
+        one row per ATTEMPT. Optional
     """
 
     def __init__(self, host="127.0.0.1", port=9750, timeout=2.0, ack_timeout=DEFAULT_ACK_TIMEOUT,
@@ -69,13 +106,17 @@ class OpenExoLink:
         self.verbose = verbose
         self.logfile = logfile
 
-        self.exo = ExoRemote(host, port, timeout=timeout)
+        self.exo = _AckTrackingRemote(host, port, timeout=timeout, on_ack=self._on_ack)
         self.matrix = []            #The handshake controller matrix, once the GUI has one
         self.connected = 0          #Whether we have seen a live GUI and a non-empty matrix
         self.link_down = 0          #Set by pump() when the GUI reports the exo disconnected or errored
         self.last_status = None     #Most recent status frame seen, for diagnostics
 
-        self._ack_snapshot = None   #What last_ack() held immediately before our most recent write
+        self._outstanding = []      #Attempts sent but not yet acked, oldest first: [sent_at, write_id, address]
+        self._write_id = 0          #Counts logical writes. All attempts at one write share its id
+        self._answers = []          #Acks that paid off an attempt of the write in progress
+        #How long an attempt stays payable. Strictly shorter than ack_timeout - see ACK_WRITE_OFF_MARGIN
+        self._write_off_age = ack_timeout - min(ACK_WRITE_OFF_MARGIN, ack_timeout / 2)
 
     ############################### Connection and handshake #############################################
 
@@ -216,75 +257,126 @@ class OpenExoLink:
         value: the value to write
         label: a human-readable name for the terminal/log line only
 
-        Raises ExoLinkError if the GUI refuses the write, if the firmware rejects the value, or if all
-        retries are met with silence. Returns the ack dict on success.
+        Raises OpenExoLinkError if the GUI refuses the write, if the firmware rejects the value, or if every
+        attempt is met with silence or a garbled ack. Returns the ack dict on success.
+
+        Every attempt is logged, whatever its outcome (see _log_attempt). All attempts carry the same value, so
+        an ack for ANY of them confirms this write - resending is always safe.
 
         Note we always send this UNILATERALLY, one side at a time, never with bilateral=True. A bilateral
         write is expanded GUI-side into two sequential BLE writes anyway (see
         Python_GUI/services/QtExoDeviceManager.py build_parameter_updates), so it costs nothing extra to
-        send them ourselves - and because the client only ever holds the MOST RECENT ack, a bilateral
-        write can have its first ack overwritten before we read it. One write, one ack, no ambiguity.'''
+        send them ourselves - and one write per ack keeps the attempt bookkeeping below unambiguous.'''
         joint_id, controller_id, param_index = address
         tag = label if label else f"joint {joint_id} / controller {controller_id} / param {param_index}"
 
-        for attempt in range(1, self.max_retries + 1):
-            #Snapshot what the client is already holding, so we can tell a NEW ack from a stale one
-            self._ack_snapshot = self.exo.last_ack()
+        #A new logical write. Acks for attempts of earlier writes no longer count as answers
+        self._write_id += 1
+        self._answers = []
 
+        for attempt in range(1, self.max_retries + 1):
             try:
                 self.exo.set_param(joint_id, controller_id, param_index, value, bilateral=False)
             except RemoteError as e:
                 #The GUI itself refused this - a bad name, a bad index, a malformed value. Resending
                 #the identical message cannot help, so fail immediately rather than burning the retries
+                self._log_attempt(tag, value, "gui_refused", attempt)
                 raise OpenExoLinkError(f"GUI refused the write of {tag} = {value}: {e}", code=e.code)
 
-            ack = self._wait_for_ack(joint_id, controller_id, param_index, self.ack_timeout)
+            #Only now does this attempt become payable. The GUI replies "ok" before it even starts the BLE write,
+            #so no ack for THIS attempt can have been read yet - but a stale ack read during that reply wait could
+            #otherwise have paid it off.
+            #ONE timestamp drives both the write-off (sent_at + _write_off_age) and the resend (sent_at +
+            #ack_timeout), so the write-off is guaranteed to come first. Monotonic, so a wall-clock adjustment
+            #cannot reorder them either
+            sent_at = time.monotonic()
+            self._outstanding.append([sent_at, self._write_id, (int(joint_id), int(controller_id), int(param_index))])
+
+            ack = self._wait_for_ack(sent_at + self.ack_timeout)
 
             if ack is None:
-                #Silence. This is what a dropped BLE write looks like - there is no negative ack - so
-                #this is the one case worth retrying
-                print(f"  No ack for {tag} = {value} (attempt {attempt} of {self.max_retries}). Resending...")
+                #Silence. A dropped BLE write looks like this - there is no negative ack
+                self._log_attempt(tag, value, "no_ack", attempt)
+                print(f"  No ack for {tag} = {value} (attempt {attempt} of {self.max_retries}).{_next_step(attempt, self.max_retries)}")
+                continue
+
+            if _is_garbled(ack):
+                #Damaged in transit, so we cannot tell whether the exo applied it. Resend straight away instead
+                #of sitting out the timeout, and wait for a fresh answer
+                self._answers = []
+                self._log_attempt(tag, value, "garbled_ack", attempt)
+                print(f"  Garbled ack for {tag} = {value} (attempt {attempt} of {self.max_retries}).{_next_step(attempt, self.max_retries)}")
                 continue
 
             if ack.get("accepted"):
-                self._report_write(tag, value, ack, attempt)
+                self._log_attempt(tag, value, "accepted", attempt)
+                self._report_write(tag, value, attempt)
                 return ack
 
             #The firmware got it and said no. The value is out of bounds, or the wrong type, or aimed at
             #the wrong controller. Resending the same value will be rejected the same way
+            self._log_attempt(tag, value, f"rejected ({ack.get('reason')})", attempt)
             raise OpenExoLinkError(f"Exo REJECTED {tag} = {value}: {ack.get('reason')}",
                                reason=ack.get("reason"))
 
-        raise OpenExoLinkError(f"No acknowledgement for {tag} = {value} after {self.max_retries} attempts. "
-                           f"The write never reached the exo.")
+        self._log_attempt(tag, value, "gave_up", self.max_retries)
+        raise OpenExoLinkError(f"No usable acknowledgement for {tag} = {value} after {self.max_retries} attempts. "
+                           f"The exo may or may not have applied it.")
 
-    def _wait_for_ack(self, joint_id, controller_id, param_index, ack_timeout):
-        '''Wait for the ack that matches this exact write. Returns the ack dict, or None on silence.
+    def _wait_for_ack(self, deadline):
+        '''Wait until the write in progress has an answer, or until `deadline` (time.monotonic()). Returns the ack
+        dict, or None on silence.
 
-        The first check here is the important one. ExoRemote._command drains stream frames while it waits
-        for its own ok reply, so an ack that arrives inside that window is absorbed into last_ack() and is
-        NEVER re-delivered by stream(). Listening on the stream first would therefore block for the full
-        timeout on a write the exo already acknowledged.'''
-        ack = self.exo.last_ack()
-        if (ack is not None) and (ack is not self._ack_snapshot) and _ack_matches(ack, joint_id, controller_id, param_index):
-            return ack
-
-        #Nothing matching was absorbed, so listen on the socket for the rest of the window
-        deadline = time.time() + ack_timeout
+        Answers are collected by _on_ack, which runs for EVERY ack frame no matter which receive call read it -
+        including set_param's own wait for the GUI's ok reply, which is where a fast ack usually lands. So the
+        answer may already be here before we listen at all.'''
         original_timeout = self.exo._sock.gettimeout()
-        self.exo._sock.settimeout(ACK_POLL_INTERVAL)
         try:
-            while time.time() < deadline:
-                msg = self._recv_one()
-                if msg is None:
-                    continue
-                if msg.get("stream") != "ack":
-                    continue
-                if _ack_matches(msg, joint_id, controller_id, param_index):
-                    return msg
+            while True:
+                answer = self._pick_answer()
+                if answer is not None:
+                    return answer
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self.exo._sock.settimeout(min(ACK_POLL_INTERVAL, remaining))
+                self._recv_one()
         finally:
             self.exo._sock.settimeout(original_timeout)
+
+    def _pick_answer(self):
+        '''The answer to the write in progress, or None if we should keep waiting.
+
+        A real answer (accepted, or a genuine rejection) wins over a garbled one. A garbled ack cannot tell us
+        WHICH attempt it answers, so we do not try to guess whether another attempt is still coming: resending
+        wrongly costs one quick extra write, waiting wrongly costs a whole timeout. Either way the bookkeeping
+        stays safe, because attempts of one write are interchangeable.'''
+        for ack in self._answers:
+            if not _is_garbled(ack):
+                return ack
+        if self._answers:
+            return self._answers[-1]
         return None
+
+    def _on_ack(self, ack):
+        '''Called for every ack frame the moment it is read. Pays off the OLDEST attempt it could be answering.
+
+        An attempt is written off just BEFORE we give up waiting on it and resend (_write_off_age, strictly less
+        than ack_timeout), so it can never still be open when its successor goes out. Keeping it open longer
+        (MainWindow keeps its own for 5 s) looks safer but is not: when that attempt's ack was LOST, the next
+        write's ack pays it off instead, that write needs an extra attempt, and its own leftover attempt carries
+        the debt forward to the write after. At heel-strike write rates the debt never expires, and every further
+        lost ack adds to it. See point 4 at the top of this file for what this leaves open.'''
+        now = time.monotonic()
+        #Write off attempts whose window has closed, so an ack arriving now is not matched to them
+        self._outstanding = [entry for entry in self._outstanding if now - entry[0] < self._write_off_age]
+        for i, (sent_at, write_id, address) in enumerate(self._outstanding):
+            if _ack_answers(ack, address):
+                del self._outstanding[i]
+                if write_id == self._write_id:
+                    self._answers.append(ack)
+                return
+        #No attempt of ours is waiting for this one: a GUI-button write, or an attempt already written off. Ignore
 
     ############################### Link health #############################################
 
@@ -295,7 +387,10 @@ class OpenExoLink:
         Be honest about what this can and cannot see: the GUI reports a disconnect only after BLE gives up,
         which for the Nano radio-silence failure mode is about 9.6 seconds after the exo actually went
         quiet. This is a backstop, not a fast watchdog. The real detection of a dead link is a
-        set_param_confirmed that comes back silent.'''
+        set_param_confirmed that comes back silent.
+
+        Any ack read here still goes through _on_ack, so a late ack arriving between writes pays off its
+        attempt now rather than lingering until the next write.'''
         original_timeout = self.exo._sock.gettimeout()
         self.exo._sock.settimeout(0.0)
         deadline = time.time() + budget
@@ -332,12 +427,18 @@ class OpenExoLink:
 
     ############################### Reporting and shutdown #############################################
 
-    def _report_write(self, tag, value, ack, attempt):
+    def _report_write(self, tag, value, attempt):
         retried = f" (after {attempt} attempts)" if attempt > 1 else ""
         if self.verbose:
             print(f"  Exo ACCEPTED {tag} = {value}{retried}")
+
+    def _log_attempt(self, tag, value, result, attempt):
+        '''One Param_write_log row per ATTEMPT. Result is one of: accepted, no_ack, garbled_ack,
+        rejected (<reason>), gui_refused, or gave_up (which closes a write whose every attempt failed, and
+        repeats the last attempt number). Filtering on "accepted" gives one row per confirmed write'''
         if self.logfile is not None:
-            print(f"{time.time()}, {tag}, {value}, accepted, {attempt}", file=self.logfile)
+            result = str(result).replace(",", ";")   #The log is comma separated
+            print(f"{time.time()}, {tag}, {value}, {result}, {attempt}", file=self.logfile)
 
     def close(self):
         '''Unsubscribe and close the socket. Safe to call more than once'''
@@ -367,11 +468,37 @@ def _joint_display_name(row):
     return disp[:cut] if cut > 0 else disp
 
 
-def _ack_matches(ack, joint_id, controller_id, param_index):
-    '''Acks carry no request id, so the (joint, controller, parameter) triple is all we have to match on'''
+def _next_step(attempt, max_retries):
+    '''Tail of the per-attempt terminal line: only promise a resend if one is actually coming'''
+    return " Resending..." if attempt < max_retries else " Giving up."
+
+
+def _is_garbled(ack):
+    '''Reason code 1 ("invalid message") is what the Nano sends when it could not parse the Teensy's ack, so the
+    frame was damaged in transit and none of its fields can be trusted - even an "accepted" one'''
     try:
-        return (int(ack.get("joint_id")) == int(joint_id)
-                and int(ack.get("controller_id")) == int(controller_id)
-                and int(ack.get("param_index")) == int(param_index))
+        return int(ack.get("reason_code")) == GARBLED_REASON_CODE
     except (TypeError, ValueError):
         return False
+
+
+def _ack_answers(ack, address):
+    '''Could this ack be the answer to an attempt at `address` = (joint_id, controller_id, param_index)?
+
+    Acks carry no request id, so the (joint, controller, parameter) triple is all we have to match on. A garbled
+    ack only kept the fields the Nano parsed before the damage - joint first, then controller, then parameter -
+    and the rest come through as 0. So there a 0 means "unknown" and matches anything'''
+    joint_id, controller_id, param_index = address
+    try:
+        ack_joint = int(ack.get("joint_id"))
+        ack_controller = int(ack.get("controller_id"))
+        ack_param = int(ack.get("param_index"))
+    except (TypeError, ValueError):
+        return False
+    if ack_joint != joint_id:
+        return False
+    if not _is_garbled(ack):
+        return (ack_controller == controller_id) and (ack_param == param_index)
+    if ack_controller == 0:
+        return True
+    return (ack_controller == controller_id) and (ack_param in (0, param_index))

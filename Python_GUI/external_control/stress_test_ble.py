@@ -41,28 +41,35 @@ def main():
     #Connection to the OpenExo GUI. Same defaults as main_external_control
     gui_host = "127.0.0.1"
     gui_port = 9750
-    ack_timeout = 5.0             #How long we wait for the exo to acknowledge a write
-    max_write_retries = 3         #Resends before a write is declared lost
+    ack_timeout = 1.0             #How long we wait for the exo to acknowledge a write before resending
+    max_write_retries = 5         #Attempts before a write is declared lost. Silence and garbled acks both use one up
 
     log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Logs", "Stress test")
     os.makedirs(log_dir, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(log_dir, f"stress_{stamp}.txt")   #Timestamped, so a run never overwrites the last one
+    #Every write ATTEMPT and how it ended, same format as main_external_control's Param_write_log
+    write_log_path = os.path.join(log_dir, f"param_write_{stamp}.txt")
 
     #################### Connect ####################
 
+    write_log = open(write_log_path, "w", buffering=1)   #Line-buffered
+    print("Python time,Target,Value,Result,Attempts", file=write_log)
     exo_link = OpenExoLink(host=gui_host, port=gui_port, ack_timeout=ack_timeout,
-                           max_retries=max_write_retries, verbose=0)   #verbose 0: a write every 50 ms would drown the terminal
+                           max_retries=max_write_retries, verbose=0,   #verbose 0: a write every 50 ms would drown the terminal
+                           logfile=write_log)
     try:
         exo_link.connect()
     except OpenExoLinkError as e:
         print(f"{e}")
         input("Start the GUI, connect it to the exo, then restart this code - hit enter to exit.\n")
+        write_log.close()
         return
 
     if not exo_link.connected:
         input("Connect the GUI to the exo first, then restart this code - hit enter to exit.\n")
         exo_link.close()
+        write_log.close()
         return
 
     #Resolve up front so a name mismatch fails here rather than mid-run
@@ -71,6 +78,7 @@ def main():
     except OpenExoLinkError as e:
         print(f"Could not resolve TorqScale: {e}")
         exo_link.close()
+        write_log.close()
         return
 
     #SAFETY GUARD. resolve() falls back to PREFIX matching when the exact controller name is not in the
@@ -89,6 +97,7 @@ def main():
             print(f"  Index {param_index} is only guaranteed to be TorqScale on splineAlt. On any other")
             print(f"  controller it is a different parameter and writing 0 to it may NOT mean zero torque.")
             exo_link.close()
+            write_log.close()
             return
         print(f"  {joint}: joint_id={joint_id}, controller='{resolved_name}' (id {controller_id}), "
               f"param_index={param_index} (TorqScale)")
@@ -100,6 +109,7 @@ def main():
     print(f"  real-time stream the exo is already sending.")
     print(f"  Only value ever written: TorqScale = 0. The exo stays at ZERO torque throughout.")
     print(f"  Log: {log_path}")
+    print(f"  Per-attempt log: {write_log_path}")
 
     #The first write SWITCHES the joint to this controller and loads that controller's SD defaults,
     #whose TorqScale is non-zero (95 in splineAlt.csv). Writing TorqScale = 0 first is what keeps the
@@ -126,7 +136,7 @@ def main():
 
     writes_ok = 0
     writes_failed = 0
-    writes_rejected = 0       #Corrupted frames the exo refused. The link is alive - these do NOT end the run
+    writes_rejected = 0       #Genuine firmware rejections. The link is alive - these do NOT end the run
     start_time = time.perf_counter()
     next_write = start_time
     next_report = start_time + report_every_s
@@ -152,21 +162,21 @@ def main():
 
                 for addr, joint in zip(addresses, joints_to_drive):
                     try:
-                        exo_link.set_param_confirmed(addr, 0.0)   #Idempotent: already 0, so nothing on the exo changes
+                        exo_link.set_param_confirmed(addr, 0.0, label=f"{joint} TorqScale")   #Idempotent: already 0, so nothing on the exo changes
                         writes_ok += 1
                     except OpenExoLinkError as e:
                         #TWO different failures arrive as the same exception type, and only one of them
                         #means the link died. Telling them apart is the whole point of this loop:
                         #
-                        #  reason is not None -> the exo ACKed with accepted=false. It received a frame
-                        #      and refused it, so the link is ALIVE. In practice this is the corrupted
-                        #      inbound frame we see logged as "controller=0 index=0, invalid message":
-                        #      the joint field survives the BLE hop and the rest does not. Transient,
-                        #      the exo's validation rejects it safely, and the next write goes through.
-                        #      COUNT IT AND CARRY ON - treating this as death ends the run early and
-                        #      reports a survival time that is really just "time to first bad frame".
+                        #  reason is not None -> the exo ACKed with accepted=false and a GENUINE reason
+                        #      (bounds, wrong controller...). It received the write and refused it, so the
+                        #      link is ALIVE. COUNT IT AND CARRY ON - treating this as death ends the run
+                        #      early and reports a survival time that is really just "time to first refusal".
+                        #      Garbled acks ("controller=0 index=0, invalid message", reason 1) no longer land
+                        #      here: since OpenExoLink V0.2 they are resent inside set_param_confirmed and
+                        #      show up as garbled_ack rows in the per-attempt log instead.
                         #
-                        #  reason is None -> set_param_confirmed exhausted its retries against SILENCE.
+                        #  reason is None -> set_param_confirmed used up every attempt without a usable ack.
                         #      That is the exo having gone quiet, which is the event being measured.
                         if getattr(e, "reason", None) is not None:
                             writes_rejected += 1
@@ -204,19 +214,38 @@ def main():
     print(f"  Outcome            : {outcome}")
     print(f"  Time to failure    : {elapsed:.1f} s")
     print(f"  Writes acknowledged: {writes_ok}")
-    print(f"  Frames rejected    : {writes_rejected}   (corrupted in flight, exo refused them, link stayed up)")
-    if writes_ok + writes_rejected > 0:
-        print(f"  Corruption rate    : {100.0 * writes_rejected / (writes_ok + writes_rejected):.2f} %")
-    print(f"  Writes failed      : {writes_failed}   (silence - this is what ends the run)")
+    print(f"  Writes rejected    : {writes_rejected}   (genuine firmware refusals, link stayed up)")
+    print(f"  Writes failed      : {writes_failed}   (every attempt unanswered - this is what ends the run)")
     print(f"  Requested rate     : {writes_per_s:.1f} writes/s")
     print(f"  Achieved rate      : {actual_rate:.1f} writes/s")
     print(f"  Total BLE round trips before failure: {writes_ok}")
+
+    #How hard the link had to work: tally every attempt by how it ended, from the per-attempt log
+    write_log.close()
+    attempt_tally = {}
+    with open(write_log_path) as f:
+        next(f)   #Header
+        for line in f:
+            fields = line.split(",")
+            if len(fields) < 5:
+                continue
+            result = fields[3].strip().split(" (")[0]   #"rejected (value out of bounds)" -> "rejected"
+            attempt_tally[result] = attempt_tally.get(result, 0) + 1
+    total_attempts = sum(n for r, n in attempt_tally.items() if r != "gave_up")   #gave_up closes a write, it is not an attempt
+    print(f"  Attempts, by outcome: {total_attempts} total")
+    for result in ("accepted", "no_ack", "garbled_ack", "rejected", "gui_refused", "gave_up"):
+        if attempt_tally.get(result):
+            share = f"   ({100.0 * attempt_tally[result] / total_attempts:.2f} % of attempts)" if result != "gave_up" else ""
+            print(f"    {result:12s}: {attempt_tally[result]}{share}")
     print(f"\n  Log written to {log_path}")
+    print(f"  Per-attempt log written to {write_log_path}")
 
     print(f"{time.time()},{elapsed:.2f},result,{outcome}", file=log)
     print(f"{time.time()},{elapsed:.2f},summary,"
           f"{writes_ok} ok / {writes_rejected} rejected / {writes_failed} failed / "
           f"{actual_rate:.1f} per s", file=log)
+    print(f"{time.time()},{elapsed:.2f},attempts,"
+          + " / ".join(f"{n} {r}" for r, n in sorted(attempt_tally.items())), file=log)
     log.close()
 
     #Park at zero and let go. The controller is already at TorqScale 0, so there is nothing to undo -

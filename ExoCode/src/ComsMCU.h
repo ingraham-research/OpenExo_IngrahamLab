@@ -119,6 +119,11 @@ class ComsMCU
         const uint32_t _reset_ack_timeout_ms = 3000;   // wait up to 3s for the Teensy ack
         const uint32_t _reset_flush_ms = 300;          // let the final BLE notification go out
 
+        // PARAM_ACK_DIAG counters (TEMPORARY), sent in every param-update ack - see ComsMCU.cpp
+        uint32_t _diag_ack_seq = 0;
+        uint32_t _diag_cmds_from_gui = 0;
+        uint32_t _diag_acks_from_teensy = 0;
+
         //Alpha value for the exponentially weighted moving average on the battery data
         // const float k_battery_ewma_alpha = 0.1;
         // const float k_time_threshold = 5000; //microseconds

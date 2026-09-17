@@ -21,11 +21,23 @@ class FlushingFileHandler(logging.FileHandler):
             self.flush()
 
 
-def setup_crash_logger():
-    """Setup top-level crash logger to catch ALL unhandled exceptions."""
-    # Create logs directory
-    base_dir = os.path.dirname(__file__)
-    log_dir = os.path.join(base_dir, "Saved_Data", "logs")
+def setup_crash_logger(verbose: bool = False, log_dir: str = None):
+    """Setup the one application logger: the crash hook, the session file, and the console.
+
+    EVERYTHING under the "OpenExo" name lands here, including the BLE layer
+    (QtExoDeviceManager logs as "OpenExo.DeviceManager"). It used to keep a second logger and a second
+    file, so reading a session meant correlating device_manager_*.log and app_crash_*.log by timestamp,
+    and every crash was written to both.
+
+    `verbose` (--verbose-log, or EXO_LOG_VERBOSE=1) decides how much is kept, not what exists: DEBUG to the
+    file and INFO to the console, instead of INFO and WARNING. The chatty per-command BLE lines are DEBUG, so
+    a production session stays readable while a debugging session keeps everything.
+
+    `log_dir` is for tests; it defaults to Saved_Data/logs.
+    """
+    if log_dir is None:
+        base_dir = os.path.dirname(__file__)
+        log_dir = os.path.join(base_dir, "Saved_Data", "logs")
     os.makedirs(log_dir, exist_ok=True)
     
     # Create crash log file
@@ -42,7 +54,7 @@ def setup_crash_logger():
     # File handler with detailed formatting
     # Use FlushingFileHandler to auto-flush ERROR and CRITICAL messages
     file_handler = FlushingFileHandler(log_file, encoding='utf-8', delay=False)
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
     formatter = logging.Formatter(
         '%(asctime)s.%(msecs)03d | %(levelname)-8s | %(name)-20s | %(funcName)-25s | %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
@@ -52,13 +64,16 @@ def setup_crash_logger():
     
     # Console handler for immediate visibility
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.WARNING)
+    console_handler.setLevel(logging.INFO if verbose else logging.WARNING)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
-    
+
+    # Where anything that wants to tell the user about the log can find it (QtExoDeviceManager does)
+    logger.log_file_path = log_file
+
     logger.info("=" * 100)
     logger.info("OpenExo Application Started")
-    logger.info(f"Crash log file: {log_file}")
+    logger.info(f"Log file: {log_file} (verbose={verbose})")
     logger.info(f"Python version: {sys.version}")
     logger.info("=" * 100)
     
@@ -111,8 +126,10 @@ def setup_crash_logger():
 
 
 def main():
-    logger, log_file = setup_crash_logger()
-    
+    # Kept out of argparse on purpose: sys.argv goes to QApplication as-is, which is where Qt's own flags live
+    verbose = ("--verbose-log" in sys.argv) or (os.environ.get("EXO_LOG_VERBOSE", "0") not in ("", "0"))
+    logger, _ = setup_crash_logger(verbose=verbose)
+
     try:
         logger.info("Creating QApplication...")
         app = QtWidgets.QApplication(sys.argv)

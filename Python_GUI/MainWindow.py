@@ -180,7 +180,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         log_path = self.qt_dev.get_log_file_path()
         if log_path and log_path != "Log file not available":
-            self.logger.info("Device manager log file: %s", log_path)
+            self.logger.info("Session log file: %s", log_path)
 
         # ----- UDP remote control (localhost only; default on) -----
         self.remote = None

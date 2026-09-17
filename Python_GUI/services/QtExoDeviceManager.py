@@ -4,8 +4,6 @@ import threading
 import logging
 import os
 import sys
-import traceback
-from datetime import datetime
 from typing import Optional
 
 try:
@@ -76,98 +74,27 @@ class QtExoDeviceManager(QtCore.QObject):
         self._conn_params_task = None
 
     def _setup_logging(self):
-        """Setup file-based logging system for debugging and error tracking."""
-        try:
-            # Create logs directory in Saved_Data folder
-            base_dir = os.path.dirname(os.path.dirname(__file__))  # Python_GUI folder
-            log_dir = os.path.join(base_dir, "Saved_Data", "logs")
-            os.makedirs(log_dir, exist_ok=True)
-            
-            # Create logger with timestamp in filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file = os.path.join(log_dir, f"device_manager_{timestamp}.log")
-            
-            # Configure logger
-            self.logger = logging.getLogger(f"QtExoDeviceManager_{id(self)}")
-            self.logger.setLevel(logging.DEBUG)
-            
-            # Remove any existing handlers to avoid duplicates
-            self.logger.handlers.clear()
-            
-            # File handler with detailed formatting
-            # Create custom handler that flushes on ERROR/CRITICAL
-            class FlushingFileHandler(logging.FileHandler):
-                def emit(self, record):
-                    super().emit(record)
-                    if record.levelno >= logging.ERROR:
-                        self.flush()
-            
-            file_handler = FlushingFileHandler(log_file, encoding='utf-8')
-            file_handler.setLevel(logging.DEBUG)
-            formatter = logging.Formatter(
-                '%(asctime)s.%(msecs)03d | %(levelname)-8s | %(funcName)-25s | %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
-            )
-            file_handler.setFormatter(formatter)
-            self.logger.addHandler(file_handler)
-            
-            # Also add console handler for development
-            console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.INFO)
-            console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
-            
-            self.logger.info("=" * 80)
-            self.logger.info("QtExoDeviceManager initialized")
-            self.logger.info(f"Log file: {log_file}")
-            self.logger.info(f"Python version: {sys.version}")
-            self.logger.info(f"BLE Available: {BLE_AVAILABLE}")
-            self.logger.info("=" * 80)
-            
-            # Store log file path for retrieval
-            self._log_file_path = log_file
-            
-            # Install exception hook to catch ANY unhandled exception
-            self._install_exception_hooks()
-            
-        except Exception as ex:
-            # Fallback to basic logger if file creation fails
-            self.logger = logging.getLogger(f"QtExoDeviceManager_{id(self)}")
-            self.logger.setLevel(logging.INFO)
-            self._log_file_path = None
-            self.logger.warning("Could not setup file logging: %s", ex)
-    
-    def _install_exception_hooks(self):
-        """Install hooks to catch unhandled exceptions."""
-        # Store original exception hook
-        self._original_excepthook = sys.excepthook
-        
-        def custom_excepthook(exc_type, exc_value, exc_traceback):
-            """Log any unhandled exception before it crashes the app."""
-            if issubclass(exc_type, KeyboardInterrupt):
-                # Don't log keyboard interrupts
-                sys.__excepthook__(exc_type, exc_value, exc_traceback)
-                return
-            
-            self.logger.critical("=" * 80)
-            self.logger.critical("UNHANDLED EXCEPTION DETECTED!")
-            self.logger.critical("=" * 80)
-            self.logger.critical(f"Exception Type: {exc_type.__name__}")
-            self.logger.critical(f"Exception Value: {exc_value}")
-            self.logger.critical("Traceback:")
-            for line in traceback.format_tb(exc_traceback):
-                self.logger.critical(line.strip())
-            self.logger.critical("=" * 80)
-            
-            # Call original exception hook to maintain normal behavior
-            self._original_excepthook(exc_type, exc_value, exc_traceback)
-        
-        sys.excepthook = custom_excepthook
-        self.logger.info("Exception hooks installed - all unhandled exceptions will be logged")
-    
+        """Log into the application-wide "OpenExo" logger that GUI.py set up.
+
+        This used to be a second logger writing its own device_manager_*.log, which meant reading a session
+        required correlating two files by timestamp - and since its exception hook chained to GUI.py's, every
+        crash was written to both. Nothing is trimmed here: these lines keep their levels, and GUI.py's
+        --verbose-log decides whether the DEBUG ones reach the file.
+
+        No handlers are attached here on purpose. Without GUI.py (tests, a REPL) the records simply go
+        nowhere, which is why constructing this class no longer creates a log file as a side effect.
+        """
+        self.logger = logging.getLogger("OpenExo.DeviceManager")
+        self.logger.info("=" * 80)
+        self.logger.info("QtExoDeviceManager initialized")
+        self.logger.info(f"Log file: {self.get_log_file_path()}")
+        self.logger.info(f"Python version: {sys.version}")
+        self.logger.info(f"BLE Available: {BLE_AVAILABLE}")
+        self.logger.info("=" * 80)
+
     def get_log_file_path(self) -> str:
-        """Get the path to the current log file."""
-        return getattr(self, '_log_file_path', None) or "Log file not available"
+        """Path of the session log file, which GUI.py owns."""
+        return getattr(logging.getLogger("OpenExo"), "log_file_path", None) or "Log file not available"
 
     # Public API
 

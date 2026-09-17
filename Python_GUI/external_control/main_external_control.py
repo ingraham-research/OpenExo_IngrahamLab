@@ -69,8 +69,8 @@ def main():
     #Connection to the OpenExo GUI. Localhost only unless the GUI's RemoteConfig was deliberately widened
     gui_host = "127.0.0.1"
     gui_port = 9750
-    ack_timeout = 5.0       #How long we wait for the exo to acknowledge a parameter write, in seconds
-    max_write_retries = 3   #How many times we resend a write that was met with silence
+    ack_timeout = 1.0       #How long we wait for the exo to acknowledge a parameter write before resending, in seconds. Every unilateral write in the GUI logs up to 2026-09-16 was acked within 0.45 s
+    max_write_retries = 5   #How many attempts a write gets before we give up. Silence and garbled acks both use one up
 
     #Controller and safety
     controller_name = "splineAlt"    #The ankle controller we drive. Its TorqScale is the current machine action of choice. 
@@ -108,7 +108,9 @@ def main():
     else:
         action_log_file = None
 
-    #Param_write_log keeps track of what THIS code tried to write into GUI (so all commands from backend)
+    #Param_write_log keeps track of what THIS code tried to write into GUI (so all commands from backend).
+    #One row per ATTEMPT. Result: accepted, no_ack, garbled_ack, rejected (<reason>), gui_refused, gave_up
+    #Attempts: that attempt's number. Filter on Result == accepted for one row per confirmed write
     if log_param_write_enabled:
         write_log_file = open(os.path.join(log_dir, "Param_write_log.txt"), "w", buffering=1)  # Line-buffered
         print(f"Python time,Target,Value,Result,Attempts", file=write_log_file)
