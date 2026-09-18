@@ -37,13 +37,18 @@ OUT_OF_BOUNDS = ack(accepted=False, reason_code=5)
 
 
 class FakeGui:
-    """script[n] is the list of (delay_s, ack_frame) to push after the n-th set_param (0-based).
-    Missing entries mean "no ack at all"."""
+    """script[n] is the list of (delay_s, ack_frame) to push after the n-th set_param (0-based). With auto_ack_delay
+    set, a set_param with no script entry is answered with a correct ack for its own address after that delay, unless
+    n is in `lose`. Otherwise a missing entry means "no ack at all"."""
 
-    def __init__(self, script=None, refuse=False):
+    def __init__(self, script=None, refuse=False, auto_ack_delay=None, lose=()):
         self.script = script or {}
         self.refuse = refuse
+        self.auto_ack_delay = auto_ack_delay
+        self.lose = set(lose)
         self.set_params = []                      # (receive time, message)
+        self.pushes = []                          # (push time, n, frame) for every ack actually sent
+        self.client = None                        # where the link listens, for status frames
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("127.0.0.1", 0))
         self.sock.settimeout(0.05)
@@ -58,12 +63,21 @@ class FakeGui:
         except OSError:
             pass
 
+    def _push(self, n, frame, addr):
+        self.pushes.append((time.time(), n, frame))
+        self._send(frame, addr)
+
+    def push_status(self, event, **extra):
+        """A status frame exactly as RemoteControlService.publish_status broadcasts it."""
+        self._send({"stream": "status", "event": event, **extra}, self.client)
+
     def _run(self):
         while not self._stop.is_set():
             try:
                 data, addr = self.sock.recvfrom(65535)
             except (socket.timeout, OSError):
                 continue
+            self.client = addr
             msg = json.loads(data.decode("utf-8"))
             reply = {"ok": True, "id": msg.get("id")}
             if msg.get("cmd") == "get_matrix":
@@ -75,8 +89,11 @@ class FakeGui:
                     continue
                 n = len(self.set_params)
                 self.set_params.append((time.time(), msg))
-                for delay, frame in self.script.get(n, []):
-                    t = threading.Timer(delay, self._send, args=(frame, addr))
+                frames = self.script.get(n)
+                if frames is None and self.auto_ack_delay is not None and n not in self.lose:
+                    frames = [(self.auto_ack_delay, ack(int(msg["joint"]), int(msg["controller"]), int(msg["param"])))]
+                for delay, frame in frames or []:
+                    t = threading.Timer(delay, self._push, args=(n, frame, addr))
                     t.daemon = True
                     t.start()
             self._send(reply, addr)
@@ -91,11 +108,13 @@ class FakeGui:
 def make_link():
     made = []
 
-    def _make(script=None, ack_timeout=1.0, max_retries=5, refuse=False):
-        gui = FakeGui(script, refuse=refuse)
+    def _make(script=None, ack_timeout=1.0, max_retries=5, refuse=False, auto_ack_delay=None, lose=(),
+              verbose=0, action_log=False):
+        gui = FakeGui(script, refuse=refuse, auto_ack_delay=auto_ack_delay, lose=lose)
         log = io.StringIO()
         link = link_mod.OpenExoLink(port=gui.port, ack_timeout=ack_timeout, max_retries=max_retries,
-                                    verbose=0, logfile=log)
+                                    verbose=verbose, logfile=log,
+                                    action_logfile=io.StringIO() if action_log else None)
         link.connect(matrix_timeout=2.0)
         made.append((gui, link))
         return gui, link, log
@@ -110,6 +129,23 @@ def log_rows(log):
     """Param_write_log rows as (Result, Attempts) pairs."""
     return [tuple(field.strip() for field in line.split(",")[3:5])
             for line in log.getvalue().splitlines() if line.strip()]
+
+
+def service_until(link, done, limit=5.0):
+    """Drive the link the way the experiment loop does, until done() or the limit."""
+    end = time.time() + limit
+    while not done() and time.time() < end:
+        link.service(0.05)
+    assert done(), "timed out waiting on the link"
+
+
+def assert_one_on_the_air(gui, ack_timeout):
+    """Every set_param after the first must come after the previous one was answered, or had timed out."""
+    for n in range(1, len(gui.set_params)):
+        prev_sent = gui.set_params[n - 1][0]
+        answered = [t for t, k, _ in gui.pushes if k == n - 1]
+        free_at = min(answered + [prev_sent + ack_timeout])
+        assert gui.set_params[n][0] >= free_at - 0.02, f"set_param {n} went out while {n - 1} was on the air"
 
 
 def test_zeroed_garbled_ack_triggers_an_immediate_resend(make_link):
@@ -161,17 +197,13 @@ def test_a_lost_ack_does_not_tax_the_following_writes(make_link):
                                                                      ("accepted", "1"), ("accepted", "1")]
 
 
-def test_attempt_is_written_off_before_it_is_resent(make_link, monkeypatch):
-    # Write-off must come strictly BEFORE the resend, so no attempt is ever still open when its successor goes
-    # out. An ack landing in that gap (after write-off, before the timeout) is therefore not credited, and the
-    # write is resent at the timeout as usual. Margin widened here only to keep the test's timing robust.
-    monkeypatch.setattr(link_mod, "ACK_WRITE_OFF_MARGIN", 0.3)      # timeout 1.0 -> written off at 0.7 s
-    script = {0: [(0.85, ack())],     # A1 -> 0.85 s: after write-off, before the 1.0 s resend
-              1: [(0.05, ack())]}     # A2
-    gui, link, log = make_link(script, ack_timeout=1.0)
+def test_ack_just_before_the_timeout_is_credited(make_link):
+    # V0.2 wrote an attempt off 0.1 s before its resend. With one command on the air the timeout itself closes it,
+    # so an ack at 0.85 s of a 1.0 s timeout now confirms the write instead of being thrown away.
+    gui, link, log = make_link({0: [(0.85, ack())]}, ack_timeout=1.0)
     link.set_param_confirmed(ADDR, 50.0)
-    assert len(gui.set_params) == 2
-    assert log_rows(log) == [("no_ack", "1"), ("accepted", "2")]
+    assert len(gui.set_params) == 1
+    assert log_rows(log) == [("accepted", "1")]
 
 
 def test_ack_arriving_between_writes_is_not_taken_by_the_next_write(make_link):
@@ -224,3 +256,77 @@ def test_gui_refusal_is_logged_and_raised(make_link):
     with pytest.raises(link_mod.OpenExoLinkError):
         link.set_param_confirmed(ADDR, 50.0)
     assert log_rows(log) == [("gui_refused", "1")]
+
+
+def test_loop_writes_keep_one_command_on_the_air_and_alternate_legs(make_link):
+    gui, link, _ = make_link(auto_ack_delay=0.05, lose={0}, ack_timeout=0.4)
+    left, right = (68, 13, 2), (36, 13, 2)
+    a = link.request(left, 43.0, "L time")
+    b = link.request(right, 43.0, "R time")
+    service_until(link, lambda: a.result and b.result)
+    sent = [(m["joint"], m["value"]) for _, m in gui.set_params]
+    assert sent == [(68, 43.0), (36, 43.0), (68, 43.0)]     # L lost -> R goes next -> then L's resend
+    assert (a.result, a.attempts, b.result) == ("accepted", 2, "accepted")
+    assert_one_on_the_air(gui, 0.4)
+
+
+def test_a_newer_value_replaces_the_resend_on_the_wire(make_link, capsys):
+    gui, link, _ = make_link(auto_ack_delay=0.05, lose={0}, ack_timeout=0.4, verbose=1, action_log=True)
+    left = (68, 13, 2)
+    old = link.request(left, 43.0, "L time")
+    service_until(link, lambda: len(gui.set_params) == 1)
+    new = link.request(left, 29.0, "L time")      # arrives while 43 is on the air, and 43's ack is lost
+    service_until(link, lambda: new.result is not None)
+    assert [m["value"] for _, m in gui.set_params] == [43.0, 29.0]
+    assert (old.result, new.result) == ("superseded (no ACK)", "accepted")
+    out = capsys.readouterr().out
+    assert "L time = 43.0 (first send)" in out
+    assert "No ACK for L time = 43.0 (attempt 1), newer value 29.0 waiting" in out
+    assert "L time = 29.0 (replaces unconfirmed 43.0)" in out
+    rows = [line.split(",") for line in link.action_logfile.getvalue().splitlines()]
+    assert [(r[2], r[4], r[5], r[6]) for r in rows] == [("L time", "43.0", "superseded (no ACK)", "1"),
+                                                        ("L time", "29.0", "accepted", "1")]
+
+
+def test_gui_disconnect_sets_link_down_and_stops_a_blocking_write(make_link):
+    gui, link, _ = make_link({}, ack_timeout=5.0)
+    threading.Timer(0.2, gui.push_status, args=("disconnected",)).start()
+    with pytest.raises(link_mod.OpenExoLinkError):
+        link.set_param_confirmed(ADDR, 50.0, max_retries=None)
+    assert link.link_down == 1
+
+
+def test_a_blocking_write_returns_as_soon_as_its_ack_arrives(make_link):
+    # Not at the end of a service() slice: the stress test measures write rates through this path
+    _, link, _ = make_link({0: [(0.005, ack())]})
+    start = time.time()
+    link.set_param_confirmed(ADDR, 50.0)
+    assert time.time() - start < 0.04
+
+
+def test_ctrl_c_during_a_send_does_not_leave_it_stuck_on_the_air(make_link):
+    # Ctrl-C landing while set_param waits for the GUI's ok must not leave that command half-sent: it would never
+    # time out, and the park that follows every Ctrl-C would wait behind it forever.
+    gui, link, _ = make_link(auto_ack_delay=0.05, ack_timeout=0.3)
+    real_set_param = link.exo.set_param
+
+    def interrupted(*args, **kwargs):
+        real_set_param(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    link.exo.set_param = interrupted
+    stuck = link.request((68, 13, 10), 30.0, "L scale")
+    with pytest.raises(KeyboardInterrupt):
+        link.service(0.0)
+    link.exo.set_param = real_set_param
+    park = link.request((68, 13, 10), 0.0, "L scale")
+    service_until(link, lambda: park.result is not None, limit=2.0)
+    assert (stuck.result, park.result) == ("accepted", "accepted")
+
+
+def test_a_device_error_is_ignored(make_link, capsys):
+    gui, link, _ = make_link({0: [(0.3, ack())]})
+    threading.Timer(0.1, gui.push_status, args=("device_error",), kwargs={"message": "Not connected"}).start()
+    link.set_param_confirmed(ADDR, 50.0)
+    assert link.link_down == 0
+    assert "Not connected" not in capsys.readouterr().out

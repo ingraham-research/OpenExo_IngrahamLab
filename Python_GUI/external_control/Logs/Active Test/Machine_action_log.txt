@@ -1,2 +1,1 @@
-Python time,Elapsed time,Source,Value requested,Value applied
-412450.8680908,0.00,torque percentage,50.0,50.0
+Python time,Elapsed time,Target,Value requested,Value sent,Result,Attempts

@@ -47,6 +47,16 @@ def _load_module_from_file(module_name, file_path):
     return module
 
 
+def _park_or_skip(action_map, link_lost):
+    '''On the way out, park to transparency - unless the GUI lost the exo. Then nothing can reach it, and the park
+    would only retry forever. Returns what park_to_transparency returned, or 0 when skipped.'''
+    if link_lost:
+        print("The exo is unreachable, so parking is skipped. It keeps whatever it last accepted - "
+              "stop the trial from the GUI.")
+        return 0
+    return action_map.park_to_transparency()
+
+
 # Main external control code
 def main():
 
@@ -69,8 +79,9 @@ def main():
     #Connection to the OpenExo GUI. Localhost only unless the GUI's RemoteConfig was deliberately widened
     gui_host = "127.0.0.1"
     gui_port = 9750
-    ack_timeout = 1.0       #How long we wait for the exo to acknowledge a parameter write before resending, in seconds. Every unilateral write in the GUI logs up to 2026-09-16 was acked within 0.45 s
-    max_write_retries = 5   #How many attempts a write gets before we give up. Silence and garbled acks both use one up
+    ack_timeout = 1.0       #How long a write waits for the exo's acknowledgement before it is resent (or replaced by a newer value), in seconds. Every ack seen on the exo up to 2026-09-17 came within 0.57 s
+    #There is no retry cap: setup writes wait until acked, and loop writes are resent until acked or replaced. A long
+    #silence prints a warning instead - a human is always watching this terminal
 
     #Controller and safety
     controller_name = "splineAlt"    #The ankle controller we drive. Its TorqScale is the current machine action of choice. 
@@ -104,7 +115,10 @@ def main():
 
     if log_m_action_enabled:
         action_log_file = open(os.path.join(log_dir, "Machine_action_log.txt"), "w", buffering=1)  # Line-buffered
-        print(f"Python time,Elapsed time,Source,Value requested,Value applied", file=action_log_file)
+        #One row per COMMAND (one leg, one parameter), written by OpenExoLink once its fate is known. Python time is when
+        #it was requested. Result: accepted, superseded (no ACK), replaced before sending, rejected (<reason>),
+        #gui_refused, unconfirmed at exit
+        print(f"Python time,Elapsed time,Target,Value requested,Value sent,Result,Attempts", file=action_log_file)
     else:
         action_log_file = None
 
@@ -124,7 +138,8 @@ def main():
         h_action_log_file = None
 
     #Connect to the GUI's remote service. This does not touch the exo - it only checks the GUI is there
-    OpenExo_link = OpenExoLink(host=gui_host, port=gui_port, ack_timeout=ack_timeout, max_retries=max_write_retries, verbose=1, logfile=write_log_file)
+    OpenExo_link = OpenExoLink(host=gui_host, port=gui_port, ack_timeout=ack_timeout, verbose=1,
+                               logfile=write_log_file, action_logfile=action_log_file)
     try:
         OpenExo_link.connect(matrix_timeout=10.0)
     except OpenExoLinkError as e:
@@ -285,7 +300,7 @@ def main():
         #Apply scaling. This is the ONLY place we call apply_torque_magnitude. Anywhere else, it's apply_machine_action
         scaling = action_map.apply_torque_magnitudes(plantar_nm, dorsi_nm, body_mass=body_mass_participant)
         if peak_timing_value is not None and timing_lobe is not None:
-            action_map.apply_peak_timing(timing_lobe, peak_timing_value)
+            action_map.apply_peak_timing(timing_lobe, peak_timing_value, wait=True)   #Setup: wait for both acks
         print(f"Controller engaged. Torque magnitudes scaled by {scaling:.2f}, torque scale still at 0%.")
     except OpenExoLinkError as e:
         print(f"Session setup FAILED: {e}")
@@ -295,6 +310,7 @@ def main():
 
     input("Press enter to start running the exo:\n")
     start_time = time.perf_counter()  # start a timer
+    OpenExo_link.elapsed_origin = start_time    #The machine action log's Elapsed column counts from here
 
     #Loop state every mode needs
     new_timing_value = None             #A peak timing waiting to be deployed, if any
@@ -339,15 +355,17 @@ def main():
         _h_action_average = np.zeros(_h_action_max_stride_count)  #Buffer of speeds, one entry per stride
         new_torque_percentage = None        #The backend owns this from here on
 
+    link_lost = 0   #Set when the GUI reports the exo disconnected. Parking is skipped then - nothing can reach the exo
     try:
         while True:
             loop_start_time = time.perf_counter()
 
-            #Notice a dropped link between writes. This is a backstop, not a fast watchdog - the GUI only
-            #reports a disconnect once BLE gives up, which is several seconds after the exo goes quiet
-            OpenExo_link.pump()
+            #The GUI reporting the exo disconnected is the ONE thing that ends this loop on its own: the Nano cannot be
+            #reconnected mid-trial without side effects. Ack trouble never ends it - the link prints warnings instead.
+            #The GUI reports a disconnect about 9.6 s after the exo goes quiet (the BLE supervision timeout)
             if OpenExo_link.link_down:
                 print("The GUI reports the exo is no longer connected. Stopping - no further actions will be sent.")
+                link_lost = 1
                 break
 
             if game_theory_mode:
@@ -415,17 +433,15 @@ def main():
 
                 #Zero-torque request. Two conditions have to be met before this costs a BLE round trip.
                 #
-                #  1) NOT ALREADY ZERO. action_map.last_applied_action is only assigned after EVERY joint
-                #     has acknowledged (ActionMap_utilities.apply_torque_percentage), so `== 0` means zero
-                #     is confirmed on BOTH legs, not just requested. It starts as None, so the first zero
-                #     is never skipped, and a half-applied write leaves it at its previous value - in both
-                #     of those cases we correctly fall through and write.
+                #  1) NOT ALREADY ZERO. latest_torque_request() is what we last REQUESTED on both legs. Once zero
+                #     is requested the link delivers it (resending until acked, warning if it cannot), so asking
+                #     again adds nothing. It is None until both legs agree, so a first or half-made zero falls through.
                 #  2) RATE LIMIT. Same 0.5 s budget as a timing update, because it costs the link exactly
                 #     the same. The request is HELD rather than dropped, so a disable command is never
                 #     lost - it just waits its turn, at most udp_min_write_interval.
                 if pending_udp_zero:
-                    if action_map.last_applied_action == 0:
-                        pending_udp_zero = False        #Already there on both legs. Nothing to send.
+                    if action_map.latest_torque_request() == 0:
+                        pending_udp_zero = False        #Already asked for on both legs. Nothing to send.
                     elif loop_start_time - last_udp_write_time >= udp_min_write_interval:
                         print("Received command from UDP to temporarily disable assistance")
                         new_torque_percentage = 0.0
@@ -441,60 +457,35 @@ def main():
                         print(f"Updated timing value from UDP: {peak_timing_value:.2f}")
                         new_timing_value = peak_timing_value
                         #Bring assistance back up if we had been parked by an earlier negative value
-                        if action_map.last_applied_action == 0:
+                        if action_map.latest_torque_request() == 0:
                             new_torque_percentage = working_torque_percentage
                     pending_udp_timing = None
 
-            #Deploy a new peak timing, if one is waiting
+            #Deploy a new peak timing, if one is waiting. This only REQUESTS it: service() below sends it, resends it if
+            #its ack goes missing, and lets a newer timing replace a pending resend. Its fate goes in the machine action log
             if new_timing_value is not None:
-                try:
-                    action_map.apply_peak_timing(timing_lobe, new_timing_value)
-                except OpenExoLinkError as e:
-                    print(f"FAILED to apply the peak timing: {e}")
-                    print("The two legs may now differ. Stopping and attempting to park to transparency.")
-                    break
-                if log_m_action_enabled:
-                    if use_loop_time:
-                        _timestamp = loop_start_time
-                    else:
-                        _timestamp = time.perf_counter()
-                    print(f"{_timestamp},{_timestamp - start_time:.2f},{timing_lobe} timing,"
-                          f"{new_timing_value},{new_timing_value}", file=action_log_file)
+                _timestamp = loop_start_time if use_loop_time else time.perf_counter()
+                action_map.apply_peak_timing(timing_lobe, new_timing_value, stamp=_timestamp)
                 new_timing_value = None  #Wipe the buffer
 
-            #Deploy a new torque percentage, if one is waiting
+            #Deploy a new torque percentage, if one is waiting. Same: requested here, delivered by service()
             if new_torque_percentage is not None:
                 print(f"Applying torque percentage: {new_torque_percentage:.2f}%")
-                try:
-                    applied = action_map.apply_torque_percentage(new_torque_percentage)
-                except OpenExoLinkError as e:
-                    #A half-applied action means the two legs are assisting differently. Stop rather than
-                    #carry on with an unknown state on the exo
-                    print(f"FAILED to apply the torque percentage: {e}")
-                    print("The two legs may now differ. Stopping and attempting to park to transparency.")
-                    break
-                if log_m_action_enabled:
-                    if use_loop_time:
-                        _timestamp = loop_start_time
-                    else:
-                        _timestamp = time.perf_counter()
-                    print(f"{_timestamp},{_timestamp - start_time:.2f},torque percentage,"
-                          f"{new_torque_percentage},{applied}", file=action_log_file)
+                _timestamp = loop_start_time if use_loop_time else time.perf_counter()
+                action_map.apply_torque_percentage(new_torque_percentage, stamp=_timestamp)
                 new_torque_percentage = None  #Wipe the buffer
 
-            # End of loop operations
+            # End of loop operations. The idle time is spent inside service(), waiting on the socket instead of
+            # sleeping, so an ack is acted on the moment it arrives and the next write goes straight out
             loop_duration = time.perf_counter() - loop_start_time
-            sleep_time = (1 / operating_rate) - loop_duration
-            if sleep_time < 0:
-                sleep_time = 0
-            time.sleep(sleep_time)
+            OpenExo_link.service(budget=max((1 / operating_rate) - loop_duration, 0.0))
 
     except KeyboardInterrupt:
         print("\n Keyboard interrupted. Stopping backend and parking the exo...")
 
     finally:  #No matter how we reached here, safely exit all things
-        #Park to transparency FIRST, while the link is most likely still alive
-        action_map.park_to_transparency()
+        #Park to transparency FIRST, while the link is most likely still alive - unless the GUI already lost the exo
+        _park_or_skip(action_map, link_lost)
 
         if game_theory_mode:
             game_theory_backend.stop_and_finalize()

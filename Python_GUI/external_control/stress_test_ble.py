@@ -233,7 +233,7 @@ def main():
             attempt_tally[result] = attempt_tally.get(result, 0) + 1
     total_attempts = sum(n for r, n in attempt_tally.items() if r != "gave_up")   #gave_up closes a write, it is not an attempt
     print(f"  Attempts, by outcome: {total_attempts} total")
-    for result in ("accepted", "no_ack", "garbled_ack", "rejected", "gui_refused", "gave_up"):
+    for result in ("accepted", "no_ack", "garbled_ack", "gui_no_reply", "rejected", "gui_refused", "gave_up"):
         if attempt_tally.get(result):
             share = f"   ({100.0 * attempt_tally[result] / total_attempts:.2f} % of attempts)" if result != "gave_up" else ""
             print(f"    {result:12s}: {attempt_tally[result]}{share}")
