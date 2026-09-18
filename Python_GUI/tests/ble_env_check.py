@@ -122,6 +122,16 @@ async def _scan():
     print(f"Devices advertising ANY uuid    : {sum(1 for _, a in found.values() if a.service_uuids)}")
     print(f"Named {NAME_PREAMBLE}*                  : {len(exo_by_name)}")
     print(f"Advertising the UART service    : {len(exo_by_uuid)}   <- this is what the GUI requires")
+    strongest = max((a.rssi for _, a in found.values() if a.rssi is not None), default=None)
+    if strongest is not None:
+        print(f"Strongest reception             : {strongest} dBm")
+        if strongest < -80:
+            print("     ^ SUSPICIOUS: a healthy adapter in an occupied room hears something")
+            print("       at -40..-70 dBm. Everything arriving this weak means the RADIO is")
+            print("       deaf, not that the room is empty. A built-in desktop Wi-Fi/BT module")
+            print("       with no antenna screwed on runs ~30 dB down - which buries a normal")
+            print("       exo (~-80 dBm) under the noise floor. Moving the exo closer will NOT")
+            print("       fix a 30 dB deficit; you would need to be ~30x nearer.")
     print("-" * 78)
 
     if exo_by_uuid:
@@ -134,10 +144,14 @@ async def _scan():
     elif len(found) == 0:
         print("VERDICT: no LE scanning on this machine at all.")
     else:
-        print("VERDICT: LE scanning works here (other devices seen) but the Nano never")
-        print("         advertised during the window. Either it is powered off, out of")
-        print("         range, or still connected to another host (it stops advertising")
-        print("         while connected).")
+        print("VERDICT: LE scanning works here (other devices seen), but this scan ALONE")
+        print("         cannot say why the Nano is missing. Check 'Strongest reception'")
+        print("         above first: if it is weak, this radio is deaf and that is the")
+        print("         answer. Otherwise run this script on a KNOWN-GOOD machine at the")
+        print("         SAME TIME - BLE scanning is passive receive, so both hosts hear")
+        print("         one advertiser simultaneously - and diff the tables by address.")
+        print("         Other machine sees it and this one does not -> this radio.")
+        print("         Neither sees it -> the Nano really was not advertising.")
     return found
 
 
