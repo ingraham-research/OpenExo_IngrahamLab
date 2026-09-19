@@ -1,8 +1,10 @@
 # Parameter-update ACK loss: "No ack ... Resending", yet the exo applied it
 
-**Date:** 2026-09-16 · **Branch:** `fix_ack_failures` (= `main_working_branch` b3cff2c + this work)
-**Status:** host-side fix implemented in `Python_GUI/external_control/` with 11 new headless tests
-(49/49 in `Python_GUI/tests` pass). **Not yet run against the exo.** Firmware deliberately untouched.
+**Date:** 2026-09-16, extended 2026-09-17/18 · **Branch:** `fix_ack_failures` (= `main_working_branch` b3cff2c + this work)
+**Status (2026-09-18): resolved on the host side and validated worn.** V0.2 (§3) was replaced by the
+one-command-on-the-air write scheduler, `OpenExoLink` V0.3 (§3.6), committed as `805a3c2`. A 15-minute worn stress
+run (§3.7) had 0 loop exits and all 2,042 writes resolved. 92/92 tests pass in `Python_GUI/tests`. Firmware
+untouched apart from the temporary `PARAM_ACK_DIAG` counters (§3.4), which are still flashed.
 
 ## 0. Summary
 
@@ -17,6 +19,14 @@ and gives up (and exits) when all attempts go unanswered. Two distinct mechanism
 | Command applied? | Proven for some frame shapes, ambiguous for others | **Proven** for at least one write (§2.3) |
 
 No software race in the client, the remote service, RtBridge or MainWindow drops a well-formed ACK.
+
+**Outcome (2026-09-17/18):**
+- **Diagnostic counters in the ACK (§3.4) settled it:** a silent attempt is almost always a command the Teensy
+  applied and ACKed, with the ACK notification then lost between the Nano and the GUI.
+  - 09-16 bench and 09-17 worn: 250 lost ACKs against 1 command of uncertain fate.
+  - 09-18 worn stress run: 7 of 355 silent attempts were commands that never arrived.
+- **So the write loop no longer confirms every write before moving on.** V0.3 (§3.6) keeps one command on the air,
+  lets a newer value replace a pending resend, and prints warnings instead of exiting.
 
 ## 1. The ACK path
 
@@ -33,7 +43,8 @@ doubles) → Nano `BleParser` → `ble_handlers::update_param` → UART → Teen
 non-RT frame it receives, so every ACK that reached the GUI is there as
 `[shutdown-debug] cmd='a' ... event_data='6800n1300n1000n100n0n'` (joint, controller, param, accepted,
 reason, each ×100). `device_manager_*.log` is the BLE layer only and logs each write actually issued
-(`Sending parameter update: ...`). In the 09-09 stress run the GUI issued all 1707 BLE writes, with no
+(`Sending parameter update: ...`). Since 2026-09-17 those BLE-layer lines go into the same `app_crash_*.log`, and
+there is no separate file any more (`Diagnostic-Scaffolding-Cleanup.md`). In the 09-09 stress run the GUI issued all 1707 BLE writes, with no
 write errors.
 
 ### 2.1 Mechanism A: garbled ACKs (UART)
@@ -117,7 +128,11 @@ orchestrator never sends.
   25 retries succeeded. The single exception was End Trial. A wedge would show as
   "fail, fail, succeed", which survivorship bias would not hide.
 
-## 3. What changed (host side only)
+## 3. What changed in V0.2 (host side only)
+
+> **History.** The V0.2 write loop described here was replaced by V0.3 on 2026-09-18 (§3.6). The capped blocking
+> write survives in V0.3 as `set_param_confirmed`, used by `stress_test_ble.py`. The attempt bookkeeping and its 0.1 s
+> write-off margin are gone.
 
 `Python_GUI/external_control/Utilities/OpenExoLink_utilities.py` (V0.2):
 - **Garbled ACK = resend now.** Any ACK with `reason_code == 1` for the same joint is treated as
@@ -284,7 +299,8 @@ with §3.1 (16.8%). Also check that the trial CSV rate stays near 89–96 Hz.
 ## 3.4 Diagnostic build: counters in every ACK (2026-09-16, TEMPORARY)
 
 Nano only: `ComsMCU.cpp` (`#define PARAM_ACK_DIAG 1`) and three members in `ComsMCU.h`.
-**Compiled clean for `nano33ble`; the `teensy41` binary is byte-identical. Not yet flashed.**
+**Compiled clean for `nano33ble`; the `teensy41` binary is byte-identical.** Flashed the same day; every run from
+§3.4.1 on used it. It is still flashed, and still committed with the flag on (`be9cbe0`).
 
 Every parameter-update ACK now carries 8 fields. The extra ones are:
 
@@ -339,34 +355,156 @@ each kind, and attributed each correctly.
 - **Retries coped:** 934 of 934 writes confirmed. Attempts needed: 822 took 1, 98 took 2, 9 took 3, 5 took
   4. ACK latency: median 97 ms, max 206 ms.
 
+## 3.5 Worn sessions with V0.2 and the diagnostic firmware (2026-09-17, other laptop)
+
+Two worn sessions with `main_external_control` in UDP mode: the peak timing was written from a sender at every step.
+Session 2 was almost pure stress. 30 ms interval.
+Files: `app_crash_20260917_171651.log` + `trial_20260917_171726.csv` and `app_crash_20260917_173334.log` +
+`trial_20260917_173429.csv` (other laptop's `Saved_Data`).
+
+| | Session 1 (17:17–17:27, TorqScale 50%) | Session 2 (17:34–17:40, TorqScale 30%) |
+|---|---|---|
+| Writes confirmed | 238 / 238 | 314 / 314 |
+| Gave up | 0 | 0 |
+| Attempts needed | 1:195, 2:30, 3:11, 4:1, 5:1 | 1:262, 2:41, 3:10, 4:1 |
+| Silent attempts | 59 of 297 (19.9%) | 64 of 378 (16.9%) |
+| Where lost (diag counters) | all Nano → GUI | all Nano → GUI |
+| Garbled ACKs | 0 | 0 |
+| ACK latency, median / max | 115 / 310 ms | 343 / **569** ms |
+
+- **No command was lost on the way in.** In all 552 ACKs, ACKs sent = commands received = Teensy replies, and the
+  command count matched the GUI's own count. Every silent attempt had reached the Teensy and been ACKed.
+- **The old 3 × 5 s settings would have ended the session 3 times.** The longest run of failed attempts on one
+  parameter was 4, which set the 5 s warning threshold in §3.6.
+- **Latency is the Nano's outgoing notification backlog, not the write rate.**
+  - Method: RT frames wait in the same queue as ACKs. For each frame, PC arrival time minus exo time, relative to the
+    session minimum, gives its queuing delay.
+  - Session 2 had a standing backlog from about 17:35:30: RT frames typically 250 ms late, and from 17:37:30 even the
+    fastest 130–167 ms late.
+  - That backlog began about 30 s **before** the first write, while walking at zero torque, and setup writes were
+    already about 300 ms. So the writes did not cause it.
+  - Session 1's backlog lasted only 17:18–17:20. ACKs took 200–260 ms then and about 110 ms after, even through its
+    busiest write minutes.
+  - The cause of the backlog is unknown. RT delivery was 73–76 Hz in both sessions, and the old "gaps ≥ 45 ms"
+    metric does not detect a backlog.
+
+## 3.6 V0.3: one command on the air, newer values replace resends (2026-09-18)
+
+Design: `specs/2026-09-17-ack-aware-write-scheduler-design.md`. Plan with execution notes:
+`plans/2026-09-18-ack-aware-write-scheduler.md`. Committed as `805a3c2`.
+
+**Why:** a silent attempt is almost always an applied command (§3.4.1, §3.5). So retrying a stale value only delays the
+fresh one, and ending the session on 5 silent attempts is the wrong response. The operator's rules:
+- nothing destructive on ACK trouble, because a human always watches the terminal;
+- one command on the air at a time, because the Nano may not cope with more. The only history of two in flight, the
+  July/August GUI bilateral writes, is also the only history of ACKs slower than 1 s.
+
+**Behaviour:**
+- **One command on the air, globally.** Each one waits for its ACK or for `ack_timeout` (1.0 s). An ACK carries no
+  value and no sequence number, so this is what makes every ACK unambiguous.
+- **On a timeout the other leg goes next.** Addresses take turns (round-robin). On the failed parameter's next turn,
+  the newest value goes out if one arrived (logged `superseded (no ACK)`), otherwise it is resent.
+- **Garbled ACK:** handled like an immediate timeout. **Firmware refusal:** warn and drop the value. **GUI refusal:**
+  warn and drop. **No reply from the GUI:** a failed attempt.
+- **No-ACK warning.** A tab per parameter counts only that parameter's own time on the air, keeps running when a
+  newer value replaces the old one, and clears only on an ACK. At 5 s or more it prints one line per second.
+  Nothing exits.
+- **The GUI reporting the exo disconnected is the one thing that ends the loop.** Parking is skipped then. A GUI
+  `device_error` is ignored, because the write it hit simply gets no ACK.
+- **Setup writes block until confirmed, with no cap:** engaging the controller, the torque magnitudes, and the fixed
+  peak timing. They must finish first, because a later write would do the controller switch itself and reload the SD
+  card defaults.
+- **Exit park:** TorqScale 0 on both legs, retried until confirmed. A second Ctrl-C abandons it.
+- **Terminal:** every send says `first send`, `resend, attempt n` or `replaces unconfirmed <old>`.
+- **Machine-action log:** one row per command, with its fate.
+
+**Code:**
+- `Utilities/WriteScheduler_utilities.py` (new): a pure state machine that takes `now` from its caller, so every
+  timing rule is tested with a fake clock.
+- `OpenExoLink` V0.3 connects it to the GUI socket:
+  - `request()` is non-blocking, and the loop's idle time is spent in `service()`;
+  - `set_param_confirmed` blocks on the same engine;
+  - status frames read during a `set_param` reply are no longer dropped.
+- **Removed:** the attempt bookkeeping and its 0.1 s write-off margin (the timeout itself now closes an attempt, so
+  an ACK at 0.9–1.0 s counts), give-up-and-exit in the loop, `max_write_retries` in `main_external_control`, and
+  `last_applied_action`.
+
+**Found while building:**
+- Ctrl-C during a send left that command on the air forever, which would have hung the exit park. It is now treated
+  as sent.
+- A blocking write has to return the moment its ACK arrives: without that, the stress test fell from 20 to 11
+  writes/s.
+- `pump()` has to stay non-blocking.
+
+**Verified:**
+- 92/92 headless tests pass: 20 scheduler tests with a fake clock, the link tests against a fake GUI over real UDP,
+  and ActionMap plus the park-or-skip exit.
+- The unchanged `stress_test_ble.py`, run against a fake GUI with 30 ms ACKs, reached 19.2 writes/s. V0.2 reached
+  20.0 under the same conditions.
+
+**Residual:** an ACK slower than `ack_timeout` that arrives after the same parameter was sent again confirms the
+re-send. The slowest ACK seen is 569 ms. A value echo in the ACK (firmware) would close this.
+
+## 3.7 Worn validation of V0.3 (2026-09-18 16:09–16:25, other laptop)
+
+- **Setup:** exo worn, TorqScale 25%. The UDP slider sent 4,130 timing values over 871 s, in bursts of several per
+  second. With the orchestrator's 0.5 s rate limit, that came to about 1.2 timing updates per leg per second.
+- **Files:** `Test results/2060918_1608results/`: `app_crash_20260918_160858.log`, `trial_20260918_160922.csv`, and
+  `slider_log_20260918_161027.txt` (the sender's clock runs about 5 s ahead). The external-control logs were not kept.
+
+| Check | Result |
+|---|---|
+| Parameter writes | 2,042 over 14.5 min (2.35/s) |
+| Two commands on the air at once | **0** |
+| Gap after a silent send | min 1.003 s, median 1.042 s: the timeout, then straight on |
+| Silent attempts | 354 (17.3%), plus 1 garbled ACK. The same rate as every run since 09-16 |
+| After a failed send | **310 replaced by a newer value**, 45 resent |
+| Late ACKs | 0 |
+| Longest run of failures on one parameter | 4, so the 5 s warning never fired |
+| ACK latency | median 189, p99 325, max 441 ms |
+| Exit | park ACKed on both legs, clean End Trial |
+
+- **7 commands never arrived:** 6 lost between the GUI and the Nano, and 1 between the Nano and the Teensy, out of
+  2,042. Before this run it was 0 out of 1,739.
+  - Every one was a silent attempt, and each was replaced by a newer value 1.3–2.1 s later (one was a resend). So
+    nothing stayed missing.
+  - Under this load "silent means applied" is about 98%, not 100%, so a `superseded (no ACK)` row is "very likely
+    applied".
+  - The operator accepts this at this send rate.
+- **The two longest gaps between timing writes (7.4 s and 4.3 s) were the sender pausing.** The slider log shows
+  pauses of 8 s and 4 s at the same moments.
+- **Link:** RT at 75 Hz, 70 gaps ≥ 45 ms per minute. A moderate backlog after 16:14, with RT frames typically about
+  130–150 ms late, which is why the median latency is 189 ms.
+- **Hardware, not code, earlier that day.** Before this run the operator saw constant disconnects: links lasting
+  seconds, and the Nano often never sending the controller matrix. There was also a red LED at power-on that needed
+  a re-power, and once garbage RT data with an impossible 48 V battery reading. Swapping the battery made all of it
+  disappear. No logs were kept from that period.
+  - Nothing in our firmware sets the Teensy's red "error" status. The reddish state it does show, the orange-red
+    `motor_start_up` pulse at boot, normally lasts only 10 ms.
+  - The GUI battery readout travels inside the RT frame, so it is not trustworthy while the Nano misbehaves.
+
 ## 4. Open / not done
 
-- **Next: a real worn session** with the diagnostic firmware and `main_external_control`, to see whether
-  writes still give up completely with 5 attempts at 1 s. Bench testing is finished.
-- **Remove the `PARAM_ACK_DIAG` counters after that session** (set the flag to 0, or revert
-  `ComsMCU.h`/`.cpp`). They are temporary.
-- **Duplicate ACKs were considered and deliberately not built** (2026-09-16). The 12% extra attempts are
-  acceptable, and duplicates would not rescue bad-link stretches. Revisit only if the worn session shows a
-  need.
-
-- **Link quality is the real lever for mechanism B.** Laptop, body orientation, antenna placement. See
-  the "human body" finding in `BLE-Handshake-Controller-List-Loss.md` and memory notes.
-- **Firmware (on hold by decision, 2026-09-16; hard to bench-test without non-zero torque):**
+- **Fold the `PARAM_ACK_DIAG` counters into `EXO_DIAG`:** Task 5 of `plans/2026-09-17-diagnostic-scaffolding-cleanup.md`.
+  The worn session they were waiting for is done. Under the operator's rule (gate what produced information,
+  delete what did not), they are gated, not removed.
+- **Duplicate ACKs were considered and deliberately not built** (2026-09-16). V0.3 made the question moot: a missing
+  ACK now costs one slot, not a session.
+- **Link quality is the real lever for mechanism B.** Laptop, body orientation, antenna placement. See the "human
+  body" finding in `BLE-Handshake-Controller-List-Loss.md`. The backlog in §3.5 is part of the same picture.
+- **Firmware (on hold by decision, 2026-09-16):**
   - a checksum on UART packets;
-  - echo the value in the ACK;
+  - echo the value in the ACK (this would also remove V0.3's late-ACK residual, §3.6);
   - a distinct reason code for "ACK damaged in transit" instead of reason 1;
   - try `UART_BAUD` 250000 or 115200;
   - give ACKs priority over the RT stream on the Nano.
-- **Latent safety issue:** no UART checksum and no value echo. A command whose value is damaged but
-  still within bounds would be applied **and** ACKed as accepted, and nothing could detect it. Not
-  observed.
-- `stress_test_ble.py` was brought in line on 2026-09-16:
-  - 1 s timeout and 5 attempts.
-  - A timestamped per-attempt log (`Logs/Stress test/param_write_<stamp>.txt`) and an attempt tally in
-    the summary.
-  - "Rejected" now means only genuine firmware refusals.
-  - It was smoke-run end to end against a fake GUI; not yet on the exo.
-- MainWindow's own 5 s pending timer still shows "Controller update failed: no device acknowledgement"
-  for a write whose retry succeeded. This is cosmetic.
-- About half of the benchtop timeouts were silent with no degraded link. Their cause, and whether those
-  commands were applied, is unknown.
+- **Latent safety issue:** no UART checksum and no value echo. A command whose value is damaged but still within
+  bounds would be applied **and** ACKed as accepted, and nothing could detect it. Not observed.
+- **`stress_test_ble.py`** (1 s, 5 attempts, per-attempt log and tally) still uses the capped blocking write. It was
+  re-checked against V0.3 with a fake GUI on 2026-09-18 (§3.6) and has not been re-run on the exo since.
+- **MainWindow's own 5 s pending timer is cosmetic but noisy.** It still logs "Parameter update timed out waiting
+  for ack" for writes that were resent or replaced: 355 times in the §3.7 run.
+- **Explained, 2026-09-16 (§3.4.1):** the "silent timeouts on a clean benchtop link" are ACKs the Nano sent that
+  never reached the GUI. Why the Nano or Windows drops them is still unknown, likely a per-connection-event limit.
+- **`game_theory_mode` still has not run on the exo.** V0.3 changes its write path too: TorqScale is now a simple,
+  non-blocking write.

@@ -1,6 +1,8 @@
 # ACK-aware write scheduler for the external control loop: design
 
-**Date:** 2026-09-17 · **Branch:** `fix_ack_failures` · **Status:** design agreed in chat, awaiting spec review
+**Date:** 2026-09-17 · **Branch:** `fix_ack_failures` · **Status:** implemented (`805a3c2`, 92/92 tests) and
+validated worn on 2026-09-18 - results in `ACK-Loss-Investigation.md` §3.7; deviations from this spec in the plan's
+execution notes
 **Touches:** `Python_GUI/external_control/` only (PC side). No firmware or GUI change.
 
 ## 1. Why
