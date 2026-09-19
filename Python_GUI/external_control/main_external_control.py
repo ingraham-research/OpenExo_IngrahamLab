@@ -62,8 +62,9 @@ def main():
 
     #Where the hip exo's code base lives. We import the optimization backend and the UDP receiver from there rather than duplicating them. 
     #NOTE:YOU NEED TO EDIT THIS TO YOUR OWN SETTING
-    # hippo_control_code_path = r"E:\Research\Exoskeletons\Max Shepherd's exo\Exo control codes"
-    hippo_control_code_path = r"C:\Users\apfis\OneDrive\Documents\GitHub\Hip-exo-control-codes"
+    #hippo_control_code_path = r"E:\Research\Exoskeletons\Max Shepherd's exo\Exo control codes" #Zijie's laptop
+    #hippo_control_code_path = r"C:\Users\apfis\OneDrive\Documents\GitHub\Hip-exo-control-codes" #Annika's laptop
+    hippo_control_code_path = r"C:\Users\Ingraham Lab\Codes\Hippo\Hip-exo-control-codes" #AMP lab desktop
 
     #Options
     udp_in_use = 0  # By default, don't listen on UDP unless user decided to
