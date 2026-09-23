@@ -13,7 +13,8 @@ change landed.
 | File | What it is |
 |---|---|
 | `main_external_control.py` | The "main code". Mode selection, session setup, the supervisory loop. |
-| `Utilities/ExoLink_utilities.py` | The UDP link to the GUI. Resolves names to ids, writes a parameter, waits for the exo's acknowledgement, retries on silence. |
+| `Utilities/OpenExoLink_utilities.py` | The UDP link to the GUI. Resolves names to ids, writes parameters, and matches the exo's acknowledgements back to them. Two ways in: `request()` returns at once (the experiment loop), `set_param_confirmed()` blocks until the ack (session setup). |
+| `Utilities/WriteScheduler_utilities.py` | The write engine behind the link, V0.3 (2026-09-18). One command on the air at a time, a resend only when one is needed, and a newer value for the same parameter always beats a resend of an older one. A pure state machine: no sockets, no clock of its own. |
 | `Utilities/ActionMap_utilities.py` | Turns a machine action (a torque percentage) into the `splineAlt` parameter writes that implement it. |
 | `PSEUDOCODE.md` | The whole design as pseudocode, for hand-typing. Also lists the five traps the code exists to handle. |
 
@@ -60,18 +61,26 @@ costs a BLE round trip rather than being a local variable:
   cannot queue writes faster than the link retires them. A value arriving inside that window is
   **held, not dropped** — a fresher value simply replaces it, so you always get the latest commanded
   state.
-- **A disable command bypasses the rate limit** and cannot be coalesced away by a later timing. It is a
-  safety command, so it goes straight through.
+- **A disable command is rate limited the same way**, because it costs the link exactly the same BLE
+  round trip. It is held rather than dropped, so it is never lost — it waits at most
+  `udp_min_write_interval`. Two things retire it without a write: the torque scale having already been
+  requested as 0 on both legs (nothing to send), or a real timing value arriving first, which
+  supersedes an unsent disable instead of the two fighting over the same loop pass.
 
 ## Before the first run
 
-- **Set `exo_control_code_path`** at the top of `main()` to wherever the hip exo's code base lives. The
-  game theory backend and the UDP receiver are imported from there rather than duplicated, so the
-  algorithm has exactly one copy.
-- **Check `m_action_max`.** It is the hard ceiling on the machine action, in percent, applied before
-  every write. It ships at 60. At 100 the CSV asks for the full 15 Nm, and commanded torque is
-  believed to come out about 1.165× the requested value because of how `t_ff` is packed — verify that
-  on the bench before raising it.
+- **Set `hippo_control_code_path`** at the top of `main()` to wherever the hip exo's code base lives.
+  The game theory backend and the UDP receiver are imported from there rather than duplicated, so the
+  algorithm has exactly one copy. Each machine's path is kept on its own commented line there —
+  uncomment the one you are on.
+- **Check `max_torque_scaling`.** It is the hard ceiling on the torque percentage, applied before every
+  write (`torque_percentage_max` inside the action map). It now ships at **100**, i.e. the full profile
+  the CSV asks for, scaled by body mass. The firmware clamps behind it were raised on 2026-09-09:
+  feed-forward ±25 Nm in both splines, `MAX_JOINT_TORQUE_NM` 30 — the feed-forward consistently
+  under-delivers and the PID is what pulls measured torque up to the prescribed profile.
+- **Check `ack_timeout`** (1.0 s). It is how long a write waits for its acknowledgement before it counts
+  as a failed attempt and is resent — or replaced, if a newer value for the same parameter is already
+  waiting. Every ack seen on the exo up to 2026-09-18 arrived within 0.57 s.
 - **Confirm the controller names.** The code offers to print the matrix the exo advertised at startup.
   Names are truncated by the BLE handshake, so check them rather than assuming.
 
@@ -88,9 +97,14 @@ The full design, the rationale, and the alternatives that were rejected are in
 
 Two things are worth repeating here because they are easy to undo by accident:
 
-- **Silence is the only failure signal.** A dropped BLE write produces no negative ack, and the GUI
-  returns `ok` to a `set_param` even with no exo connected — `ok` only means it queued a write. Every
-  write in this code is confirmed against the exo's own acknowledgement.
+- **Silence is the common failure signal — and it almost always means the ACK was lost, not the write.**
+  A dropped BLE write produces no negative ack, and the GUI returns `ok` to a `set_param` even with no
+  exo connected — `ok` only means it queued a write. So every write is matched against the exo's own
+  acknowledgement. What the diagnostic firmware then settled is what silence *means*: about 17 % of
+  writes go unanswered, and the ack counters put nearly all of those on the Nano → PC hop, i.e. the
+  Teensy had applied the value. Hence the V0.3 rule, **never exit on ACK trouble**: session setup blocks
+  until confirmed, the loop warns after 5 s without an ack and keeps going, and only a GUI-reported
+  disconnect ends the run.
 - **The first write to `splineAlt` must be `TorqScale = 0`.** Writing any parameter to a controller
   that is not the active one switches the joint to it and loads its SD-card defaults, and
   `splineAlt.csv` ships `TorqScale = 95`. `engage_controller_safely()` exists for exactly this.
