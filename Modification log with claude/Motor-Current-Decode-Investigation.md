@@ -310,7 +310,8 @@ which a corruption process would not produce.
 **a. `Commanded_Torque_Nm` is neither Nm nor amps.** It is `i_sat`, a number in fictitious "firmware amps".
 True motor-shaft torque = `Commanded_Torque_Nm` × 1.165 N·m; true joint torque = **× 5.243**.
 
-**b. The 25 Nm clamp actually permits 26.2 Nm.**
+**b. The 25 Nm clamp actually permits 26.2 Nm.** *(2026-09-29: the clamp has been 30 Nm since 2026-09-09; the
+same arithmetic gives 30 × 1.165 / 1.11 ≈ 31.5 Nm.)*
 
 ```
 max_motor_torque = 25 / 4.5        = 5.556   ("motor Nm" as the firmware reckons)

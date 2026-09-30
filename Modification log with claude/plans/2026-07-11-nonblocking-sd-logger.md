@@ -1,5 +1,7 @@
 # Non-Blocking SD Logger Implementation Plan
 
+**Status (2026-09-29 audit):** **Implemented** in `3d24ecb` (2026-07-13); the logger is disabled at runtime since 2026-07-23. The checkboxes below were never ticked and do not track progress.
+
 > **For agentic workers:** Steps use checkbox (`- [ ]`) syntax for tracking. This is Teensy 4.1
 > firmware with **no unit-test harness** for the SD/control path — "verification" means: it compiles,
 > the fake-trial self-test (`SD_LOG_SELFTEST_TRIAL`) produces valid logs, `USE_SPEED_CHECK` shows the

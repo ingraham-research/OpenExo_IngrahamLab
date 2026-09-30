@@ -1,5 +1,7 @@
 # Teensy SD Logging Implementation Plan
 
+**Status (2026-09-29 audit):** **Implemented** - see `specs/2026-07-06-teensy-sd-logging-design.md` for the current status. The checkboxes below were never ticked and do not track progress.
+
 > **For agentic workers:** Implement task-by-task. Steps use checkbox (`- [ ]`) syntax.
 > This is on-target Teensy firmware: there is no host test runner. "Verify" = compile
 > in the Arduino IDE for **Teensy 4.1** (no errors) + the stated on-hardware check after

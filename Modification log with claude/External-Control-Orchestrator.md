@@ -58,7 +58,8 @@ off the critical path.
 It is the right knob for two non-obvious reasons:
 
 - It scales node amplitudes at construction (`Controller.cpp:1239-1246`), so it lands on `torque_cmd`
-  **before the PID and before the ±15 Nm clamp**. Scaling *after* the PID would be silently cancelled —
+  **before the PID and before the feed-forward clamp** (±15 Nm when written; ±25 Nm since 2026-09-09, see
+  "Max plantar torque raised to 25 Nm" below). Scaling *after* the PID would be silently cancelled —
   the loop servos measured torque back to the unscaled target — and only when `use_pid=1`, which is our
   configuration.
 - `TorqScale = 0` is a real transparency mode (`Controller.cpp:1420`): every node collapses to zero and

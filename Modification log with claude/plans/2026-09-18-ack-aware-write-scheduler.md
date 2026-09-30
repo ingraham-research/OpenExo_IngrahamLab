@@ -1,5 +1,7 @@
 # ACK-aware write scheduler Implementation Plan
 
+**Status (2026-09-29 audit):** **Implemented** in `805a3c2` and validated worn on 2026-09-18 - see `ACK-Loss-Investigation.md` §3.7. The checkboxes below were never ticked and do not track progress.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the external control loop's blocking confirm-or-exit writes with a one-command-on-the-air scheduler in which newer values replace pending resends, missing ACKs raise warnings instead of ending the session, and every command's fate is logged.

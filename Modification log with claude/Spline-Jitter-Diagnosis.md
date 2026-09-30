@@ -2,7 +2,11 @@
 
 **Date:** 2026-07-22
 **Scope:** Teensy 4.1 firmware (`ExoCode/src/Controller.cpp`, `ExoCode/src/Side.cpp`).
-**Status:** ~~Both fixes committed on branch `add_remote_control`~~ — **updated 2026-08-12: that
+**Status (2026-09-29 audit):** both fixes are in the working branch - `fix_spline_jitter` was merged into
+`main_working_branch` by PR #7 (`d8d04e7`, 2026-08-19). **Round 3 found the remaining jitter is mechanical**
+(`Jitter-Round-3-Both-Branches-PJMC-PID.md` §5b), and on 2026-08-19 (`9fb77d4`) it was accepted as largely
+normal for this transmission. The two fixes here are still correct code fixes; they were not "the" jitter.
+**Original status:** ~~Both fixes committed on branch `add_remote_control`~~ — **updated 2026-08-12: that
 branch no longer exists.** Both fixes live on **`fix_spline_jitter`**: `7f95828` = the spline gain
 scheduler, `226854b` = the `Side.cpp` int→float `percent_gait` change. Still **pending bench
 validation** (nothing was run on the motors during this investigation).
