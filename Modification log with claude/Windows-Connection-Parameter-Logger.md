@@ -18,7 +18,10 @@ Findings it produced: `Nano-Hang-Watchdog-And-Breadcrumbs.md` §15. Raw logs: `N
 ## 1. What it does
 
 It logs the BLE connection parameters **Windows actually applies**, for the whole life of every connection, into the
-device-manager log (`Python_GUI/Saved_Data/logs/device_manager_*.log`) and the terminal:
+session log and the terminal. *(Updated 2026-09-29: since 2026-09-17 the session log is
+`Python_GUI/Saved_Data/logs/app_crash_*.log` - the separate `device_manager_*.log` is gone, see
+`Diagnostic-Scaffolding-Cleanup.md`. The lines are INFO, so they are always in the file; they reach the terminal in
+the default verbose mode but not with `--quiet`.)*
 
 ```
 CONN_PARAMS monitoring started
@@ -44,7 +47,7 @@ CONN_PARAMS monitoring stopped
 Pull the lines out of a session:
 
 ```
-grep CONN_PARAMS Python_GUI/Saved_Data/logs/device_manager_<timestamp>.log
+grep CONN_PARAMS Python_GUI/Saved_Data/logs/app_crash_<timestamp>.log      # device_manager_<timestamp>.log before 2026-09-17
 ```
 
 ## 2. Why it exists

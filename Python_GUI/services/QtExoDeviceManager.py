@@ -79,7 +79,7 @@ class QtExoDeviceManager(QtCore.QObject):
         This used to be a second logger writing its own device_manager_*.log, which meant reading a session
         required correlating two files by timestamp - and since its exception hook chained to GUI.py's, every
         crash was written to both. Nothing is trimmed here: these lines keep their levels, and GUI.py's
-        --verbose-log decides whether the DEBUG ones reach the file.
+        --quiet (verbose is the default) decides whether the DEBUG ones reach the file.
 
         No handlers are attached here on purpose. Without GUI.py (tests, a REPL) the records simply go
         nowhere, which is why constructing this class no longer creates a log file as a side effect.

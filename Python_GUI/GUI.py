@@ -21,7 +21,17 @@ class FlushingFileHandler(logging.FileHandler):
             self.flush()
 
 
-def setup_crash_logger(verbose: bool = False, log_dir: str = None):
+def log_is_verbose(argv, environ) -> bool:
+    """Verbose unless the launch says --quiet (or EXO_QUIET=1).
+
+    Opt-out on purpose: the old opt-in --verbose-log was silently ignored when misspelled, and a debugging
+    session lost its console lines without anything saying so (2026-09-28). A mistyped --quiet now errs on
+    the side of more output. --verbose-log is still accepted, as a no-op, so old launch lines keep working.
+    """
+    return not ("--quiet" in argv or environ.get("EXO_QUIET", "0") not in ("", "0"))
+
+
+def setup_crash_logger(verbose: bool = True, log_dir: str = None):
     """Setup the one application logger: the crash hook, the session file, and the console.
 
     EVERYTHING under the "OpenExo" name lands here, including the BLE layer
@@ -29,9 +39,9 @@ def setup_crash_logger(verbose: bool = False, log_dir: str = None):
     file, so reading a session meant correlating device_manager_*.log and app_crash_*.log by timestamp,
     and every crash was written to both.
 
-    `verbose` (--verbose-log, or EXO_LOG_VERBOSE=1) decides how much is kept, not what exists: DEBUG to the
-    file and INFO to the console, instead of INFO and WARNING. The chatty per-command BLE lines are DEBUG, so
-    a production session stays readable while a debugging session keeps everything.
+    `verbose` (the default; see log_is_verbose() for --quiet) decides how much is kept, not what exists:
+    DEBUG to the file and INFO to the console, instead of INFO and WARNING. The chatty per-command BLE lines
+    are DEBUG, and INFO lines such as the CONN_PARAMS heartbeat only reach the console when verbose.
 
     `log_dir` is for tests; it defaults to Saved_Data/logs.
     """
@@ -70,6 +80,11 @@ def setup_crash_logger(verbose: bool = False, log_dir: str = None):
 
     # Where anything that wants to tell the user about the log can find it (QtExoDeviceManager does)
     logger.log_file_path = log_file
+
+    # Always on the console, whatever its level: the header below is INFO, so a quiet session would
+    # otherwise show nothing that says which mode it is in.
+    mode = "verbose (launch with --quiet to trim)" if verbose else "quiet (--quiet)"
+    print(f"OpenExo log: {mode} -> {log_file}", file=sys.stderr, flush=True)
 
     logger.info("=" * 100)
     logger.info("OpenExo Application Started")
@@ -127,8 +142,7 @@ def setup_crash_logger(verbose: bool = False, log_dir: str = None):
 
 def main():
     # Kept out of argparse on purpose: sys.argv goes to QApplication as-is, which is where Qt's own flags live
-    verbose = ("--verbose-log" in sys.argv) or (os.environ.get("EXO_LOG_VERBOSE", "0") not in ("", "0"))
-    logger, _ = setup_crash_logger(verbose=verbose)
+    logger, _ = setup_crash_logger(verbose=log_is_verbose(sys.argv, os.environ))
 
     try:
         logger.info("Creating QApplication...")

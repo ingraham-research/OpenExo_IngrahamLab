@@ -1,7 +1,7 @@
 # Teensy 4.1 Onboard SD Logging — Design
 
 **Date:** 2026-07-06
-**Status:** Approved (pending written-spec review)
+**Status:** ~~Approved (pending written-spec review)~~ **Implemented** (2026-09-29 audit) - see `SD-Card-Logging-and-End-Trial-Reset.md`. Disabled at runtime since 2026-07-23 (`sdLogEnabled = 0`, `8954667`): it stalled the control loop
 **Author:** Zijie Jin + Claude
 
 ## Goal

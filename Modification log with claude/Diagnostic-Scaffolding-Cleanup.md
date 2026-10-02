@@ -20,27 +20,53 @@ confirmed at torque and on a second laptop - was met on 2026-09-13/14.
   chained to `GUI.py`'s, so every crash was written to both files.
 - It now logs as `OpenExo.DeviceManager` into the one application logger. Its duplicate exception hook is
   gone; `GUI.py`'s hook already logged the same crash.
-- **Nothing was trimmed.** `--verbose-log` (or `EXO_LOG_VERBOSE=1`) decides how much is kept:
+- **Nothing was trimmed.** ~~`--verbose-log` (or `EXO_LOG_VERBOSE=1`) decides how much is kept~~
+  **Flipped 2026-09-29 - see "Update" below:** verbose is the default, `--quiet` (or `EXO_QUIET=1`) trims:
 
   | | file | console |
   |---|---|---|
-  | default | INFO | WARNING |
-  | verbose | DEBUG | INFO |
+  | default (verbose) | DEBUG | INFO |
+  | `--quiet` | INFO | WARNING |
 
-  The chatty per-command BLE lines are DEBUG, so they are there when you ask for them. `CONN_PARAMS`,
-  `Sending parameter update` and RtBridge's frame log are INFO and stay in every session.
+  The chatty per-command BLE lines are DEBUG. `CONN_PARAMS`, `Sending parameter update` and RtBridge's
+  frame log are INFO: always in the **file**, but on the **console** only when verbose. That console change
+  was not written down on 2026-09-17: the old `device_manager` logger had its own INFO console handler, so the
+  10 s `CONN_PARAMS [heartbeat]` line used to scroll past in every session.
 - Constructing `QtExoDeviceManager` no longer creates a log file as a side effect, so tests stop
   littering `Saved_Data/logs`.
 - The file is still named `app_crash_*.log`. It is really the session log; renaming is a separate
   decision (only write-ups reference the name, no code does).
 - 4 new tests; 56/56 in `Python_GUI/tests` pass.
 
+### Update 2026-09-29 - verbose by default, `--quiet` to trim
+
+**Why:** on 2026-09-28 the operator lost the `CONN_PARAMS` heartbeat from the console "even with the flag".
+Both launches that day logged `(verbose=False)`: the flag had been typed as `--log-verbose`, and the code only
+matched the exact string `--verbose-log`, so anything else was ignored without a word. The line was in the
+file the whole time (12 heartbeats in `app_crash_20260928_173855.log`); only the console copy was gated. The
+same thing happened on 2026-09-17, where it was first misread as a logging bug.
+
+**What changed** (`GUI.py`, `tests/test_logging_merge.py`, one docstring in `QtExoDeviceManager.py`):
+- `log_is_verbose(argv, environ)`: verbose unless `--quiet` is in argv or `EXO_QUIET` is set to anything but
+  `0`. The flag is `--quiet`, not `--quiet-log`, at the operator's request - the `-log` suffix is what got
+  mistyped. A typo of `--quiet` now fails toward MORE output, which is the harmless direction.
+- `--verbose-log` is still accepted, as a no-op, so old launch lines keep working. `EXO_LOG_VERBOSE` is no
+  longer read (it only ever turned on what is now the default).
+- `setup_crash_logger(verbose=True)` is now the default too.
+- Startup always prints `OpenExo log: verbose (launch with --quiet to trim) -> <file>` (or `quiet (--quiet)`)
+  to stderr. The `(verbose=...)` header line is INFO, so a quiet console could not show it; there was no
+  on-screen way to see that a flag had been missed. The file header is unchanged, so old logs still compare.
+- 6 new tests (default, `--quiet`, `EXO_QUIET`, old flag accepted, default logger level, mode line on the
+  console even when quiet); watched all 6 fail first. Suite 98/98 (was 92). `main()`'s wiring checked with a
+  stubbed logger: no args / `--verbose-log` / `--quite` -> verbose; `--quiet` / `EXO_QUIET=1` -> quiet.
+
 ## Part 2 - firmware scaffolding (PROPOSED)
 
 ### The flag
 
-One master switch, `EXO_DIAG` in `Config.h`, default **0**. Same idea as `--verbose-log`: the code stays,
-the cost does not. `PARAM_ACK_DIAG` already works this way and would fold into it.
+One master switch, `EXO_DIAG` in `Config.h`, default **0**. Same idea as the GUI's log verbosity: the code
+stays, the cost does not. (Since 2026-09-29 the GUI is verbose by default; `EXO_DIAG` stays opt-in because on
+the firmware the diagnostics cost control-loop time, while on the PC they only cost disk.) `PARAM_ACK_DIAG` already works this way and would fold into it.
 
 ### Verdicts
 

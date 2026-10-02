@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-10
 **Branch:** `fix_zerotorque_pid`
-**Status:** Approved design, pending implementation
+**Status:** ~~Approved design, pending implementation~~ **Implemented** (2026-09-29 audit) in `3d24ecb` (2026-07-13). The logger itself has been disabled at runtime since 2026-07-23 (`sdLogEnabled = 0`)
 **Related:** [[2026-07-10-zerotorque-transparency-design]] (the logger stall is the dominant cause of
 the ankle transparency oscillation)
 

@@ -1,5 +1,7 @@
 # Firmware diagnostic-scaffolding cleanup - Implementation Plan
 
+**Status (2026-09-29 audit):** **NOT STARTED** - no `EXO_DIAG` exists in `ExoCode/` and the temporary `PARAM_ACK_DIAG` counters are still in (`ComsMCU.h:122`). Awaiting the operator's go-ahead. The checkboxes below were never ticked and do not track progress.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:executing-plans` (or
 > `superpowers:subagent-driven-development`) to work through this task by task. Steps use checkbox
 > (`- [ ]`) syntax.
@@ -7,8 +9,8 @@
 **Goal:** Delete the firmware diagnostics that never produced information, and put the ones that did their
 job behind a single build switch, so a production build is quiet and a debugging build still has everything.
 
-**Architecture:** One master switch `EXO_DIAG` in `ExoCode/src/Config.h`, default `0`, mirroring the GUI's
-`--verbose-log`. Gated code stays compiled-out, not deleted. Deletions are limited to scaffolding that was
+**Architecture:** One master switch `EXO_DIAG` in `ExoCode/src/Config.h`, default `0`, the firmware counterpart of
+the GUI's log verbosity (which is opt-OUT via `--quiet` since 2026-09-29; this stays opt-in). Gated code stays compiled-out, not deleted. Deletions are limited to scaffolding that was
 proven not to work (stage breadcrumbs) or whose experiment is over (two bisect switches).
 
 **Tech stack:** Arduino C++ for `arduino:mbed_nano:nano33ble` (Nano) and `teensy:avr:teensy41` (Teensy),
@@ -75,7 +77,7 @@ banner field that report them. The crash-trap self-test already has its own swit
     //keeping for the next investigation: the BLE send-path timing, the Teensy RT-I2C counters and their
     //boot-time UART fetch, and the param-update ack counters. 0 = production (quiet, no runtime cost),
     //1 = debugging build. Fixes and safety (watchdog, stall detector, connection interval) are NOT gated.
-    //Mirrors the GUI's --verbose-log. See "Modification log with claude/Diagnostic-Scaffolding-Cleanup.md".
+    //Firmware counterpart of the GUI's log verbosity (the GUI's is on by default, --quiet trims). See "Modification log with claude/Diagnostic-Scaffolding-Cleanup.md".
     #define EXO_DIAG 0
 ```
 

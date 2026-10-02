@@ -1,7 +1,7 @@
 # End-Trial Shutdown Progress + Teensy-Ack Handshake — Design
 
 **Date:** 2026-07-07
-**Status:** Approved (pending written-spec review)
+**Status:** ~~Approved (pending written-spec review)~~ **Implemented** (2026-09-29 audit) - `Python_GUI/Widgets/ShutdownDialog.py` and the `'P'` shutdown-progress command (`ble_commands.h:68`); see `SD-Card-Logging-and-End-Trial-Reset.md`
 **Author:** Zijie Jin + Claude
 
 ## Goal

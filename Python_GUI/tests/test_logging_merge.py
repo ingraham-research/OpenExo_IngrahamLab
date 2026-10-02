@@ -2,7 +2,7 @@
 
 The BLE layer used to log into its own device_manager_*.log, so reading a session meant correlating two files
 by timestamp (and every crash was written to both). It now logs into the application-wide "OpenExo" logger.
-Nothing is trimmed: GUI.py's --verbose-log decides whether DEBUG lines reach the file.
+Nothing is trimmed: a session is verbose (DEBUG lines reach the file) unless GUI.py is launched with --quiet.
 """
 import glob
 import logging
@@ -51,7 +51,7 @@ def test_log_file_path_comes_from_the_shared_logger(qapp, tmp_path):
 
 
 def test_verbose_flag_opens_the_file_to_debug(tmp_path):
-    quiet, _ = GUI.setup_crash_logger(log_dir=str(tmp_path))
+    quiet, _ = GUI.setup_crash_logger(log_dir=str(tmp_path), verbose=False)
     quiet_levels = [h.level for h in quiet.handlers]
     quiet.handlers.clear()
     loud, _ = GUI.setup_crash_logger(log_dir=str(tmp_path), verbose=True)
@@ -59,6 +59,40 @@ def test_verbose_flag_opens_the_file_to_debug(tmp_path):
     loud.handlers.clear()
     assert quiet_levels == [logging.INFO, logging.WARNING]     # file, console
     assert loud_levels == [logging.DEBUG, logging.INFO]
+
+
+def test_the_logger_is_verbose_unless_told_otherwise(tmp_path):
+    logger, _ = GUI.setup_crash_logger(log_dir=str(tmp_path))
+    levels = [h.level for h in logger.handlers]
+    logger.handlers.clear()
+    assert levels == [logging.DEBUG, logging.INFO]
+
+
+# Verbose by default; --quiet (or EXO_QUIET=1) is the only way to trim. The old opt-in --verbose-log was
+# silently ignored when misspelled, which lost a session's CONN_PARAMS console lines on 2026-09-28.
+def test_a_plain_launch_is_verbose():
+    assert GUI.log_is_verbose(["GUI.py"], {}) is True
+
+
+def test_quiet_flag_trims_the_log():
+    assert GUI.log_is_verbose(["GUI.py", "--quiet"], {}) is False
+
+
+def test_quiet_env_var_trims_the_log():
+    assert GUI.log_is_verbose(["GUI.py"], {"EXO_QUIET": "1"}) is False
+    assert GUI.log_is_verbose(["GUI.py"], {"EXO_QUIET": "0"}) is True
+
+
+def test_old_verbose_flag_is_still_accepted():
+    assert GUI.log_is_verbose(["GUI.py", "--verbose-log"], {}) is True
+
+
+def test_the_log_mode_is_announced_on_the_console_even_when_quiet(tmp_path, capsys):
+    # The console is WARNING-only when quiet, so this must not depend on the INFO header reaching it.
+    for verbose, mode in ((False, "quiet"), (True, "verbose")):
+        logger, _ = GUI.setup_crash_logger(log_dir=str(tmp_path / mode), verbose=verbose)
+        logger.handlers.clear()
+        assert f"log: {mode}" in capsys.readouterr().err
 
 
 def test_the_flag_decides_whether_ble_debug_lines_are_kept(tmp_path):
