@@ -66,9 +66,9 @@ def main():
     #hippo_control_code_path = r"C:\Users\apfis\OneDrive\Documents\GitHub\Hip-exo-control-codes" #Annika's laptop
     hippo_control_code_path = r"C:\Users\Ingraham Lab\Codes\Hippo\Hip-exo-control-codes" #AMP lab desktop
 
-    #Options
+    #Initialize condition flags. These are set by the user prompt at beginining of code.
     udp_in_use = 0  # By default, don't listen on UDP unless user decided to
-    game_theory_mode = 0  # Default to no backend; only toggles if the user picks the game theory mode
+    game_theory_mode = 0  # Default to no backend; only toggles if the user picks the game theory mode. 
 
     #For debugging
     use_loop_time = 1  #If 1, all log timestamps within one loop iteration come from the loop start time, so everything logged in a cycle shares one timestamp
@@ -341,7 +341,7 @@ def main():
         #These hyperparameters are carried over from the hip exo's SPT game theory session. Review them
         #for this study rather than assuming they transfer
         game_theory_backend = GameTheory_1D_Backend(start_time=time.perf_counter(), max_iterations=32,
-                                                    est_hstar_init=1.4, est_mstar_init=30,
+                                                    est_hstar_init=1.1, est_mstar_init=30,
                                                     L_values=[200, -200], L_decay_ON=1,
                                                     max_repeats_per_trial=30, repeats_to_average=10,
                                                     estimate_update_decay_ON=0, human_lag_time=1,
