@@ -97,7 +97,7 @@ def main():
     #Timing
     operating_rate = 20             #Main loop rate in Hz. Nothing here needs to be fast - the exo runs its own loop at 100x this, and we only write a parameter now and then. Can go even lower
 
-    h_action_strides_to_average = 10  #How many STRIDES of treadmill speed we average into one human action.
+    h_action_strides_to_average = 1  #How many STRIDES of treadmill speed we average into one human action.
     #The treadmill sends exactly one speed per step, so each successful read IS one stride - we never need stride detection of our own.
     #NOTE: we hand this to the backend and then read it back off it, because GUI doesn't broadcast HS and we can only trust treadmill as source of this
     #If eventually this becomes a problem, we can ask teensy+nano/GUI to broadcast HS events   
