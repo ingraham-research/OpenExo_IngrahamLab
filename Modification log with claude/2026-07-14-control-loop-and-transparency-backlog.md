@@ -5,6 +5,24 @@
 Running list of diagnosed issues and to-dos from the zero-torque transparency work. See
 `Modification log with claude/specs/2026-07-10-*` for the shipped designs.
 
+> **⚠ Status of each item as of the 2026-09-29 audit.** This list was not maintained after July; read this
+> first. The body below is unchanged.
+>
+> - **ZeroTorque PID transparency ("Done / working") - REVERTED.** `9fb77d4` (2026-08-19) set `use_pid` 1 -> 0 in
+>   `SDCard/ankleControllers/zeroTorque.csv` (now `0,3,0,0.001`) after the jitter was judged largely mechanical
+>   (`Jitter-Round-3-Both-Branches-PJMC-PID.md` §5b). The default ankle controller is still `zeroTorque`, which
+>   therefore freewheels. The "our config (zeroTorque `use_pid=1`)" remark under `torque_scale` is stale too.
+> - **#1 loop stalls - still open.** `MY_SERIAL.flush()` is still at `UARTHandler.cpp:64`.
+> - **#2 AK60v3 decode - DONE.** The signed-int16 decode is in the committed firmware (`Motor.cpp:185-198`) and has
+>   shipped in every build since; `Motor-Current-Decode-Investigation.md` confirms it matches the manual.
+> - **#3 zero-torque residual jitter** - moot while ZeroTorque's PID is off (see the first bullet).
+> - **`torque_scale` - done for `splineAlt` only**, as its `TorqScale` parameter (index 10, applied before the PID and
+>   the clamp, `Controller.cpp:1249`) - see `SplineAlt-Shape-Parameterised-Controller.md`. No global knob exists.
+> - **The ±15 Nm feed-forward clamp** cited below is ±25 Nm since 2026-09-09 (`4b4af87`).
+> - **Nice-to-haves:** the parameter-count guard does not exist yet. `JointConfig.ID_TO_NUM` is still in
+>   `Python_GUI/utils/config.py:82` with the inverted labels; still imported by nothing, and
+>   `external_control/Utilities/OpenExoLink_utilities.py:42` now carries a warning not to use it.
+
 ## Done / working
 
 - **Non-blocking SD logger** — ring buffers + `isBusy()`-gated single-sector SdFat drain. Confirmed:

@@ -193,7 +193,8 @@ new clamp's `Serial` warning is the first thing that would ever have reported it
 
 - **Continuous zero frames while disabled** removes ingredient 2: whatever the last frame was, it is
   overwritten ~2 ms later and the motor is actively commanded to zero.
-- **The 25 Nm clamp** removes ingredient 1: the command physically cannot exceed 25 Nm at the joint,
+- **The 25 Nm clamp** (`MAX_JOINT_TORQUE_NM`, raised to **30 Nm** on 2026-09-09; and see
+  `Motor-Current-Decode-Investigation.md` §4b for how the limit maps to real torque) removes ingredient 1: the command physically cannot exceed 25 Nm at the joint,
   saturated or not, and it now prints when it trips.
 
 ## Ranked candidates

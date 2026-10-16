@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-10
 **Branch:** `fix_zerotorque_pid`
-**Status:** Approved design, pending implementation
+**Status:** ~~Approved design, pending implementation~~ **Implemented** (2026-09-29 audit) in `03cc4a0` (2026-07-10), then **PID reverted** in `9fb77d4` (2026-08-19): `zeroTorque.csv` is `0,3,0,0.001`, so the default ankle controller freewheels. See `Jitter-Round-3-Both-Branches-PJMC-PID.md` §5b
 
 ## Problem
 

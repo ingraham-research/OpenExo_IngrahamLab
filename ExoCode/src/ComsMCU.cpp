@@ -15,6 +15,17 @@
 
 #define COMSMCU_DEBUG 0
 
+//TEMPORARY DIAGNOSTIC (2026-09-16, see "Modification log with claude/ACK-Loss-Investigation.md" §3.4).
+//When 1, every param-update ack carries three counters after its usual five fields:
+//  [5] ack_seq           - param-update ack notifications this Nano has sent, this one included
+//  [6] cmds_from_gui     - complete update_param commands received from the GUI over BLE
+//  [7] acks_from_teensy  - param-update acks received from the Teensy over UART (well-formed or not)
+//Across a gap between two acks the GUI did receive, these say which hop lost the missing ones. The GUI parses
+//only the first five fields and logs the whole frame, so nothing on the PC side changes. Counters wrap at
+//1,000,000 to keep each value short on the wire - only differences between consecutive acks matter.
+//Set to 0 to send the original five-field ack.
+#define PARAM_ACK_DIAG 1
+
 ComsMCU::ComsMCU(ExoData* data, uint8_t* config_to_send):_data{data}
 {
     /* switch (config_to_send[config_defs::battery_idx])
@@ -363,6 +374,7 @@ void ComsMCU::_process_complete_gui_command(BleMessage* msg)
         break;
     case ble_names::update_param:
     {
+        _diag_cmds_from_gui++;   // PARAM_ACK_DIAG: counted before validation, so every command that arrived counts
         param_update::Request request;
         param_update::RejectionReason reason = ble_handlers::update_param(_data, msg, &request);
         if (reason != param_update::RejectionReason::accepted)
@@ -398,11 +410,19 @@ void ComsMCU::_send_param_update_ack(
     ack_msg.data[2] = request.param_index;
     ack_msg.data[3] = accepted ? 1.0f : 0.0f;
     ack_msg.data[4] = (float)((uint8_t)reason);
+    #if PARAM_ACK_DIAG
+        _diag_ack_seq++;
+        ack_msg.expecting = 8;   // the shared command table still says 5; only this build sends the extra three
+        ack_msg.data[5] = (float)(_diag_ack_seq % 1000000UL);
+        ack_msg.data[6] = (float)(_diag_cmds_from_gui % 1000000UL);
+        ack_msg.data[7] = (float)(_diag_acks_from_teensy % 1000000UL);
+    #endif
     _exo_ble->send_message(ack_msg);
 }
 
 void ComsMCU::_send_param_update_ack(UART_msg_t msg)
 {
+    _diag_acks_from_teensy++;   // PARAM_ACK_DIAG: every param ack the Teensy sent that reached us, parsable or not
     param_update::Request request;
     request.joint_id = msg.joint_id;
     uint8_t accepted_raw = 0;

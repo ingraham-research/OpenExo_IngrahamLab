@@ -1,5 +1,7 @@
 # ZeroTorque Transparency Implementation Plan
 
+**Status (2026-09-29 audit):** **Implemented** (`03cc4a0`), then **PID reverted** in `9fb77d4` (2026-08-19) - see the spec's status line. The checkboxes below were never ticked and do not track progress.
+
 > **For agentic workers:** Steps use checkbox (`- [ ]`) syntax for tracking. This is Teensy
 > firmware; there is no unit-test harness for the controller path, so verification is
 > compile/static review plus a user-run bench test (the user runs all motor tests). Per the

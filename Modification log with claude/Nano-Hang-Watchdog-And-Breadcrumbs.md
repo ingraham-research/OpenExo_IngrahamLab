@@ -2,7 +2,13 @@
 
 **Date:** 2026-09-10
 **Branch:** `disconnection_troubleshooting`
-**Status:** **FLASHED AND BENCH-TESTED. Mode 2 confirmed by the device (§3.7); the failure is now
+**Status as of 2026-09-29 (audit):** cause found and fixed - a short BLE connection interval; production is
+build **B23**, `setConnectionInterval(20, 24)` (`SystemReset.h` `EXO_BLE_INTERVAL_SEL 0u`), merged into
+`main_working_branch` via PR #13 (`b3cff2c`, 2026-09-15). Everything in the working tree is committed,
+including the §3.6 fixes (the watchdog is now armed after the first complete `loop()` pass, `ExoCode.ino:934`).
+The scaffolding removal (§5/§11) is now planned in `Diagnostic-Scaffolding-Cleanup.md` Part 2, not started.
+Trust §0 and the banners below over the original status lines that follow, which are kept for the record.
+**Original status (2026-09-10/12):** **FLASHED AND BENCH-TESTED. Mode 2 confirmed by the device (§3.7); the failure is now
 characterised as an INTERRUPT-LEVEL STOP (§3.8), not a loop hang.** Root cause still unknown.
 **BISECT COMPLETE (§3.9): the BLE notification stream is a NECESSARY CONDITION; I2C is not.**
 Raw observations are now kept separately in `Nano-Disconnect-EVIDENCE-ONLY.md` - read that first.
@@ -72,6 +78,9 @@ cause is found and fixed, **all of it should come out** — see §5.
 > connections (§14.23), so test order matters and a banner is no longer self-describing.**
 >
 > ## ⚠ THE INTERVAL IS CURRENTLY SET BACK TO THE FAILING VALUE, ON PURPOSE
+>
+> *(Historical - no longer current as of 2026-09-12 evening: the source selector is `0u` = B23 `(20, 24)`,
+> the production value. Kept as the record of the A' arm.)*
 >
 > **2026-09-12: arm A' is DONE and the failure came back 2/2 (10.6 s and 75.7 s), so `(6, 6)` is
 > now 12/12 failures.** `EXO_BLE_INTERVAL_PINNED` is back to `0` = `(12, 24)` = banner `B21`.

@@ -3,8 +3,11 @@
 > # ✅ SUPERSEDED 2026-09-12 - THE ROOT CAUSE IS NOW KNOWN
 >
 > **The mid-trial BLE death is caused by a short connection interval.** Measured: **7.5 ms fails 12/12**,
-> **15 ms fails 2/2**, while **28.75 ms and ~30 ms have run 6,076+ s with zero failures**. The fix is
+> ~~**15 ms fails 2/2**~~, while **28.75 ms and ~30 ms have run 6,076+ s with zero failures**. The fix is
 > `setConnectionInterval(20, 24)` = 25-30 ms in `ExoBLE.cpp` (build B23).
+>
+> *(2026-09-14 correction: there is no 15 ms rung - those two failures ran at 7.5 ms, which is now 15 failures
+> at 7.5 ms and none at 28.75-30 ms. See `Nano-Hang-Watchdog-And-Breadcrumbs.md` §15 and ledger #22.)*
 >
 > **Read `Nano-Hang-Watchdog-And-Breadcrumbs.md` §0 first** - it carries the authoritative status and a
 > retraction ledger for every superseded claim across this whole investigation.

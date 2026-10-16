@@ -58,7 +58,8 @@ off the critical path.
 It is the right knob for two non-obvious reasons:
 
 - It scales node amplitudes at construction (`Controller.cpp:1239-1246`), so it lands on `torque_cmd`
-  **before the PID and before the ±15 Nm clamp**. Scaling *after* the PID would be silently cancelled —
+  **before the PID and before the feed-forward clamp** (±15 Nm when written; ±25 Nm since 2026-09-09, see
+  "Max plantar torque raised to 25 Nm" below). Scaling *after* the PID would be silently cancelled —
   the loop servos measured torque back to the unscaled target — and only when `use_pid=1`, which is our
   configuration.
 - `TorqScale = 0` is a real transparency mode (`Controller.cpp:1420`): every node collapses to zero and
@@ -139,11 +140,20 @@ the first attempt at that was wrong twice:
 - On a `link_down` break the exo **cannot** be parked — `park_to_transparency()` says so plainly and
   tells the operator to end the trial from the GUI. This code never starts or ends a trial.
 
-## Audit status (2026-09-08)
+## Audit status — the user's own line-by-line read (updated 2026-09-21)
 
-- `main_external_control.py` — **audited by the user, done.**
-- `Utilities/ActionMap_utilities.py` — **audit in progress.**
-- `Utilities/OpenExoLink_utilities.py` — **audit in progress.**
+**This is the user's task, not Claude's.** They proofread these files line by line against their own hip
+`main_control_code.py`, and their edits during that read take priority over anything written here.
+
+**The V0.3 write-scheduler refactor (2026-09-18) landed on top of a part-finished audit, so most of it
+has to be redone.**
+
+| File | State |
+|---|---|
+| `main_external_control.py` | Audited 2026-09-08 — but the V0.3 loop rewrite came after it. The deploy calls, the UDP zero-torque guards and the `service()` call that replaced the sleep at the bottom of the loop are all new since. Worth a second pass |
+| `Utilities/ActionMap_utilities.py` | Comment pass done 2026-09-08, and param indices 0-16 re-verified against `ControllerData.h` and `splineAlt.csv`. Changed since: `apply_machine_action` → `apply_torque_percentage` (requests instead of blocking), and `latest_torque_request()` is new |
+| `Utilities/OpenExoLink_utilities.py` | **Still to do.** It was "in progress" on 2026-09-08 and V0.3 then rewrote most of it (~400 lines changed), so the earlier partial read no longer applies — start again from the top |
+| `Utilities/WriteScheduler_utilities.py` | **Still to do, never read.** 362 lines, all new on 2026-09-18. It is the pure state machine behind every write |
 
 Changes made during the audit so far: logging split into `log_m_action_enabled` /
 `log_param_write_enabled` / `log_h_action_enabled`; the human-action buffer switched back to

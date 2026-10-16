@@ -73,7 +73,7 @@ new_torque_profile = [(t, val * new_torque_percentage * body_mass_scaling_factor
 
 - **Parameter index 10**, units percent, `SDCard/ankleControllers/splineAlt.csv` default 95.
 - Scales node amplitudes at construction (`ExoCode/src/Controller.cpp:1239-1246`), i.e. it lands on
-  `torque_cmd` **before the PID and before the plus/minus 15 Nm clamp**. This is exactly the
+  `torque_cmd` **before the PID and before the plus/minus 15 Nm clamp** (plus/minus 25 Nm since 2026-09-09). This is exactly the
   injection point the backlog doc identifies as correct, and it dodges the failure it warns about:
   scaling after the PID makes the loop servo *measured* torque back up to the unscaled target and
   cancel the scale entirely, silently, whenever `use_pid=1` — which is our configuration.

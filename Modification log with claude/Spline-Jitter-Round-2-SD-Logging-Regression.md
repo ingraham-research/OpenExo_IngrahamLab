@@ -3,8 +3,12 @@
 **Date:** 2026-07-23
 **Scope:** `ExoCode/src/Controller.cpp`, `SDCard/config.ini`, `SDCard/ankleControllers/spline.csv`.
 **Status:** **RESOLVED on-device.** User reports the spline no longer feels jittery after flashing the
-firmware change *and* setting `Node5_x = 20.5` together. Changes are in the working tree, **not
-committed**.
+firmware change *and* setting `Node5_x = 20.5` together. ~~Changes are in the working tree, **not
+committed**.~~ **Updated 2026-09-29:** all of it committed as `8954667` (2026-07-23: the `Controller.cpp` filter
+change, `sdLogEnabled = 0` in `config.ini`, and the `spline.csv` node change), so the "uncommitted" cells in the
+table below are historical. The jitter came back in August on both branches; **Round 3 found it is mechanical**
+(`Jitter-Round-3-Both-Branches-PJMC-PID.md` §5b), and on 2026-08-19 (`9fb77d4`) it was accepted as largely
+normal for this transmission. The SD-logging regression found here is real and still why the logger is off.
 **Read alongside:** `Modification log with claude/Spline-Jitter-Diagnosis.md` (round 1 — the gain
 scheduler and the `percent_gait` int→float fix; this log continues directly from it) and
 `Modification log with claude/SD-Card-Logging-and-End-Trial-Reset.md` (the logger this one indicts).

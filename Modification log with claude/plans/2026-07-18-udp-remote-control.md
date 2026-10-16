@@ -1,5 +1,7 @@
 # UDP Remote Control Implementation Plan
 
+**Status (2026-09-29 audit):** **Implemented** in `5e83374` (2026-07-19); see `Remote-Control-UDP.md`. The checkboxes below were never ticked and do not track progress.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let an external script on the same PC change controller parameters at run time and receive every stream the GUI gets over BLE, by feeding the GUI's existing signal paths through a localhost UDP listener.

@@ -231,6 +231,7 @@ through all of swing and while standing still.**
 **All spline parameter bounds are `enabled = false`** (`ControllerData.cpp:104-122`), unlike PJMC's,
 so `validate_request` skips range checking entirely and the GUI spinbox allows ±100000. Only the
 internal ±15 Nm clamp and the 25 Nm output clamp stand between a typo and a full-scale command.
+*(Since 2026-09-09: ±25 Nm and 30 Nm.)*
 
 ### F8 — The error framework cannot detect anything, but pays for the attempt every cycle  🟡
 

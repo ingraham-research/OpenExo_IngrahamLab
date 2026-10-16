@@ -64,8 +64,6 @@ class SplineAlt_action_map:
         self.body_mass_standard = body_mass_standard    #In kg. The body mass the peak torque magnitudes are quoted for, same idea as the hip exo
         self.verbose = verbose                          #If 1, every action prints as it is applied
 
-        self.last_applied_action = None     #The last torque percentage we successfully wrote to BOTH sides
-
         #Resolve every address once, up front, so a typo in a name fails here at setup rather than
         #half way through an experiment. resolve() turns (joint name, controller name, parameter index) into
         #the numeric address the remote service expects, and raises if any of the three is not one the exo
@@ -96,9 +94,10 @@ class SplineAlt_action_map:
         
         if self.verbose:
             print("Engaging splineAlt at zero torque scale (transparency) before anything else...")
+        #Setup waits for the ack and never gives up (max_retries=None): nothing else may be written until the joint is
+        #on splineAlt at zero, or a later write would do the switch itself and bring up the SD card's non-zero TorqScale
         for addr, joint in zip(self._torque_scale_addr, self.joints):   #Walk every joint we were given, one write each
-            self.exo_link.set_param_confirmed(addr, 0.0, label=f"{joint} TorqScale")
-        self.last_applied_action = 0.0  #This should read as "we just deliberately applied zero"
+            self.exo_link.set_param_confirmed(addr, 0.0, label=f"{joint} TorqScale", max_retries=None)
 
     def apply_torque_magnitudes(self, plantar_nm, dorsi_nm, body_mass=None):
         '''Write the peak torque magnitudes, scaled for the participant's body mass. Session setup only -
@@ -119,50 +118,74 @@ class SplineAlt_action_map:
         #One loop per parameter rather than one loop doing both, so that if a write fails partway through we
         #know exactly which parameter we were on. Each loop is just "every joint, same value"
         for addr, joint in zip(self._plantar_nm_addr, self.joints):
-            self.exo_link.set_param_confirmed(addr, scaled_plantar, label=f"{joint} PlantarNm")
+            self.exo_link.set_param_confirmed(addr, scaled_plantar, label=f"{joint} PlantarNm", max_retries=None)
         for addr, joint in zip(self._dorsi_nm_addr, self.joints):
-            self.exo_link.set_param_confirmed(addr, scaled_dorsi, label=f"{joint} DorsiNm")
+            self.exo_link.set_param_confirmed(addr, scaled_dorsi, label=f"{joint} DorsiNm", max_retries=None)
         return scaling  #Handed back purely so the caller can record the factor its magnitudes actually got
 
     ############################### The experiment loop action #############################################
 
-    def apply_torque_percentage(self, _scale):
-        '''Apply a torque scaling percentage - to both ankles. Returns the value actually applied after clamping.
+    def apply_torque_percentage(self, _scale, stamp=None):
+        '''Request a torque scaling percentage on both ankles. Returns at once with the value that will be sent, after
+        clamping. The link delivers it (resent until acked, or replaced by a newer value) and logs its fate per leg in
+        the machine action log.
 
-            If either side fails to acknowledge, OpenExoLink raises and the caller must decide what to do. 
-            Not that a silence isn't guaranteed to be a failure to implement, but likely something went wrong'''
+        stamp: when the action was produced, on the caller's time.perf_counter() clock, for that log'''
         _scale_clamped = min(max(float(_scale), 0.0), self.torque_percentage_max)  #Floor at 0 as well as cap at m_max - a negative scale would flip both lobes
         if _scale_clamped != float(_scale) and self.verbose:      #Only say something when we actually changed the backend's number
             print(f"  Machine action {_scale:.2f}% clamped to {_scale_clamped:.2f}% by our own safety limit")
 
         for addr, joint in zip(self._torque_scale_addr, self.joints):   #Every joint gets the same scale, so both legs assist identically
-            self.exo_link.set_param_confirmed(addr, _scale_clamped, label=f"{joint} TorqScale")
-
-        #Only updated once BOTH sides have acknowledged. If the second write raised we never reach this line, and
-        #last_applied_action keeps pointing at the last action we know was actually on both legs
-        self.last_applied_action = _scale_clamped
+            self.exo_link.request(addr, _scale_clamped, label=f"{joint} TorqScale", requested=float(_scale), stamp=stamp)
         return _scale_clamped    #The caller should log THIS, not its own scale - the two differ whenever the clamp fired
 
-    def apply_peak_timing(self, lobe, percent_gait):
-        '''Move the peak of one lobe ("plantar" or "dorsi") to a new percent of the gait cycle, on bothsides. 
+    def apply_peak_timing(self, lobe, percent_gait, stamp=None, wait=False):
+        '''Move the peak of one lobe ("plantar" or "dorsi") to a new percent of the gait cycle, on both sides.
             This is what a UDP timing value drives, and it is the ankle equivalent of the hip exo's create_flexion_only_torque_profile(udp_timing_value).
 
-            Unlike the hip exo, where a new timing meant rebuilding the whole spline in Python, here it is one parameter write per leg - the Teensy rebuilds its own nodes from it.'''
+            Unlike the hip exo, where a new timing meant rebuilding the whole spline in Python, here it is one parameter write per leg - the Teensy rebuilds its own nodes from it.
+
+            In the loop this only REQUESTS the write and returns at once. wait=True is for session setup (the fixed
+            plantar/dorsi modes): block until both legs acked, never giving up.'''
         if lobe not in self._peak_time_addr:    #Catch a mistyped lobe name here, before we have written anything to the exo
             raise ValueError(f"lobe must be 'plantar' or 'dorsi', got {lobe!r}")
         for addr, joint in zip(self._peak_time_addr[lobe], self.joints):    #Every joint, same new peak time
-            self.exo_link.set_param_confirmed(addr, float(percent_gait), label=f"{joint} {lobe} peak time")
+            label = f"{joint} {lobe} peak time"
+            if wait:
+                self.exo_link.set_param_confirmed(addr, float(percent_gait), label=label, max_retries=None)
+            else:
+                self.exo_link.request(addr, float(percent_gait), label=label, stamp=stamp)
         return float(percent_gait)  #Hand back what we actually wrote, so the caller logs the value the exo has rather than the one it asked for
 
+    def latest_torque_request(self):
+        '''The torque percentage most recently REQUESTED on both legs, if they agree, else None. Requested rather than
+        confirmed, because the link delivers every request (or keeps warning that it cannot) - so "already asked for
+        zero" is the right test before asking for zero again'''
+        values = [self.exo_link.latest(addr) for addr in self._torque_scale_addr]
+        if values and all(v is not None and v == values[0] for v in values):
+            return values[0]
+        return None
+
     def park_to_transparency(self):
-        '''Drop both sides to zero torque scale. Used on shutdown and whenever something has gone wrong.
-            Best effort only - if the link is already dead this cannot succeed.
-            Returns 1 if both sides acknowledged the park, 0 if it could not be done.'''
+        '''Drop both sides to zero torque scale on the way out, and wait until both legs acknowledged it - however many
+        attempts that takes. Everything else still waiting to be written is dropped first, so only the park goes out.
+        A second Ctrl-C abandons the wait. Returns 1 if both sides acknowledged the park, 0 if not.'''
         try:
-            self.apply_torque_percentage(0.0)  #Goes through the normal path, so the park gets acknowledged like any other action
+            self.exo_link.begin_exit(self._torque_scale_addr)
+            commands = [self.exo_link.request(addr, 0.0, label=f"{joint} TorqScale", force=True)
+                        for addr, joint in zip(self._torque_scale_addr, self.joints)]
+            print("Parking both ankles to zero torque scale (transparency). Ctrl-C again to abandon.")
+            self.exo_link.wait_for(commands)
+        except KeyboardInterrupt:
+            print("park NOT confirmed - abandoned by the operator. The exo keeps whatever it last accepted. "
+                  "Stop the trial from the GUI.")
+            return 0
+        except Exception as e:  #Catch everything else on purpose - this runs in shutdown paths, so it must never raise on its own
+            print(f"WARNING: park NOT confirmed: {e}")
+            print("The exo keeps whatever it last accepted. Stop the trial from the GUI.")
+            return 0
+        if all(c.result == "accepted" for c in commands):
             print("Parked both ankles to zero torque scale (transparency)")
             return 1
-        except Exception as e:  #Catch everything on purpose - this runs in shutdown and error paths, so it must never raise on its own
-            print(f"WARNING: could not park the exo to transparency: {e}")
-            print("The exo is still running whatever it had last. Stop the trial from the GUI.")
-            return 0
+        print(f"WARNING: park NOT confirmed: {[c.result for c in commands]}. Stop the trial from the GUI.")
+        return 0

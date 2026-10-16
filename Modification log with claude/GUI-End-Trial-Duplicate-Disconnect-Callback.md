@@ -5,6 +5,8 @@
 **Scope:** `Python_GUI/services/QtExoDeviceManager.py` - `_mark_disconnected()` and the `_disc_cb` disconnect callback.
 **Status:** **Found, NOT fixed.** Read from source and from the device-manager logs. No code changed. No data loss or
 motor effect identified - the harm is a misleading message that sends the operator looking for a problem that is not there.
+**Re-checked 2026-09-29: still not fixed** (`_disc_cb` -> `_mark_disconnected()` unchanged, `QtExoDeviceManager.py:101-122`,
+`:284`). Since 2026-09-17 the "device-manager log" lines below are in the one session log, `app_crash_*.log`.
 
 ---
 

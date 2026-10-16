@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 **Branch:** `add_remote_control`
-**Status:** awaiting review
+**Status:** ~~awaiting review~~ **Implemented** (2026-09-29 audit) in `5e83374` (2026-07-19), validated on the exo (`60dd3ed`); see `Remote-Control-UDP.md`
 
 ## Goal
 

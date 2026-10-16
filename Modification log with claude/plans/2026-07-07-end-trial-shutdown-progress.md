@@ -1,5 +1,7 @@
 # End-Trial Shutdown Progress + Teensy-Ack Handshake — Implementation Plan
 
+**Status (2026-09-29 audit):** **Implemented** - see `specs/2026-07-07-end-trial-shutdown-progress-design.md`. The checkboxes below were never ticked and do not track progress.
+
 > **For agentic workers:** Implement task-by-task. Steps use checkbox (`- [ ]`) syntax.
 > This spans **on-target firmware** (no host test runner — "verify" = compile in the Arduino IDE +
 > the stated on-device check) and the **Python GUI** (verify = `python -m py_compile` + a simulated
