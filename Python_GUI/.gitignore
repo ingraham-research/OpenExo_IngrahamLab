@@ -166,3 +166,6 @@ Saved_Data/saved_device.txt
 Saved_Data/gui_settings.txt
 Saved_Data/logs/
 Saved_Data/*.log
+
+#External control logs also shouldn't be tracked
+external_control/Logs/
