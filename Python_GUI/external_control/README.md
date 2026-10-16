@@ -28,6 +28,24 @@ change landed.
 It will not start anything on its own. There is no trial start/stop, motor enable or calibration over
 UDP, by design — a human operator drives the GUI throughout.
 
+### Ignore the GUI's "Controller update failed" message while this runs
+
+During a run the GUI will now and then show **"Controller update failed: no device acknowledgement"**,
+and its log will say **"Parameter update timed out waiting for ack"**. **Ignore both. This terminal is
+the one to trust.**
+
+- **Why they appear:** the GUI keeps its own 5-second ACK check, separate from this code. When an ACK is
+  lost (normal, up to about a third of writes on a body-blocked link), that check starts crediting later
+  ACKs to the wrong writes. So its warnings name the wrong write, at the wrong time.
+- **Measured:** none of the 25 such warnings in the 2026-10-16 game-theory run matched a command that
+  failed. The exo's own counters show all 80 commands were applied.
+- **Also:** the GUI's Settings page can show a stale TorqScale during a run.
+- **They are display only.** They send nothing to the exo, and this code never sees them.
+- **What does matter** is this terminal: a no-ACK warning after 5 s, or a reported disconnect.
+
+Left as is on purpose (2026-10-16). The eventual fix is a low-priority TODO in
+`Modification log with claude/ACK-Loss-Investigation.md` §4.
+
 ## The mode menu
 
 Kept as close to the hip exo's `main_control_code.py` as the hardware allows.

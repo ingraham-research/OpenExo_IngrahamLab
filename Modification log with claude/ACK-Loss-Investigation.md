@@ -1,6 +1,6 @@
 # Parameter-update ACK loss: "No ack ... Resending", yet the exo applied it
 
-**Date:** 2026-09-16, extended 2026-09-17/18 · **Branch:** `fix_ack_failures` (= `main_working_branch` b3cff2c + this work)
+**Date:** 2026-09-16, extended 2026-09-17/18; §4 updated 2026-10-16 · **Branch:** `fix_ack_failures` (= `main_working_branch` b3cff2c + this work)
 **Status (2026-09-18): resolved on the host side and validated worn.** V0.2 (§3) was replaced by the
 one-command-on-the-air write scheduler, `OpenExoLink` V0.3 (§3.6), committed as `805a3c2`. A 15-minute worn stress
 run (§3.7) had 0 loop exits and all 2,042 writes resolved. 92/92 tests pass in `Python_GUI/tests`. Firmware
@@ -502,9 +502,51 @@ re-send. The slowest ACK seen is 569 ms. A value echo in the ACK (firmware) woul
   bounds would be applied **and** ACKed as accepted, and nothing could detect it. Not observed.
 - **`stress_test_ble.py`** (1 s, 5 attempts, per-attempt log and tally) still uses the capped blocking write. It was
   re-checked against V0.3 with a fake GUI on 2026-09-18 (§3.6) and has not been re-run on the exo since.
-- **MainWindow's own 5 s pending timer is cosmetic but noisy.** It still logs "Parameter update timed out waiting
-  for ack" for writes that were resent or replaced: 355 times in the §3.7 run.
+- **TODO (low priority, operator's call 2026-10-16): the GUI's own 5 s ACK timer.** The operator decided to
+  leave it as is, because it works and is harmless. Operators are told to ignore its warnings in
+  `Python_GUI/external_control/README.md` ("Running it").
+  - **What it does** (`MainWindow.py:550-672`):
+    - Every write, from the Apply button or from UDP, gets a 5 s timer and a place in a queue for its parameter.
+    - An ACK is credited to the **oldest** write in that queue.
+    - When a timer expires with its write still queued, the GUI logs "Parameter update timed out waiting for ack"
+      and shows "Controller update failed: no device acknowledgement".
+    - It is display only. Nothing is sent, and the remote service never passes it to the external loop.
+  - **Why it misleads:** one lost ACK shifts every later credit by one write, so the warnings name the wrong
+    write, at the wrong time. 355 warnings in the §3.7 run.
+  - **2026-10-16 game-theory run:** replaying the log through this logic reproduced all 25 of its warnings,
+    to the second and leg. None matched a command that failed; the counters show 80 of 80 applied. 16 of
+    the 25 named a write whose ACK did arrive. The Settings page also showed a stale value for 221
+    parameter-seconds.
+  - **The fix, when it is done:**
+    1. Cut the timer from 5 s to 1 s, the same as `ack_timeout`. No ACK for a single write on the air has
+       taken longer than 0.57 s (§3.5), so a later one counts as lost.
+    2. Newest write wins: a new write clears the older pending entries for that parameter, and an ACK credits
+       the newest one. This is about 3 lines in `_queue_pending_param_updates` and `_on_param_update_ack`.
+  - **What to expect from it** (replayed on the 10-16 log):
+
+    | Variant | Warnings | Wrong write named | Stale Settings value |
+    |---|---|---|---|
+    | Current (5 s, oldest credited) | 25 | 16 | 221 parameter-s |
+    | 1 s only | 25 | 0 | 46 parameter-s |
+    | Newest wins only (5 s) | 0 | 0 | 46 parameter-s |
+    | **1 s + newest wins (the TODO)** | **25** | **0** | **46 parameter-s** |
+
+    - The 1 s timer alone already makes every warning name the right write.
+    - It does **not** make the warnings fewer: there is still one per silent write, i.e. one per lost ACK, which
+      is up to a third of writes on a body-blocked link. Each would be true ("no ACK for this write"), but the
+      write was still very likely applied.
+    - Only "newest wins" with the longer timer removes them, because the external loop's own resend or newer
+      value retires the entry first.
+    - Decide which you want before building it.
+  - **Check before shipping a 1 s timer:** the 0.57 s figure is for one write on the air. An Apply-button
+    **bilateral** write puts two on the air, and the only ACKs ever slower than 1 s came from July/August
+    bilateral GUI writes (§2.4). Test a bilateral Apply, or keep a longer timer for bilateral writes.
 - **Explained, 2026-09-16 (§3.4.1):** the "silent timeouts on a clean benchtop link" are ACKs the Nano sent that
   never reached the GUI. Why the Nano or Windows drops them is still unknown, likely a per-connection-event limit.
-- **`game_theory_mode` still has not run on the exo.** V0.3 changes its write path too: TorqScale is now a simple,
-  non-blocking write.
+- **`game_theory_mode` ran worn on the exo on 2026-10-16** (AMP lab desktop, treadmill, 125 s). Data:
+  `Test results/20261016 OpenExo gametheory/` on disk; that folder is git-ignored.
+  - **Writes:** 80 sent, 25 ACKs lost (31%), all lost on the Nano → GUI hop. The counters show 80 of 80
+    commands applied. 0 garbled, 0 mis-paired, latency median 203 / max 446 ms.
+  - **Torque:** every write without an ACK shows up in desired torque.
+  - **Link:** RT stream 46 rows/s, because the treadmill is far from the PC and the wearer faced it. The
+    operator expects that on treadmill runs and cares only about command delivery.

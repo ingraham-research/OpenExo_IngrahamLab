@@ -14,3 +14,5 @@ Libraries/ArduinoBLE/extras/arduino-ble-parser.py
 Python_GUI/external_control/Logs/Stress test/
 Python_GUI/external_control/Logs/Active Test/
 
+#Everything in Test results (the folder name has a space, not an underscore)
+Test results/
