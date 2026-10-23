@@ -272,3 +272,41 @@ tightens if `PlantarNm` is actually raised toward 25.
    line giving the joint-Nm asked for, and clamps. It does not fault or cut out. Watch for that line
    over USB when first running a 25 Nm profile — it is the direct evidence of whether 5 Nm of PID
    authority is enough.
+
+## One leg dead in OP mode: lost handshake row + prefix fallback (FIXED in code 2026-10-22)
+
+**Symptom (2026-10-21, AMP lab desktop):** OP mode engaged, both ACKs came back, only the left leg assisted.
+
+**Cause, from `Test results/20261021 Debugging/app_crash_20261021_171411.log`:** the 17:23 connection's
+handshake lost Ankle(R)'s splineAlt row (the GUI logged it). `_resolve_controller_row` then fell back to a
+prefix match meant for the 9-character name truncation, and `"splinealt".startswith("spline")` picked the
+12-node Spline controller, id 12. Both runs on that connection wrote `[36, 12, idx]` for the right leg and
+`[68, 13, idx]` for the left. The ACKs were genuine — (36, 12, idx) is a real address — so the strict ack
+matching only proved the exo stored what the script chose. After a reconnect the matrix was complete and the
+17:28 run used 13 on both legs.
+
+**Why the leg was dead and not worse — luck.** The writes landed in Spline's node array: the engage write
+(`TorqScale` 0) set node 6's x to 0, which breaks Spline's strict x-order, so it rejects the profile and
+outputs 0 (`Controller.cpp:1105`). A different collision could have left a valid profile running.
+
+**Fix (`OpenExoLink_utilities.py`, V0.3.1):** the fallback now accepts only an advertised name of exactly
+`HANDSHAKE_NAME_LENGTH` (9) characters that starts the requested one, and only if exactly one does. Anything
+else raises at `SplineAlt_action_map` setup, before any write, with "reconnect the GUI to the exo, then
+restart". Same rule for parameter names (the firmware cuts those to 9 too, `ListCtrlParams.cpp:574`).
+Tests in `tests/test_openexolink.py`: the 10-21 case (lost splineAlt row, spline present) must raise, a cut
+"zhangColl" must still resolve, and a shorter parameter name or two equal cut names must raise. The three
+refusal tests fail against the old resolver.
+
+## Exit park moved to zeroTorque, PID off (2026-10-22)
+
+The user's call. `park_to_transparency()` used to write splineAlt `TorqScale` = 0, which leaves splineAlt's
+PID running against the torque sensor and leaves the joint on splineAlt with this run's leftovers (a moved
+peak timing, say) for the next run in the same trial. It now writes zeroTorque `use_pid` = 0 on both
+ankles: one write per leg, which switches the joint to zeroTorque, loads `zeroTorque.csv`, then sets the flag
+— so the PID is off whatever the SD card holds. That matches the ankle's boot state
+(`ankleDefaultController = zeroTorque`), and the next run's engage switches back to splineAlt and reloads
+`splineAlt.csv` fresh. Return values, the second-Ctrl-C abandon and the skip-on-`link_down` path are
+unchanged. The in-loop UDP "disable assistance" (TorqScale 0, PID still on) is deliberately untouched.
+
+**Host-tested only** (102 GUI tests pass, `test_receive_UDP.py` excluded because it needs the lab desktop's
+hip-exo path). Not yet run on the exo.

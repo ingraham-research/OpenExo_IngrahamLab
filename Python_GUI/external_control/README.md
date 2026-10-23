@@ -100,7 +100,12 @@ costs a BLE round trip rather than being a local variable:
   as a failed attempt and is resent — or replaced, if a newer value for the same parameter is already
   waiting. Every ack seen on the exo up to 2026-09-18 arrived within 0.57 s.
 - **Confirm the controller names.** The code offers to print the matrix the exo advertised at startup.
-  Names are truncated by the BLE handshake, so check them rather than assuming.
+  Names are truncated by the BLE handshake, so check them rather than assuming. If the handshake lost a
+  controller's row (it happens on about 1 in 5 connections), the code now stops at startup, before writing
+  anything, and says to reconnect the GUI. Do that and restart. Before 2026-10-22 a lost splineAlt row
+  silently sent that leg's writes to `spline` instead.
+- **Ctrl-C parks both ankles on `zeroTorque` with its PID off** (the boot state), not on splineAlt at zero
+  torque scale. The next run's engage switches back to splineAlt and reloads `splineAlt.csv` fresh.
 
 ## Dependencies
 

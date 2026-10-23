@@ -81,10 +81,11 @@ def main():
         write_log.close()
         return
 
-    #SAFETY GUARD. resolve() falls back to PREFIX matching when the exact controller name is not in the
-    #handshake matrix (BLE truncates names to 9 characters). "splinealt".startswith("spline") is True,
-    #so a truncated name could silently resolve to the 12-node `spline` controller instead - where
-    #index 10 is node6_x, NOT TorqScale. Writing 0 there would change the spline shape rather than
+    #SAFETY GUARD. resolve() used to fall back to PREFIX matching on any shorter name when the exact
+    #controller name was not in the handshake matrix, and "splinealt".startswith("spline") is True - so
+    #a lost splineAlt row resolved to the 12-node `spline` controller instead (it did, on 2026-10-21), where
+    #index 10 is node6_x, NOT TorqScale. Since 2026-10-22 resolve() only accepts a name cut to exactly 9
+    #characters with a single match, so this guard should never fire; it stays as a second check. Writing 0 there would change the spline shape rather than
     #zero the torque, and this script's whole safety claim rests on index 10 meaning TorqScale.
     #So verify what we actually resolved to, by name, and refuse to run if it is anything else.
     for (joint_id, controller_id, param_index), joint in zip(addresses, joints_to_drive):

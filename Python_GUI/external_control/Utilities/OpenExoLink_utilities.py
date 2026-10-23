@@ -24,6 +24,7 @@
 #V0.2 2026 Sep: garbled-ack resend, per-attempt logging, attempt bookkeeping, 1 s / 5 attempt defaults
 #V0.3 2026 Sep 18: one command on the air, non-blocking request()/service(), newer values replace resends, no-ack
 #   warnings instead of giving up, machine action log per command, status frames caught during set_param replies
+#V0.3.1 2026 Oct 22: the truncated-name fallback only accepts a name cut to exactly 9 characters, and only one match
 
 import os
 import socket
@@ -44,6 +45,12 @@ from WriteScheduler_utilities import WriteScheduler  # noqa: E402
 #matrix (and these two constants) are the real source of truth.
 LEFT_ANKLE_JOINT_ID = 68
 RIGHT_ANKLE_JOINT_ID = 36
+
+#The BLE handshake cuts every controller and parameter name to 9 characters (ExoCode/src/ListCtrlParams.cpp copies it
+#into a MAX_STRING_LENGTH 10 cell), so "zhangCollins" arrives as "zhangColl". Only a name exactly this long can be a
+#cut one - a shorter name is whole. Accepting ANY shorter prefix once sent every "splineAlt" write to "spline", after
+#the handshake lost the splineAlt row (2026-10-21)
+HANDSHAKE_NAME_LENGTH = 9
 
 #How long a command waits for its ack before it counts as a failed attempt. Every ack seen on the exo up to
 #2026-09-17 came within 0.57 s (the slowest when the Nano's outgoing notification queue was backed up)
@@ -265,11 +272,15 @@ class OpenExoLink:
         for row in joint_rows:
             if str(row[2]).strip().lower() == target:
                 return row
-        #The BLE handshake truncates long names, so fall back to a prefix match before giving up
-        for row in joint_rows:
-            if target.startswith(str(row[2]).strip().lower()):
-                return row
-        raise OpenExoLinkError(f"Unknown controller {controller!r}; this joint advertised: {names}")
+        #The BLE handshake truncates long names, so a name cut to exactly HANDSHAKE_NAME_LENGTH may be the start of ours
+        matches = _cut_name_matches(target, names)
+        if len(matches) == 1:
+            return joint_rows[matches[0]]
+        if matches:
+            raise OpenExoLinkError(f"Controller {controller!r} is ambiguous; it could be any of "
+                                   f"{[names[i] for i in matches]}")
+        raise OpenExoLinkError(f"Unknown controller {controller!r}; this joint advertised: {names}. If it should be "
+                               f"there, the handshake lost its row - reconnect the GUI to the exo, then restart")
 
     def _resolve_param_index(self, param, controller_row):
         params = controller_row[4:] if len(controller_row) > 4 else []
@@ -283,9 +294,12 @@ class OpenExoLink:
             if str(name).strip().lower() == target:
                 return i
         #Same truncation problem as controller names
-        for i, name in enumerate(params):
-            if target.startswith(str(name).strip().lower()):
-                return i
+        matches = _cut_name_matches(target, params)
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise OpenExoLinkError(f"Parameter {param!r} is ambiguous; controller {controller_row[2]!r} has "
+                                   f"{[params[i] for i in matches]}")
         raise OpenExoLinkError(f"Unknown parameter {param!r}; controller {controller_row[2]!r} advertised: {list(params)}")
 
     ############################### Writing parameters #############################################
@@ -492,6 +506,17 @@ class OpenExoLink:
 def _is_int(v):
     '''bool is a subclass of int, so True/False must not be mistaken for an id'''
     return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _cut_name_matches(target, names):
+    '''Indices of the advertised names that could be `target` cut short by the handshake: exactly HANDSHAKE_NAME_LENGTH
+    characters long, and the start of it. `target` is already stripped and lowercased'''
+    matches = []
+    for i, name in enumerate(names):
+        name = str(name).strip().lower()
+        if len(name) == HANDSHAKE_NAME_LENGTH and len(target) > HANDSHAKE_NAME_LENGTH and target.startswith(name):
+            matches.append(i)
+    return matches
 
 
 def _joint_display_name(row):

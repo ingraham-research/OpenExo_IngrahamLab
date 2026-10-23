@@ -109,13 +109,16 @@ CLASS OpenExoLink(host, port, timeout, ack_timeout, max_retries, verbose, logfil
     _resolve_controller_row(c, joint_rows):
         if int: find the row whose row[3] == c
         else: case-insensitive match on row[2]
-              THEN fall back to a prefix match  # the BLE handshake truncates long names
-        else raise, listing the controller names on this joint
+              THEN accept an advertised name of EXACTLY 9 characters that starts ours, if only one does
+              # the BLE handshake cuts names to 9 characters ("zhangCollins" -> "zhangColl"). A shorter
+              # name is whole: matching any prefix once sent every "splineAlt" write to "spline", after
+              # the handshake lost the splineAlt row (2026-10-21)
+        else raise, listing the controller names on this joint, and saying a lost row needs a GUI reconnect
 
     _resolve_param_index(p, row):
         params = row[4:]
         if int: bounds-check against len(params) and return
-        else: case-insensitive match, then prefix match  # same truncation problem
+        else: case-insensitive match, then the same 9-character cut-name rule  # same truncation
         else raise, listing the parameter names
 
 
@@ -267,6 +270,7 @@ CONSTANTS  # from ExoCode/src/ControllerData.h, namespace controller_defs::splin
     SPLINEALT_PLANTAR_DWELL_TIME = 5     SPLINEALT_USE_PERCENT_GAIT   = 12
     SPLINEALT_PLANTAR_FALL_TIME  = 6     SPLINEALT_USE_PID            = 13
     BODY_MASS_STANDARD = 75              SPLINEALT_P/I/D_GAIN         = 14/15/16
+    ZERO_TORQUE_CONTROLLER = "zeroTorque"   ZERO_TORQUE_USE_PID = 0   # controller_defs::zero_torque - the park only
 
     # firmware bounds (ControllerData.cpp, spline_alt_bounds): magnitudes +-50 Nm, every
     # time/percent parameter 0-100, the three flags integer-only 0 or 1
@@ -275,8 +279,9 @@ CLASS SplineAlt_action_map(exo_link, body_mass_standard, joints, controller,
                            torque_percentage_max, verbose)
 
     __init__:
-        resolve EVERY address up front - TorqScale, PlantarNm, DorsiNm, and BOTH peak times, per joint
-        # so a name typo fails here at setup, not half way through an experiment
+        resolve EVERY address up front - TorqScale, PlantarNm, DorsiNm, and BOTH peak times, per joint,
+        plus zeroTorque's PID flag for the park
+        # so a name typo, or a row the handshake lost, fails here at setup, not half way through an experiment
 
     engage_controller_safely():
         write TorqScale = 0 to both legs, FIRST, before anything else - blocking, and NEVER giving up
@@ -327,10 +332,13 @@ CLASS SplineAlt_action_map(exo_link, body_mass_standard, joints, controller,
         # is the right test for "do I need to ask for zero again?" before spending a BLE round trip
 
     park_to_transparency() -> 1 if both legs acknowledged it:
-        begin_exit(the two TorqScale addresses)   # everything else still waiting is dropped and logged
-                                                  # "unconfirmed at exit". Only the park goes out
-        request TorqScale = 0 on both legs, force=True     # force: send it even if 0 was the last
-                                                           # value requested
+        begin_exit(the two zeroTorque PID flag addresses)  # everything else still waiting is dropped and
+                                                           # logged "unconfirmed at exit". Only the park goes out
+        request zeroTorque use_pid = 0 on both legs, force=True
+        # NOT splineAlt TorqScale = 0: that still runs splineAlt's PID. The write switches the joint to
+        # zeroTorque (loading zeroTorque.csv) and then sets the flag, so the PID is off whatever the SD
+        # card holds. It is the ankle's boot state, and the next run's engage write switches back to
+        # splineAlt and reloads splineAlt.csv fresh, rather than inheriting this run's leftovers
         wait_for(those two commands)              # however many attempts that takes
         on a second Ctrl-C, on any exception, or on any result that is not "accepted": say plainly that
         the exo is STILL RUNNING whatever it had last and that the operator must end the trial from the

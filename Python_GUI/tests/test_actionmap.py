@@ -14,6 +14,7 @@ am_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(am_mod)
 
 L_SCALE, R_SCALE = (68, 13, 10), (36, 13, 10)
+L_PARK, R_PARK = (68, 2, 0), (36, 2, 0)        # zeroTorque, PID flag
 
 
 class FakeLink:
@@ -27,7 +28,7 @@ class FakeLink:
         self.wait_raises = None
 
     def resolve(self, joint, controller, param):
-        return ({"Ankle(L)": 68, "Ankle(R)": 36}[joint], 13, param)
+        return ({"Ankle(L)": 68, "Ankle(R)": 36}[joint], {"splineAlt": 13, "zeroTorque": 2}[controller], param)
 
     def set_param_confirmed(self, address, value, label="", max_retries="link default"):
         self.calls.append(("confirmed", address, value, label, max_retries))
@@ -99,11 +100,11 @@ def test_latest_torque_request(amap):
     assert m.latest_torque_request() is None             # the legs disagree
 
 
-def test_park_keeps_only_torque_scale_and_waits_for_both(amap, capsys):
+def test_park_switches_to_zero_torque_with_pid_off_and_waits_for_both(amap, capsys):
     m, link = amap
     assert m.park_to_transparency() == 1
-    assert link.exit_keep == [L_SCALE, R_SCALE]
-    assert [(c[1], c[2], c[6]) for c in link.calls] == [(L_SCALE, 0.0, True), (R_SCALE, 0.0, True)]
+    assert link.exit_keep == [L_PARK, R_PARK]
+    assert [(c[1], c[2], c[6]) for c in link.calls] == [(L_PARK, 0.0, True), (R_PARK, 0.0, True)]
     assert "Parked both ankles" in capsys.readouterr().out
 
 

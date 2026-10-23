@@ -330,3 +330,40 @@ def test_a_device_error_is_ignored(make_link, capsys):
     link.set_param_confirmed(ADDR, 50.0)
     assert link.link_down == 0
     assert "Not connected" not in capsys.readouterr().out
+
+
+############################### Name resolution #############################################
+
+def _rows(*controllers):
+    """Handshake matrix rows for Ankle(R): one (name, id, param names) per controller, laid out like get_matrix()."""
+    return [["Ankle(R) (36)", "36", name, str(cid)] + list(params) for name, cid, params in controllers]
+
+
+def test_a_lost_splinealt_row_is_not_resolved_to_spline(make_link):
+    # 2026-10-21: the handshake lost Ankle(R)'s splineAlt row, and "splinealt".startswith("spline") sent every
+    # right-leg write to the 12-node spline controller, where index 10 is a node x
+    gui, link, _ = make_link()
+    link.matrix = _rows(("zeroTorque", 2, ["use_pid"]), ("spline", 12, [f"n{i}" for i in range(30)]))
+    with pytest.raises(link_mod.OpenExoLinkError, match="reconnect the GUI"):
+        link.resolve("Ankle(R)", "splineAlt", 10)
+
+
+def test_a_name_cut_by_the_handshake_still_resolves(make_link):
+    gui, link, _ = make_link()
+    link.matrix = _rows(("zhangColl", 4, ["PeakTorq", "PlantRise"]))
+    assert link.resolve("Ankle(R)", "zhangCollins", 1) == (36, 4, 1)
+    assert link.resolve("Ankle(R)", "zhangCollins", "PlantRiseTime") == (36, 4, 1)
+
+
+def test_a_shorter_parameter_name_is_not_taken_for_a_cut_one(make_link):
+    gui, link, _ = make_link()
+    link.matrix = _rows(("splineAlt", 13, ["Peak", "PeakTime"]))
+    with pytest.raises(link_mod.OpenExoLinkError, match="Unknown parameter"):
+        link.resolve("Ankle(R)", "splineAlt", "PeakTorque")
+
+
+def test_an_ambiguous_cut_name_is_refused(make_link):
+    gui, link, _ = make_link()
+    link.matrix = _rows(("constantT", 5, ["a"]), ("constantT", 6, ["a"]))
+    with pytest.raises(link_mod.OpenExoLinkError, match="ambiguous"):
+        link.resolve("Ankle(R)", "constantTorque", 0)

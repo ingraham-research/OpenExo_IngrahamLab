@@ -28,14 +28,20 @@ SPLINEALT_P_GAIN = 14               #The gains for that loop. splineAlt.csv ship
 SPLINEALT_I_GAIN = 15
 SPLINEALT_D_GAIN = 16
 
+#zeroTorque, which only the park on the way out writes to. Index source is ExoCode/src/ControllerData.h (namespace
+#controller_defs::zero_torque)
+ZERO_TORQUE_CONTROLLER = "zeroTorque"   #As the exo advertises it (ExoCode/src/ParseIni.h). Also the ankle's boot controller in config.ini
+ZERO_TORQUE_USE_PID = 0                 #Flag for closed loop torque control. With it off the motor is simply sent 0 Nm
+
 #"See below" on the dwell line: the Teensy builds each lobe as (peak - rise, 0) (peak, amp) (peak + dwell, amp)
 #(peak + dwell + fall, 0), and PCHIP rejects two nodes sharing an x. A zero DWELL simply collapses the lobe to
 #three nodes, which is the normal no-plateau case. A zero RISE or FALL instead duplicates an x, the whole
 #profile is thrown away and the controller commands ZERO torque - deliberately, because the alternative would
 #have been full peak torque from 0 percent gait onward. So never write 0 to a rise or a fall time.
 #
-#Note this class only ever writes indices 0, 1, 2, 3 and 10. Everything else is left at whatever splineAlt.csv
-#loaded, so the gains and the flags stay a GUI/SD card decision rather than something the backend can move.
+#Note this class only ever writes splineAlt indices 0, 1, 2, 3 and 10, plus zeroTorque's PID flag in the park on the
+#way out. Everything else is left at whatever splineAlt.csv loaded, so the gains and the flags stay a GUI/SD card
+#decision rather than something the backend can move.
 
 
 
@@ -76,6 +82,8 @@ class SplineAlt_action_map:
             "plantar": [exo_link.resolve(j, controller, SPLINEALT_PEAK_PLANTAR_TIME) for j in self.joints],
             "dorsi": [exo_link.resolve(j, controller, SPLINEALT_PEAK_DORSI_TIME) for j in self.joints],
         }
+        #The park, on the way out. Resolved here as well, so a zeroTorque row the handshake lost also fails at setup
+        self._park_addr = [exo_link.resolve(j, ZERO_TORQUE_CONTROLLER, ZERO_TORQUE_USE_PID) for j in self.joints]
 
         if self.verbose:    #Print what we resolved, so a wrong joint or controller name shows up here rather than mid-trial
             print(f"Action map ready: {controller} on {self.joints}, machine action capped at {torque_percentage_max}%")
@@ -167,14 +175,20 @@ class SplineAlt_action_map:
         return None
 
     def park_to_transparency(self):
-        '''Drop both sides to zero torque scale on the way out, and wait until both legs acknowledged it - however many
-        attempts that takes. Everything else still waiting to be written is dropped first, so only the park goes out.
-        A second Ctrl-C abandons the wait. Returns 1 if both sides acknowledged the park, 0 if not.'''
+        '''Switch both sides to zeroTorque with its PID OFF on the way out, and wait until both legs acknowledged it -
+        however many attempts that takes. Everything else still waiting to be written is dropped first, so only the
+        park goes out. A second Ctrl-C abandons the wait. Returns 1 if both sides acknowledged the park, 0 if not.
+
+        Why not splineAlt at TorqScale 0: that still runs splineAlt's PID against the torque sensor. And leaving
+        splineAlt means the next run's engage write switches back to it and reloads splineAlt.csv fresh, instead of
+        inheriting whatever this run left behind (a moved peak timing, say). It is also the ankle's boot state.
+        Writing the PID flag switches the joint and loads zeroTorque.csv first, then sets the flag, so the PID ends up
+        off whatever the SD card holds'''
         try:
-            self.exo_link.begin_exit(self._torque_scale_addr)
-            commands = [self.exo_link.request(addr, 0.0, label=f"{joint} TorqScale", force=True)
-                        for addr, joint in zip(self._torque_scale_addr, self.joints)]
-            print("Parking both ankles to zero torque scale (transparency). Ctrl-C again to abandon.")
+            self.exo_link.begin_exit(self._park_addr)
+            commands = [self.exo_link.request(addr, 0.0, label=f"{joint} zeroTorque PID flag", force=True)
+                        for addr, joint in zip(self._park_addr, self.joints)]
+            print("Parking both ankles on zeroTorque with PID off (transparency). Ctrl-C again to abandon.")
             self.exo_link.wait_for(commands)
         except KeyboardInterrupt:
             print("park NOT confirmed - abandoned by the operator. The exo keeps whatever it last accepted. "
@@ -185,7 +199,7 @@ class SplineAlt_action_map:
             print("The exo keeps whatever it last accepted. Stop the trial from the GUI.")
             return 0
         if all(c.result == "accepted" for c in commands):
-            print("Parked both ankles to zero torque scale (transparency)")
+            print("Parked both ankles on zeroTorque with PID off (transparency)")
             return 1
         print(f"WARNING: park NOT confirmed: {[c.result for c in commands]}. Stop the trial from the GUI.")
         return 0
