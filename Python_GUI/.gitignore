@@ -168,4 +168,4 @@ Saved_Data/logs/
 Saved_Data/*.log
 
 #External control logs also shouldn't be tracked
-external_control/Logs/
+external_control/External Loop logs/

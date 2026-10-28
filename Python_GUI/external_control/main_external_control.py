@@ -73,10 +73,10 @@ def main():
     #For debugging
     use_loop_time = 1  #If 1, all log timestamps within one loop iteration come from the loop start time, so everything logged in a cycle shares one timestamp
     
-    #Data logging
-    log_m_action_enabled = 1      #Whether we log every machine action (torque percentage and peak timing)
-    log_param_write_enabled = 1   #Whether we log every parameter write and how the exo answered it
-    log_h_action_enabled = 1    #Whether we log every human action collection and its average
+    #Data logging. The GUI already saves the exo data to its own CSV, so these only cover what THIS code does
+    log_m_action_enabled = 1      #Whether we log every machine action (torque percentage and peak timing). Game theory mode only
+    log_param_write_enabled = 1   #Whether we log every parameter write and how the exo answered it. Every mode
+    log_h_action_enabled = 1    #Whether we log every human action collection and its average. Game theory mode only
 
     #Connection to the OpenExo GUI. Localhost only unless the GUI's RemoteConfig was deliberately widened
     gui_host = "127.0.0.1"
@@ -112,17 +112,8 @@ def main():
     peak_timing_min = 0
     peak_timing_max = 100
 
-    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Logs", "Active Test")
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "External Loop logs", "Active Test")
     os.makedirs(log_dir, exist_ok=True)   # create if not exist
-
-    if log_m_action_enabled:
-        action_log_file = open(os.path.join(log_dir, "Machine_action_log.txt"), "w", buffering=1)  # Line-buffered
-        #One row per COMMAND (one leg, one parameter), written by OpenExoLink once its fate is known. Python time is when
-        #it was requested. Result: accepted, superseded (no ACK), replaced before sending, rejected (<reason>),
-        #gui_refused, unconfirmed at exit
-        print(f"Python time,Elapsed time,Target,Value requested,Value sent,Result,Attempts", file=action_log_file)
-    else:
-        action_log_file = None
 
     #Param_write_log keeps track of what THIS code tried to write into GUI (so all commands from backend).
     #One row per ATTEMPT. Result: accepted, no_ack, garbled_ack, rejected (<reason>), gui_refused, gave_up
@@ -133,15 +124,10 @@ def main():
     else:
         write_log_file = None
 
-    if log_h_action_enabled:
-        h_action_log_file = open(os.path.join(log_dir, "Human_action_log.txt"), "w", buffering=1)  # Line-buffered
-        print(f"Python time,Elapsed time,Strides collected,Averaged human action", file=h_action_log_file)
-    else:
-        h_action_log_file = None
-
-    #Connect to the GUI's remote service. This does not touch the exo - it only checks the GUI is there
+    #Connect to the GUI's remote service. This does not touch the exo - it only checks the GUI is there.
+    #The machine action log is attached later, once we know whether this is a game theory session
     OpenExo_link = OpenExoLink(host=gui_host, port=gui_port, ack_timeout=ack_timeout, verbose=1,
-                               logfile=write_log_file, action_logfile=action_log_file)
+                               logfile=write_log_file)
     try:
         OpenExo_link.connect(matrix_timeout=10.0)
     except OpenExoLinkError as e:
@@ -253,6 +239,21 @@ def main():
             input("Invalid input. Please restart and retry - code exiting.")
             OpenExo_link.close()
             return
+
+    #Machine and human action logs are the game theory record, so only that mode creates them. Any other mode
+    #saves just the Param_write_log above
+    if game_theory_mode:
+        if log_m_action_enabled:
+            action_log_file = open(os.path.join(log_dir, "Machine_action_log.txt"), "w", buffering=1)  # Line-buffered
+            #One row per COMMAND (one leg, one parameter), written by OpenExoLink once its fate is known. Python time is when
+            #it was requested. Result: accepted, superseded (no ACK), replaced before sending, rejected (<reason>),
+            #gui_refused, unconfirmed at exit
+            print(f"Python time,Elapsed time,Target,Value requested,Value sent,Result,Attempts", file=action_log_file)
+            OpenExo_link.action_logfile = action_log_file   #The link was built before the mode was known
+
+        if log_h_action_enabled:
+            h_action_log_file = open(os.path.join(log_dir, "Human_action_log.txt"), "w", buffering=1)  # Line-buffered
+            print(f"Python time,Elapsed time,Strides collected,Averaged human action", file=h_action_log_file)
 
     #Body mass, used to scale the peak torque magnitudes. Same convention as the hip exo
     body_mass_participant = input(f"Please input participant's body mass in kg (enter for {body_mass_standard}):\n")
@@ -497,11 +498,11 @@ def main():
 
         OpenExo_link.close()
 
-        if log_m_action_enabled:
+        if game_theory_mode and log_m_action_enabled:
             action_log_file.close()
         if log_param_write_enabled:
             write_log_file.close()
-        if log_h_action_enabled:
+        if game_theory_mode and log_h_action_enabled:
             h_action_log_file.close()
 
         print("NOTE: this code never started the trial and cannot end it. End the trial from the GUI.")

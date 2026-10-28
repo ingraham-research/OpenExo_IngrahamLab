@@ -384,6 +384,10 @@ IF 1:   game_theory_mode = 0
         ""       -> both magnitudes 0, zero_torque_mode = 1
         anything else -> "Invalid input. Please restart and retry", exit
 
+IF game_theory_mode:  open Machine_action_log and Human_action_log in External Loop logs/Active Test,
+                      each only if its flag is on, and attach the machine log to exo_link
+                      # the game theory record. Param_write_log was opened before the menu, for every mode
+
 ask body mass (enter -> 75, scaling factor 1)
 
 IF zero_torque_mode:  torque percentage = 0, skip the prompt

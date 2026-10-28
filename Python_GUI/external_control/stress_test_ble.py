@@ -44,7 +44,7 @@ def main():
     ack_timeout = 1.0             #How long we wait for the exo to acknowledge a write before resending
     max_write_retries = 5         #Attempts before a write is declared lost. Silence and garbled acks both use one up
 
-    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Logs", "Stress test")
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "External Loop logs", "Stress test")
     os.makedirs(log_dir, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(log_dir, f"stress_{stamp}.txt")   #Timestamped, so a run never overwrites the last one
