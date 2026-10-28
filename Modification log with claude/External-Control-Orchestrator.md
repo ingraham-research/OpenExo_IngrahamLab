@@ -92,6 +92,7 @@ Kept as close to the hip's as the hardware allows.
 2  game theory backend      human action = treadmill speed (UDP 5004), machine action = torque percentage
 1  everything else
      OP        run the profile shape already on the SD card
+     PJMC      run PJMC instead of splineAlt, scaled exactly like OP (see the 2026-10-28 section)
      plantar   plantarflexion only, you pick the peak timing (dorsi lobe disabled)
      dorsi     dorsiflexion only, you pick the peak timing (plantar lobe disabled)
      udp       hold at zero torque, then follow peak timings arriving on UDP 5003
@@ -310,3 +311,35 @@ unchanged. The in-loop UDP "disable assistance" (TorqScale 0, PID still on) is d
 
 **Host-tested only** (102 GUI tests pass, `test_receive_UDP.py` excluded because it needs the lab desktop's
 hip-exo path). Not yet run on the exo.
+
+## PJMC as a mode-1 profile option (2026-10-28)
+
+The user's request: PJMC as a possibly better "OP". Choosing `PJMC` in the mode-1 menu runs PJMC instead of
+splineAlt, and behaves like OP for the operator: body mass scaling from 75 kg, the familiarization
+percentage, the engage prompt, the loop and the Ctrl-C park are all unchanged. The new setting is
+`PJMC_max_plantarflexion_torque = 15.0` in `main_external_control.py`, next to `plantar_peak_torque`.
+
+How it works (`Utilities/ActionMap_utilities.py`, new `PJMC_action_map`, same method names as
+`SplineAlt_action_map` so `main` builds one or the other and never asks which):
+
+- **The setting is PJMC's stance torque** (index 0), not its peak. PJMC asks for stance torque x
+  (min(toe FSR, 1.2) - threshold) / (1 - threshold), which tops out at 1.27-1.29 x stance torque when the FSR
+  saturates. The old PJMC logs topped out at -19.3 Nm, consistent with a stance torque of 15, so 15 is close to
+  splineAlt's 20 Nm at 75 kg.
+- **No torque scale, so the percentage goes into the magnitude:** stance torque = setting x mass/75 x percent/100.
+  `apply_torque_magnitudes` only stores the scaled value and writes nothing. With no TorqScale to hold PJMC silent,
+  writing it at setup would start assisting before the operator pressed start. The first `apply_torque_percentage`
+  sends it.
+- **Engage** writes stance torque = 0 first, blocking, which switches both ankles to PJMC (loading `PJMC.csv`).
+- **Park** is the same zeroTorque/PID-off park. Its body moved into one module function, `_park_to_zero_torque`,
+  that both maps call.
+- PJMC's gains and flags stay whatever `PJMC.csv` loads (P 6 / I 0 / D 0.03, gain scheduling on). Nothing writes them.
+- A non-zero dorsi magnitude raises (PJMC has no dorsi lobe), and so does a percentage before the magnitudes.
+- Not in game theory mode, by decision. Since the loop already goes through `apply_torque_percentage`, that is
+  later a matter of building `PJMC_action_map` there too.
+- Side note found while reading PJMC: its `kf` adaptation is computed every stride but never applied
+  (`kf_cmd` is unused in `ProportionalJointMoment::calc_motor_cmd`), so PJMC does no per-stride gain adaptation.
+
+**Host-tested only.** There are 8 new `PJMC_action_map` tests in `Python_GUI/tests/test_actionmap.py`. They use the same
+in-memory fake link as the splineAlt tests, so nothing can reach the GUI or the exo. The full GUI suite passes
+(110, `test_receive_UDP.py` excluded as before). The menu branch in `main` is input-driven and has no test. Not yet run on the exo.

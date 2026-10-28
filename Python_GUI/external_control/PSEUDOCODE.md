@@ -7,7 +7,7 @@ follows the four real files exactly:
 |---|---|
 | 1. `OpenExoLink` | `Utilities/OpenExoLink_utilities.py` |
 | 1b. `WriteScheduler` | `Utilities/WriteScheduler_utilities.py` |
-| 2. `SplineAlt_action_map` | `Utilities/ActionMap_utilities.py` |
+| 2. `SplineAlt_action_map`, 2b. `PJMC_action_map` | `Utilities/ActionMap_utilities.py` |
 | 3. `main` | `main_external_control.py` |
 
 ---
@@ -343,6 +343,48 @@ CLASS SplineAlt_action_map(exo_link, body_mass_standard, joints, controller,
         on a second Ctrl-C, on any exception, or on any result that is not "accepted": say plainly that
         the exo is STILL RUNNING whatever it had last and that the operator must end the trial from the
         GUI, and return 0. Never pretend it was parked.
+        # The body lives in one module function, _park_to_zero_torque(exo_link, park_addr, joints), which
+        # PJMC_action_map below calls too - so the two maps can never park differently
+```
+
+## 2b. `PJMC_action_map` — the same calls, for PJMC
+
+PJMC asks for stance torque x rescaled toe FSR while the toe is down, and nothing in swing. It has no
+torque scale and no peak timing, so the percentage is folded into the stance torque itself. Same method
+names as `SplineAlt_action_map`, so `main` builds one or the other and never asks which it got.
+
+```
+CONSTANTS  # from ExoCode/src/ControllerData.h, namespace controller_defs::proportional_joint_moment
+    PJMC_CONTROLLER = "PJMC"     PJMC_STANCE_MAX = 0
+    # the rescaled FSR tops out at 1.27-1.29 when it saturates (depends on the FSR threshold), so real peaks run ~28% above stance torque.
+    # firmware bounds (ControllerData.cpp, pjmc_bounds): stance torque 0-100
+
+CLASS PJMC_action_map(exo_link, body_mass_standard, joints, torque_percentage_max, verbose)
+
+    __init__:
+        resolve stance torque per joint, plus zeroTorque's PID flag for the park
+        stance_full = None                     # set by apply_torque_magnitudes
+
+    engage_controller_safely():
+        write stance torque = 0 to both legs, FIRST - blocking, never giving up
+        # same trap 4 as splineAlt. PJMC.csv ships 0 here anyway, but we do not rely on the SD card
+
+    apply_torque_magnitudes(plantar_nm, dorsi_nm, body_mass) -> scaling:
+        dorsi_nm != 0 -> raise ValueError       # PJMC has no dorsiflexion lobe
+        stance_full = plantar_nm * body_mass / BODY_MASS_STANDARD   (no body mass -> scaling 1.0)
+        return scaling
+        # WRITES NOTHING. With no torque scale to hold it silent, writing here would start assisting
+        # at full torque before the operator pressed start. The first percentage sends it
+
+    apply_torque_percentage(scale, stamp) -> applied:
+        stance_full is None -> raise RuntimeError   # nothing to scale yet
+        clamped = clamp(scale, 0, torque_percentage_max)
+        REQUEST stance torque = stance_full * clamped / 100 on both legs, and return at once
+        # logged in Nm: requested = stance_full * scale / 100, sent = after the clamp
+        return clamped
+
+    park_to_transparency():   the same _park_to_zero_torque as splineAlt
+    # no apply_peak_timing and no latest_torque_request: PJMC has no timing, and only UDP mode uses the latter
 ```
 
 ---
@@ -370,10 +412,12 @@ IF 2:   game_theory_mode = 1
         # path makes "import Utilities.x" ambiguous in a way that fails confusingly
 
 IF 1:   game_theory_mode = 0
-        "Torque profile selection: please input OP, plantar, dorsi or udp.
+        "Torque profile selection: please input OP, PJMC, plantar, dorsi or udp.
          Hit enter for zero torque and IGNORE UDP input:"
 
         OP       -> keep the SD card timings unchanged, both lobes live
+        PJMC     -> use_pjmc = 1, plantar_nm = PJMC_max_plantarflexion_torque (15 at 75 kg), dorsi_nm = 0
+                    # otherwise exactly like OP: body mass, familiarization percentage, engage, loop, park
         plantar  -> ask peak plantarflexion timing.  in range -> dorsi_nm = 0 (disable the other lobe)
                                                      out of range -> both magnitudes 0, zero_torque_mode = 1
         dorsi    -> ask peak dorsiflexion timing.    in range -> plantar_nm = 0
@@ -401,10 +445,12 @@ ELIF not game_theory_mode:
 ### 3.2 Session setup — the one destructive step, gated on a human
 
 ```
+action_map = PJMC_action_map(...) if use_pjmc else SplineAlt_action_map(...)   # same calls from here on
+
 print loudly that this CHANGES THE ACTIVE CONTROLLER on both ankles
 input("press enter to engage, Ctrl-C to abort")
 
-engage_controller_safely()                                  # TorqScale = 0 first. Always.
+engage_controller_safely()                                  # TorqScale (or PJMC stance torque) = 0 first. Always.
 apply_torque_magnitudes(plantar_nm, dorsi_nm, body_mass)    # a 0 here disables that lobe
 if this mode chose a peak timing: apply_peak_timing(lobe, value, wait=True)   # setup: block
 

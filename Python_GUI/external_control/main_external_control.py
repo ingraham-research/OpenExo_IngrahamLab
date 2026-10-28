@@ -27,7 +27,7 @@ import sys
 import time
 
 from Utilities.OpenExoLink_utilities import OpenExoLink, OpenExoLinkError
-from Utilities.ActionMap_utilities import SplineAlt_action_map
+from Utilities.ActionMap_utilities import SplineAlt_action_map, PJMC_action_map
 
 
 def _load_module_from_file(module_name, file_path):
@@ -68,7 +68,8 @@ def main():
 
     #Initialize condition flags. These are set by the user prompt at beginining of code.
     udp_in_use = 0  # By default, don't listen on UDP unless user decided to
-    game_theory_mode = 0  # Default to no backend; only toggles if the user picks the game theory mode. 
+    game_theory_mode = 0  # Default to no backend; only toggles if the user picks the game theory mode.
+    use_pjmc = 0  # Default to the splineAlt profile; only toggles if the user picks PJMC in the profile menu
 
     #For debugging
     use_loop_time = 1  #If 1, all log timestamps within one loop iteration come from the loop start time, so everything logged in a cycle shares one timestamp
@@ -93,6 +94,7 @@ def main():
     max_torque_scaling = 100.0  #Claude has some concerns about the actual "requested torque" being larger than CSV demanded, but in the end we have PiD to correct for stuff like that   
     plantar_peak_torque = 20.0   #Peak plantarflexion magnitude in Nm at 100% scale, before body mass scaling
     dorsi_peak_torque = 0      #Peak dorsiflexion magnitude in Nm at 100% scale, before body mass scaling
+    PJMC_max_plantarflexion_torque = 20.0   #PJMC's max stance torque in Nm at 100% scale, before body mass scaling. Real peaks run higher, up to some ~25-30%, above it when the toe FSR saturates, so be careful about that
 
     #Timing
     operating_rate = 20             #Main loop rate in Hz. Nothing here needs to be fast - the exo runs its own loop at 100x this, and we only write a parameter now and then. Can go even lower
@@ -169,13 +171,19 @@ def main():
     if exo_mode == "1":
         game_theory_mode = 0
         print("Not running game-theory backend")
-        exo_mode_sub = input("Torque profile selection: please input OP, plantar, dorsi or udp. "
+        exo_mode_sub = input("Torque profile selection: please input OP, PJMC, plantar, dorsi or udp. "
                              "Hit enter for zero torque and IGNORE UDP input:\n")
         #Note the ankle's two lobes are plantarflexion and dorsiflexion, so these replace the hip exo's
         #'flexion' and 'extension'. They behave the same way: pick a lobe, place its peak, disable the other
         if exo_mode_sub.upper() == "OP":  #Here OP would refer to what the SD card natively carries, which should be "optimized"
             peak_timing_value = None
             print("Optimized torque profile selected - the timings on the SD card are used unchanged.")
+        elif exo_mode_sub.upper() == "PJMC":  #PJMC instead of the splineAlt profile: torque proportional to the toe FSR in stance
+            use_pjmc = 1
+            peak_timing_value = None
+            plantar_nm = PJMC_max_plantarflexion_torque
+            dorsi_nm = 0.0  #PJMC has no dorsiflexion lobe
+            print(f"PJMC selected - stance torque {PJMC_max_plantarflexion_torque} Nm at 100% for {body_mass_standard} kg, no dorsiflexion.")
         elif exo_mode_sub.lower() == "plantar":  #Plantarflexion-only torque profile mode
             exo_mode_sub = input("Plantarflexion-only mode. Please input the peak plantarflexion torque timing:\n")
             try:
@@ -282,8 +290,12 @@ def main():
 
     #Build the action map. This resolves every parameter address up front, so a name mismatch fails here
     #rather than half way through an experiment
+    #Both maps take the same calls from here on, so nothing below needs to know which one it got
     try:
-        action_map = SplineAlt_action_map(OpenExo_link, body_mass_standard, joints=joints_to_drive, controller=controller_name, torque_percentage_max=max_torque_scaling, verbose=1)
+        if use_pjmc:
+            action_map = PJMC_action_map(OpenExo_link, body_mass_standard, joints=joints_to_drive, torque_percentage_max=max_torque_scaling, verbose=1)
+        else:
+            action_map = SplineAlt_action_map(OpenExo_link, body_mass_standard, joints=joints_to_drive, controller=controller_name, torque_percentage_max=max_torque_scaling, verbose=1)
     except OpenExoLinkError as e:
         print(f"Could not resolve the controller parameters: {e}")
         input("Check the controller name against the printed matrix, then restart - hit enter to exit.\n")
@@ -292,7 +304,7 @@ def main():
 
     #Everything below this line writes to the exo
     print("\n=== The next step CHANGES THE ACTIVE CONTROLLER on both ankles ===")
-    print(f"    Both ankles will switch to {controller_name} at ZERO torque scale (transparency), then")
+    print(f"    Both ankles will switch to {action_map.controller} at ZERO torque (transparency), then")
     print(f"    the peak torque magnitudes will be set for a {body_mass_participant:.0f} kg participant.")
     print("    Make sure the trial is running in the GUI and the participant is ready.")
     input("Press enter to engage the controller, or Ctrl-C to abort:\n")

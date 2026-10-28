@@ -1,5 +1,6 @@
-"""SplineAlt_action_map on OpenExoLink V0.3, against a fake link: which writes block, which only request, the park.
-Also main_external_control's park-or-skip exit decision."""
+"""SplineAlt_action_map and PJMC_action_map on OpenExoLink V0.3, against a fake link: which writes block, which only
+request, the park. Also main_external_control's park-or-skip exit decision. Nothing here opens a socket - the fake
+link only records calls, so no test can reach the GUI or the exo."""
 import importlib.util
 import os
 import sys
@@ -15,6 +16,7 @@ _spec.loader.exec_module(am_mod)
 
 L_SCALE, R_SCALE = (68, 13, 10), (36, 13, 10)
 L_PARK, R_PARK = (68, 2, 0), (36, 2, 0)        # zeroTorque, PID flag
+L_STANCE, R_STANCE = (68, 3, 0), (36, 3, 0)    # PJMC, stance torque
 
 
 class FakeLink:
@@ -28,7 +30,7 @@ class FakeLink:
         self.wait_raises = None
 
     def resolve(self, joint, controller, param):
-        return ({"Ankle(L)": 68, "Ankle(R)": 36}[joint], {"splineAlt": 13, "zeroTorque": 2}[controller], param)
+        return ({"Ankle(L)": 68, "Ankle(R)": 36}[joint], {"splineAlt": 13, "zeroTorque": 2, "PJMC": 3}[controller], param)
 
     def set_param_confirmed(self, address, value, label="", max_retries="link default"):
         self.calls.append(("confirmed", address, value, label, max_retries))
@@ -120,6 +122,78 @@ def test_park_on_a_dead_link_reports_not_confirmed(amap, capsys):
     link.wait_raises = RuntimeError("The GUI reports the exo disconnected")
     assert m.park_to_transparency() == 0
     assert "park NOT confirmed" in capsys.readouterr().out
+
+
+############################### PJMC_action_map #############################################
+
+@pytest.fixture
+def pmap():
+    link = FakeLink()
+    return am_mod.PJMC_action_map(link, body_mass_standard=75, verbose=0), link
+
+
+def test_pjmc_engage_switches_on_at_zero_stance_torque_and_blocks(pmap):
+    m, link = pmap
+    m.engage_controller_safely()
+    assert link.calls == [("confirmed", L_STANCE, 0.0, "Ankle(L) PJMC stance torque", None),
+                          ("confirmed", R_STANCE, 0.0, "Ankle(R) PJMC stance torque", None)]
+
+
+def test_pjmc_magnitudes_scale_by_body_mass_but_write_nothing_yet(pmap):
+    # Writing the magnitude here would start assisting at full torque before the operator pressed start
+    m, link = pmap
+    assert m.apply_torque_magnitudes(15.0, 0.0, body_mass=150) == 2.0
+    assert link.calls == []
+
+
+def test_pjmc_percentage_requests_the_scaled_stance_torque_on_both_legs(pmap):
+    m, link = pmap
+    m.apply_torque_magnitudes(15.0, 0.0, body_mass=150)     # 30 Nm at 100%
+    assert m.apply_torque_percentage(50.0, stamp=3.0) == 50.0
+    assert link.calls == [("request", L_STANCE, 15.0, "Ankle(L) PJMC stance torque", 15.0, 3.0, False),
+                          ("request", R_STANCE, 15.0, "Ankle(R) PJMC stance torque", 15.0, 3.0, False)]
+
+
+def test_pjmc_percentage_is_clamped_to_0_100_and_logs_what_was_asked_in_nm(pmap):
+    m, link = pmap
+    m.apply_torque_magnitudes(15.0, 0.0)                    # no body mass: sent as given, 15 Nm at 100%
+    assert m.apply_torque_percentage(130.0) == 100.0
+    assert [(c[2], c[4]) for c in link.calls] == [(15.0, 19.5), (15.0, 19.5)]
+    link.calls.clear()
+    assert m.apply_torque_percentage(-10.0) == 0.0          # a negative stance torque would assist the wrong way
+    assert [(c[2], c[4]) for c in link.calls] == [(0.0, -1.5), (0.0, -1.5)]
+
+
+def test_pjmc_rejects_a_dorsi_magnitude_without_writing(pmap):
+    m, link = pmap
+    with pytest.raises(ValueError):
+        m.apply_torque_magnitudes(15.0, 5.0)
+    assert link.calls == []
+
+
+def test_pjmc_percentage_before_magnitudes_refuses_to_write(pmap):
+    # There is no magnitude to scale yet - sending anything would be a guess
+    m, link = pmap
+    with pytest.raises(RuntimeError):
+        m.apply_torque_percentage(50.0)
+    assert link.calls == []
+
+
+def test_pjmc_park_switches_to_zero_torque_with_pid_off_and_waits_for_both(pmap, capsys):
+    m, link = pmap
+    assert m.park_to_transparency() == 1
+    assert link.exit_keep == [L_PARK, R_PARK]
+    assert [(c[1], c[2], c[6]) for c in link.calls] == [(L_PARK, 0.0, True), (R_PARK, 0.0, True)]
+    assert "Parked both ankles" in capsys.readouterr().out
+
+
+def test_pjmc_park_abandoned_or_on_a_dead_link_reports_not_confirmed(pmap, capsys):
+    m, link = pmap
+    link.wait_raises = KeyboardInterrupt()
+    assert m.park_to_transparency() == 0
+    link.wait_raises = RuntimeError("The GUI reports the exo disconnected")
+    assert m.park_to_transparency() == 0
+    assert capsys.readouterr().out.count("park NOT confirmed") == 2
 
 
 ############################### main_external_control's exit decision #############################################

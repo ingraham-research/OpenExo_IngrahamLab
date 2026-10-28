@@ -33,6 +33,13 @@ SPLINEALT_D_GAIN = 16
 ZERO_TORQUE_CONTROLLER = "zeroTorque"   #As the exo advertises it (ExoCode/src/ParseIni.h). Also the ankle's boot controller in config.ini
 ZERO_TORQUE_USE_PID = 0                 #Flag for closed loop torque control. With it off the motor is simply sent 0 Nm
 
+#PJMC, the proportional joint moment controller. Index source is ExoCode/src/ControllerData.h (namespace
+#controller_defs::proportional_joint_moment), mirrored by the column order in SDCard/ankleControllers/PJMC.csv
+PJMC_CONTROLLER = "PJMC"    #As the exo advertises it (ExoCode/src/ParseIni.h)
+PJMC_STANCE_MAX = 0         #Stance torque in Nm. It multiplies the rescaled toe FSR, which tops out at 1.27-1.29 when the
+                            #FSR saturates (depends on the FSR threshold), so real peaks run up to ~28% above this number. PJMC has NO torque scale
+                            #parameter, so the torque percentage is folded into this value instead
+
 #"See below" on the dwell line: the Teensy builds each lobe as (peak - rise, 0) (peak, amp) (peak + dwell, amp)
 #(peak + dwell + fall, 0), and PCHIP rejects two nodes sharing an x. A zero DWELL simply collapses the lobe to
 #three nodes, which is the normal no-plateau case. A zero RISE or FALL instead duplicates an x, the whole
@@ -41,7 +48,8 @@ ZERO_TORQUE_USE_PID = 0                 #Flag for closed loop torque control. Wi
 #
 #Note this class only ever writes splineAlt indices 0, 1, 2, 3 and 10, plus zeroTorque's PID flag in the park on the
 #way out. Everything else is left at whatever splineAlt.csv loaded, so the gains and the flags stay a GUI/SD card
-#decision rather than something the backend can move.
+#decision rather than something the backend can move. PJMC_action_map below is the same idea for PJMC: it only ever
+#writes PJMC index 0 (stance torque) plus the same park, and PJMC.csv keeps the rest.
 
 
 
@@ -184,22 +192,109 @@ class SplineAlt_action_map:
         inheriting whatever this run left behind (a moved peak timing, say). It is also the ankle's boot state.
         Writing the PID flag switches the joint and loads zeroTorque.csv first, then sets the flag, so the PID ends up
         off whatever the SD card holds'''
-        try:
-            self.exo_link.begin_exit(self._park_addr)
-            commands = [self.exo_link.request(addr, 0.0, label=f"{joint} zeroTorque PID flag", force=True)
-                        for addr, joint in zip(self._park_addr, self.joints)]
-            print("Parking both ankles on zeroTorque with PID off (transparency). Ctrl-C again to abandon.")
-            self.exo_link.wait_for(commands)
-        except KeyboardInterrupt:
-            print("park NOT confirmed - abandoned by the operator. The exo keeps whatever it last accepted. "
-                  "Stop the trial from the GUI.")
-            return 0
-        except Exception as e:  #Catch everything else on purpose - this runs in shutdown paths, so it must never raise on its own
-            print(f"WARNING: park NOT confirmed: {e}")
-            print("The exo keeps whatever it last accepted. Stop the trial from the GUI.")
-            return 0
-        if all(c.result == "accepted" for c in commands):
-            print("Parked both ankles on zeroTorque with PID off (transparency)")
-            return 1
-        print(f"WARNING: park NOT confirmed: {[c.result for c in commands]}. Stop the trial from the GUI.")
+        return _park_to_zero_torque(self.exo_link, self._park_addr, self.joints)
+
+
+def _park_to_zero_torque(exo_link, park_addr, joints):
+    '''The park both action maps share: write zeroTorque's PID flag = 0 on every joint, after dropping everything else
+    still waiting, and wait for every ack. Returns 1 if all joints acknowledged it, 0 if not. Never raises, because it
+    runs in shutdown paths'''
+    try:
+        exo_link.begin_exit(park_addr)
+        commands = [exo_link.request(addr, 0.0, label=f"{joint} zeroTorque PID flag", force=True)
+                    for addr, joint in zip(park_addr, joints)]
+        print("Parking both ankles on zeroTorque with PID off (transparency). Ctrl-C again to abandon.")
+        exo_link.wait_for(commands)
+    except KeyboardInterrupt:
+        print("park NOT confirmed - abandoned by the operator. The exo keeps whatever it last accepted. "
+              "Stop the trial from the GUI.")
         return 0
+    except Exception as e:  #Catch everything else on purpose - this runs in shutdown paths, so it must never raise on its own
+        print(f"WARNING: park NOT confirmed: {e}")
+        print("The exo keeps whatever it last accepted. Stop the trial from the GUI.")
+        return 0
+    if all(c.result == "accepted" for c in commands):
+        print("Parked both ankles on zeroTorque with PID off (transparency)")
+        return 1
+    print(f"WARNING: park NOT confirmed: {[c.result for c in commands]}. Stop the trial from the GUI.")
+    return 0
+
+
+class PJMC_action_map:
+    """The PJMC counterpart of SplineAlt_action_map, with the same method names so main_external_control can use either.
+    PJMC is the toe-FSR proportional controller: in stance it asks for stance torque x rescaled toe FSR, in swing nothing.
+
+    What differs from splineAlt: PJMC has no torque scale parameter and no peak timing. So the torque percentage is
+    folded into the stance torque itself (stance torque = magnitude x body mass scaling x percentage / 100), and there
+    is no apply_peak_timing.
+
+    Inputs: as SplineAlt_action_map, minus the controller name - this class only ever drives PJMC"""
+
+    def __init__(self, exo_link, body_mass_standard, joints=("Ankle(L)", "Ankle(R)"),
+                 torque_percentage_max=100.0, verbose=1):
+        self.exo_link = exo_link                        #The open link to the GUI. We never talk to the exo any other way
+        self.joints = list(joints)                      #Kept as a list so it can be zipped alongside the address lists below
+        self.controller = PJMC_CONTROLLER               #Only kept for messages; the addresses below are already resolved
+        self.torque_percentage_max = torque_percentage_max        #Our own ceiling on the torque percentage, checked before every write
+        self.body_mass_standard = body_mass_standard    #In kg. The body mass the stance torque magnitude is quoted for
+        self.verbose = verbose                          #If 1, every action prints as it is applied
+        self._stance_max_full = None                    #Body-mass-scaled stance torque at 100%, set by apply_torque_magnitudes
+
+        #Resolve every address once, up front, so a name the exo did not advertise fails here at setup. One address PER JOINT
+        self._stance_max_addr = [exo_link.resolve(j, PJMC_CONTROLLER, PJMC_STANCE_MAX) for j in self.joints]
+        #The park, on the way out. Resolved here as well, so a zeroTorque row the handshake lost also fails at setup
+        self._park_addr = [exo_link.resolve(j, ZERO_TORQUE_CONTROLLER, ZERO_TORQUE_USE_PID) for j in self.joints]
+
+        if self.verbose:
+            print(f"Action map ready: {PJMC_CONTROLLER} on {self.joints}, torque percentage capped at {torque_percentage_max}%")
+
+    ############################### Session setup #############################################
+
+    def engage_controller_safely(self):
+        '''Switch both ankles onto PJMC with the stance torque at ZERO, before anything else. Same reason as splineAlt's:
+        writing ANY parameter of a controller that is not the active one switches the joint to it and loads its SD card
+        defaults, so the first write must be the one that keeps it silent. PJMC.csv ships stance torque 0 anyway, but we do
+        not rely on the SD card'''
+        if self.verbose:
+            print("Engaging PJMC at zero stance torque (transparency) before anything else...")
+        for addr, joint in zip(self._stance_max_addr, self.joints):
+            self.exo_link.set_param_confirmed(addr, 0.0, label=f"{joint} PJMC stance torque", max_retries=None)
+
+    def apply_torque_magnitudes(self, plantar_nm, dorsi_nm, body_mass=None):
+        '''Work out the body-mass-scaled stance torque at 100%. Same signature as splineAlt's so the caller needs no
+        branch, but unlike splineAlt this WRITES NOTHING: PJMC has no torque scale to hold it silent, so the stance
+        torque only goes out with the first torque percentage, once the operator has pressed start.
+
+        dorsi_nm must be 0 - PJMC has no dorsiflexion lobe. Returns the scaling factor that was applied.'''
+        if dorsi_nm != 0:
+            raise ValueError(f"PJMC has no dorsiflexion lobe, so dorsi_nm must be 0 (got {dorsi_nm})")
+        scaling = 1.0
+        if body_mass is not None:
+            scaling = float(body_mass) / self.body_mass_standard    #The same body_mass_scaling_factor as splineAlt's magnitudes
+        self._stance_max_full = plantar_nm * scaling                #Stance torque at 100%. Every percentage scales THIS
+        if self.verbose:
+            print(f"PJMC stance torque scaled by {scaling:.2f} for body mass: {plantar_nm} -> {self._stance_max_full:.2f} Nm at 100%")
+        return scaling
+
+    ############################### The experiment loop action #############################################
+
+    def apply_torque_percentage(self, _scale, stamp=None):
+        '''Request a torque percentage on both ankles, as stance torque = the scaled magnitude x percentage / 100. Returns at
+        once with the percentage that will be applied, after clamping. Logged values are in Nm, like what goes on the wire:
+        requested is what the raw percentage would have asked for, sent is after the clamp'''
+        if self._stance_max_full is None:
+            raise RuntimeError("apply_torque_magnitudes must run before any torque percentage - there is nothing to scale yet")
+        _scale_clamped = min(max(float(_scale), 0.0), self.torque_percentage_max)  #Floor at 0 too - a negative stance torque would assist the wrong way
+        if _scale_clamped != float(_scale) and self.verbose:
+            print(f"  Torque percentage {_scale:.2f}% clamped to {_scale_clamped:.2f}% by our own safety limit")
+
+        stance_nm = self._stance_max_full * _scale_clamped / 100.0
+        requested_nm = self._stance_max_full * float(_scale) / 100.0
+        for addr, joint in zip(self._stance_max_addr, self.joints):   #Every joint gets the same value, so both legs assist identically
+            self.exo_link.request(addr, stance_nm, label=f"{joint} PJMC stance torque", requested=requested_nm, stamp=stamp)
+        return _scale_clamped
+
+    def park_to_transparency(self):
+        '''Same park as splineAlt's: zeroTorque with its PID OFF on both sides, waiting for both acks. Leaving PJMC also
+        means the next run's engage write reloads PJMC.csv fresh. Returns 1 if both sides acknowledged it, 0 if not'''
+        return _park_to_zero_torque(self.exo_link, self._park_addr, self.joints)
