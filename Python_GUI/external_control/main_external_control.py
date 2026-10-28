@@ -92,7 +92,7 @@ def main():
     joints_to_drive = ("Ankle(L)", "Ankle(R)")
     max_torque_scaling = 100.0  #Claude has some concerns about the actual "requested torque" being larger than CSV demanded, but in the end we have PiD to correct for stuff like that   
     plantar_peak_torque = 20.0   #Peak plantarflexion magnitude in Nm at 100% scale, before body mass scaling
-    dorsi_peak_torque = 5.0      #Peak dorsiflexion magnitude in Nm at 100% scale, before body mass scaling
+    dorsi_peak_torque = 0      #Peak dorsiflexion magnitude in Nm at 100% scale, before body mass scaling
 
     #Timing
     operating_rate = 20             #Main loop rate in Hz. Nothing here needs to be fast - the exo runs its own loop at 100x this, and we only write a parameter now and then. Can go even lower

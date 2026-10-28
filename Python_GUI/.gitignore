@@ -167,5 +167,8 @@ Saved_Data/gui_settings.txt
 Saved_Data/logs/
 Saved_Data/*.log
 
+# This is the format of Zijie's participant logs
+Saved_Data/*_*.csv 
+
 #External control logs also shouldn't be tracked
 external_control/External Loop logs/
