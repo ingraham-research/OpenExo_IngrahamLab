@@ -896,14 +896,14 @@ float Spline::calc_motor_cmd()
 
     float torque_cmd = _pchip_interpolate(x, y, percent_gait);
     // Feed-forward clamp. Raised 15 -> 25 Nm on 2026-09-09, at the same time as
-    // MAX_JOINT_TORQUE_NM (25 -> 30 in Config.h). Read that note for the reasoning and for
-    // what else the ceiling change affects.
+    // MAX_JOINT_TORQUE_NM (25 -> 30 in Config.h, then 30 -> 35 on 2026-10-28). Read that note
+    // for the reasoning and for what else the ceiling change affects.
     //
     // This bounds ONLY the profile. The PID correction is added on top of it below and has no
     // limit of its own, so what the motor finally sees is capped by MAX_JOINT_TORQUE_NM. The
-    // gap between the two is the PID's authority: 30 - 25 = 5 Nm, which at the p_gain of 3 in
-    // spline.csv / splineAlt.csv is about 1.7 Nm of tracking error before the command clips at
-    // the peak. Keep the two numbers moving together; raising this one alone just moves the
+    // gap between the two is the PID's authority: 35 - 25 = 10 Nm, which is about 3.3 Nm of
+    // tracking error at the p_gain of 3 in spline.csv (1.7 Nm at the 6 in splineAlt.csv) before
+    // the command clips at the peak. Keep the two numbers moving together; raising this one alone just moves the
     // truncation from here to Motor.cpp without delivering any more torque.
     if (torque_cmd > 25.0f)
     {
@@ -1390,14 +1390,14 @@ float SplineAlt::calc_motor_cmd()
     }
 
     // Feed-forward clamp. Raised 15 -> 25 Nm on 2026-09-09, at the same time as
-    // MAX_JOINT_TORQUE_NM (25 -> 30 in Config.h). Read that note for the reasoning and for
-    // what else the ceiling change affects.
+    // MAX_JOINT_TORQUE_NM (25 -> 30 in Config.h, then 30 -> 35 on 2026-10-28). Read that note
+    // for the reasoning and for what else the ceiling change affects.
     //
     // This bounds ONLY the profile. The PID correction is added on top of it below and has no
     // limit of its own, so what the motor finally sees is capped by MAX_JOINT_TORQUE_NM. The
-    // gap between the two is the PID's authority: 30 - 25 = 5 Nm, which at the p_gain of 3 in
-    // spline.csv / splineAlt.csv is about 1.7 Nm of tracking error before the command clips at
-    // the peak. Keep the two numbers moving together; raising this one alone just moves the
+    // gap between the two is the PID's authority: 35 - 25 = 10 Nm, which is about 3.3 Nm of
+    // tracking error at the p_gain of 3 in spline.csv (1.7 Nm at the 6 in splineAlt.csv) before
+    // the command clips at the peak. Keep the two numbers moving together; raising this one alone just moves the
     // truncation from here to Motor.cpp without delivering any more torque.
     if (torque_cmd > 25.0f)
     {

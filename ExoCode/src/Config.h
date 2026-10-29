@@ -66,7 +66,7 @@
 	//_CANMotor::send_data() as the final gate before the CAN frame is built, so it applies AFTER
 	//feed-forward, PID, gain scheduling, and every controller. Non-finite commands are forced to 0
 	//there too (constrain() is a macro and passes NaN straight through to a full-scale command).
-	//This is a FAULT LIMIT, not a tuning knob: normal ankle assist peaks around 12-20 Nm, so 30
+	//This is a FAULT LIMIT, not a tuning knob: normal ankle assist peaks around 12-20 Nm, so 35
 	//leaves headroom while making a runaway physically impossible. Raise only with a real reason.
 	//
 	//2026-09-09: raised 25 -> 30, together with the Spline/SplineAlt feed-forward clamps (15 -> 25),
@@ -74,13 +74,16 @@
 	//that the feed-forward alone consistently UNDER-delivers measured torque; the PID is what
 	//brings the measured value up to the prescribed profile, so it must not be clipped exactly at
 	//the peak.
+	//2026-10-28: raised 30 -> 35 as a test, feed-forward clamps unchanged. In the 10-28 worn trial
+	//PJMC at stance 20 Nm had the command pinned at 30 at every stride's peak (estimated cost
+	//~1.5-3 Nm of measured torque), while splineAlt at 20 Nm barely reached it.
 	//Two things to keep in mind. (1) This is still the ONLY absolute torque ceiling in the system
 	//and it is GLOBAL: it applies to every joint and every controller, so raising it also raises
 	//the worst case for PJMC, chirp, step and any PID runaway, not just the two splines.
-	//(2) Electrical headroom is unaffected: 30 Nm at the ankle is 30 / 4.5 gearing / 1.11 Kt =
-	//6.0 A against the AK60v3's 10.3 A full scale, so the _I_MAX saturation in send_data() is
+	//(2) Electrical headroom is unaffected: 35 Nm at the ankle is 35 / 4.5 gearing / 1.11 Kt =
+	//7.0 A against the AK60v3's 10.3 A full scale, so the _I_MAX saturation in send_data() is
 	//still not the binding limit and this define remains what actually stops a runaway.
-	#define MAX_JOINT_TORQUE_NM 30.0f
+	#define MAX_JOINT_TORQUE_NM 35.0f
 
 	// ===================== ERROR MANAGER / ERROR REPORTER: TEMPORARILY DISABLED =====================
 	// 0 = the whole error-detection-and-reporting framework is compiled out (current, deliberate).

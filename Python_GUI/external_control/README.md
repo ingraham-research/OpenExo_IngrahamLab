@@ -94,7 +94,7 @@ costs a BLE round trip rather than being a local variable:
 - **Check `max_torque_scaling`.** It is the hard ceiling on the torque percentage, applied before every
   write (`torque_percentage_max` inside the action map). It now ships at **100**, i.e. the full profile
   the CSV asks for, scaled by body mass. The firmware clamps behind it were raised on 2026-09-09:
-  feed-forward ±25 Nm in both splines, `MAX_JOINT_TORQUE_NM` 30 — the feed-forward consistently
+  feed-forward ±25 Nm in both splines, `MAX_JOINT_TORQUE_NM` 30 (35 since 2026-10-28) — the feed-forward consistently
   under-delivers and the PID is what pulls measured torque up to the prescribed profile.
 - **Check `ack_timeout`** (1.0 s). It is how long a write waits for its acknowledgement before it counts
   as a failed attempt and is resent — or replaced, if a newer value for the same parameter is already

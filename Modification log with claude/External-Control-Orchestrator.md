@@ -343,3 +343,21 @@ How it works (`Utilities/ActionMap_utilities.py`, new `PJMC_action_map`, same me
 **Host-tested only.** There are 8 new `PJMC_action_map` tests in `Python_GUI/tests/test_actionmap.py`. They use the same
 in-memory fake link as the splineAlt tests, so nothing can reach the GUI or the exo. The full GUI suite passes
 (110, `test_receive_UDP.py` excluded as before). The menu branch in `main` is input-driven and has no test. Not yet run on the exo.
+
+## Global torque ceiling raised 30 -> 35 Nm (2026-10-28)
+
+The user's call, as a test: `MAX_JOINT_TORQUE_NM` 30.0f -> 35.0f in `Config.h`. The Spline/SplineAlt feed-forward
+clamps stay at ±25, so only the PID's headroom above the profile grows (5 -> 10 Nm at a 25 Nm profile). The reason:
+in the 10-28 worn trial (`Python_GUI/Saved_Data/trial_cable_tension_walking.csv`), PJMC at stance 20 Nm (desired
+25.7) had the command pinned at 30 for about 20 % of every stride, from ~24 % to ~3 % before toe-off. The estimated
+cost was ~1.5-3 Nm of measured torque at the peak. SplineAlt at 20 Nm also reaches 30, but late in the lobe, where
+the transmission passes only ~0.4-0.5 of the command.
+
+- Still well inside the hardware: 35 / 4.5 / 1.11 = 7.0 A against the 10.3 A field full scale (`_I_MAX` binds at
+  51.4 Nm). It is ~36.7 Nm actual if the MIT field is N·m (×1.165 / 1.11), below the motor's ~40.5 Nm joint-side peak.
+  The comment in `Motor.cpp` that said "30 really clamps at 34.9" was the old arithmetic slip and now says 35 -> ~36.7.
+- Still global: it raises the worst case for every controller and for any PID runaway or swing-phase D kick.
+- The cable carries the full command. Check the kit rating (1/16" kit "up to 20 Nm", 3/32" kit "up to 35 Nm").
+- Comments updated in `Config.h`, both feed-forward clamp notes in `Controller.cpp`, `ControllerData.cpp`,
+  `Motor.cpp` and `Python_GUI/external_control/README.md`.
+- Compiles clean for `teensy:avr:teensy41` (exit 0, no new warnings). Not flashed, not run on motors.

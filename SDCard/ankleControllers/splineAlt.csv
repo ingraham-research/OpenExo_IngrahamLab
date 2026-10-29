@@ -3,4 +3,4 @@
 ,Parameter list for the splineAlt controller. Torque magnitudes are POSITIVE; plantarflexion is applied negative internally. Rise/dwell/fall are durations in percent gait. Dwell 0 = no plateau. A lobe with magnitude 0 is disabled. Lobes may wrap past 100 percent.
 ,Parameter order:
 PlantarNm,DorsiNm,PlantarPk,DorsiPk,PlantRise,PlantDwel,PlantFall,DorsiRise,DorsiDwel,DorsiFall,TorqScale,1=sim%gt,1=%gait,PID Flag,P Gain,I Gain,D Gain
-20,0,15,65,15,0,20,5,0,5,100,0,1,1,6,0,0.03
+20,0,15,65,10,15,8,5,0,5,100,0,1,1,6,0,0.01
