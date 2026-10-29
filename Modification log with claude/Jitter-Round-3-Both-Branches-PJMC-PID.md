@@ -376,6 +376,18 @@ Cheapest first, and **none of these have been done — all require your consent 
    feedback. Costs nothing, no reflash — it is an SD-card CSV value.
 2. **Test `kp_zero` fixed with no escalation** during swing (widen `ZERO_ERROR_BAND_NM` well past the noise,
    or clamp `kp` during zero setpoint). Predicted to halve peak swing command.
+   **Partly done 2026-10-28 (user's design):** the hard 3.5 Nm error switch is now a linear ramp. Near zero setpoint
+   (|setpoint| ≤ 0.5, unchanged), the gains go from the near-zero set at |error| ≤ 2 Nm to the nominal set at ≥ 5 Nm
+   (`gain_schedule_weight()` in `Controller.cpp`, shared by PJMC, Spline and SplineAlt). The near-zero gains went
+   3/0/0.001 -> 2/0/0.001; D stays 0.001 on purpose, because `zeroTorque.csv` and `PJMC.csv` use the same value. They are
+   hard-coded in Spline/SplineAlt, and set in `PJMC.csv` for PJMC.
+   - **Why 2 and 5:** in the 10-28 worn trial, 61-76 % of the swing rows above 3.5 Nm sat more than 150 ms from any torque
+     pulse, i.e. rattle, not real error. Open-swing error RMS is 1.4-1.9 Nm with the motor on and 2.0-2.3 with it off.
+   - **What it does and does not do:** an open-loop replay of those errors gives ~10 % lower swing P-term RMS. p99 and
+     max are unchanged (~30 and 41-58 Nm before the cap): errors above 5 Nm still get the full gains, as before.
+   - **Still a hard step:** the setpoint gate itself, deliberately (one change at a time).
+   - Host test of the ramp (`g++ -Wall -Wextra -Werror` on the extracted function) passes. Teensy compile clean, not
+     flashed.
 3. **Sanity test with `use PID = 0` in `PJMC.csv`** — pure feed-forward. If the jitter vanishes entirely,
    that confirms the whole chain above and gives a clean baseline to tune back up from.
 4. **Investigate the common-mode rise (§6.5)** — torque-sensor zeroing, belt/transmission, battery sag under

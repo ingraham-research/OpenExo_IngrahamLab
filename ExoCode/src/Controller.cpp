@@ -203,7 +203,26 @@ float _Controller::_cf_mfac(float reference, float current_measurement)         
 }
 
 //****************************************************
- 
+
+// Blend weight for the near-zero gain schedulers (PJMC, Spline, SplineAlt), used while the setpoint
+// is near zero: 0 (near-zero gains) up to 2 Nm of error, 1 (nominal gains) from 5 Nm, linear in
+// between. Added 2026-10-28 to replace a hard switch at 3.5 Nm. 2 Nm is about the swing error floor
+// (mechanical rattle, ~1.4-2 Nm RMS in the 10-28 worn trial), so rattle alone barely raises the
+// gains, and a real error ramps to the full gains instead of stepping. A NaN error gives 0.
+static float gain_schedule_weight(float torque_error)
+{
+    const float BLEND_START_NM = 2.0f;
+    const float BLEND_END_NM = 5.0f;
+    const float w = (fabsf(torque_error) - BLEND_START_NM) / (BLEND_END_NM - BLEND_START_NM);
+    if (!(w > 0.0f))
+    {
+        return 0.0f;
+    }
+    return (w < 1.0f) ? w : 1.0f;
+}
+
+//****************************************************
+
 float _Controller::_pid(float cmd, float measurement, float p_gain, float i_gain, float d_gain)
 {	
 	// Disable pid for torque control if the torque sensor isn't calibrated
@@ -684,21 +703,22 @@ float ProportionalJointMoment::calc_motor_cmd()
 
         if (gain_sched_enabled)
         {
-            // Conditions for "near zero" gains:
-            // - setpoint is close to zero torque
-            // - measured torque is not far from that zero-torque target
+            // Near-zero gains while the setpoint is close to zero torque, ramping to the nominal gains
+            // as the error grows from 2 to 5 Nm (gain_schedule_weight). Until 2026-10-28 this was a
+            // hard switch at 3.5 Nm, which swing rattle crossed on 5-8 % of swing rows.
             const float ZERO_SETPOINT_BAND_NM = 0.5f;
-            const float ZERO_ERROR_BAND_NM = 3.5f;
             const float torque_error = _controller_data->filtered_setpoint - _controller_data->filtered_torque_reading;
             const bool near_zero_setpoint = (fabsf(_controller_data->filtered_setpoint) <= ZERO_SETPOINT_BAND_NM);
-            const bool near_zero_error = (fabsf(torque_error) <= ZERO_ERROR_BAND_NM);
 
-            if (near_zero_setpoint && near_zero_error)
+            if (near_zero_setpoint)
             {
-                kp_use = _controller_data->parameters[controller_defs::proportional_joint_moment::kp_zero];
-                ki_use = _controller_data->parameters[controller_defs::proportional_joint_moment::ki_zero];
-                kd_use = _controller_data->parameters[controller_defs::proportional_joint_moment::kd_zero];
-    
+                const float kp_zero = _controller_data->parameters[controller_defs::proportional_joint_moment::kp_zero];
+                const float ki_zero = _controller_data->parameters[controller_defs::proportional_joint_moment::ki_zero];
+                const float kd_zero = _controller_data->parameters[controller_defs::proportional_joint_moment::kd_zero];
+                const float w = gain_schedule_weight(torque_error);
+                kp_use = kp_zero + w * (kp_use - kp_zero);
+                ki_use = ki_zero + w * (ki_use - ki_zero);
+                kd_use = kd_zero + w * (kd_use - kd_zero);
             }
             else
             {
@@ -936,11 +956,14 @@ float Spline::calc_motor_cmd()
         // where the high d gain turns torque-sensor noise into visible shaking.
         //
         // !! These near-zero gains are HARD CODED and CANNOT be modified from the GUI or the SD card. !!
-        // Only the nominal p/i/d below are read from the controller parameters. The values here match
-        // SDCard/ankleControllers/zeroTorque.csv (3 / 0 / 0.001) and PJMC's kp_zero/ki_zero/kd_zero.
+        // Only the nominal p/i/d below are read from the controller parameters. The values here
+        // were 3 / 0 / 0.001, copied from SDCard/ankleControllers/zeroTorque.csv (whose PID is now off);
+        // P loosened to 2 on 2026-10-28 (2 / 0 / 0.001), with PJMC.csv's kp_zero set to match. The d of
+        // 0.001 is deliberate, not a typo: it is the same in zeroTorque.csv and PJMC.csv. At 500 Hz it
+        // adds only 0.5x a one-sample jump in the torque reading to the command.
         // TODO: make these configurable by reading the ZeroTorque controller's parameters instead of
         // hard-coding them, so the transparency gains are tuned in exactly one place.
-        const float KP_ZERO = 3.0f;
+        const float KP_ZERO = 2.0f;
         const float KI_ZERO = 0.0f;
         const float KD_ZERO = 0.001f;
 
@@ -949,20 +972,19 @@ float Spline::calc_motor_cmd()
         float ki_use = _controller_data->parameters[controller_defs::spline::i_gain_idx];
         float kd_use = _controller_data->parameters[controller_defs::spline::d_gain_idx];
 
-        // Conditions for "near zero", same bands as PJMC:
-        // - the spline is commanding close to zero torque
-        // - the measured torque is not far from that zero-torque target
+        // Same scheduling as PJMC. Near zero setpoint the gains ramp from the near-zero set to the nominal set as the error
+        // grows from 2 to 5 Nm (gain_schedule_weight). Until 2026-10-28 this was a hard switch at
+        // 3.5 Nm, which swing rattle crossed on 5-8 % of swing rows. Same change in PJMC.
         const float ZERO_SETPOINT_BAND_NM = 0.5f;
-        const float ZERO_ERROR_BAND_NM = 3.5f;
         const float torque_error = torque_cmd - _controller_data->filtered_torque_reading;
         const bool near_zero_setpoint = (fabsf(torque_cmd) <= ZERO_SETPOINT_BAND_NM);
-        const bool near_zero_error = (fabsf(torque_error) <= ZERO_ERROR_BAND_NM);
 
-        if (near_zero_setpoint && near_zero_error)
+        if (near_zero_setpoint)
         {
-            kp_use = KP_ZERO;
-            ki_use = KI_ZERO;
-            kd_use = KD_ZERO;
+            const float w = gain_schedule_weight(torque_error);
+            kp_use = KP_ZERO + w * (kp_use - KP_ZERO);
+            ki_use = KI_ZERO + w * (ki_use - KI_ZERO);
+            kd_use = KD_ZERO + w * (kd_use - KD_ZERO);
         }
         // End of gain scheduling
 
@@ -1423,11 +1445,14 @@ float SplineAlt::calc_motor_cmd()
         // Copied verbatim from Spline::calc_motor_cmd, which in turn mirrors PJMC's scheduler.
         //
         // !! These near-zero gains are HARD CODED and CANNOT be modified from the GUI or the SD card. !!
-        // Only the nominal p/i/d below are read from the controller parameters. The values here match
-        // SDCard/ankleControllers/zeroTorque.csv (3 / 0 / 0.001) and PJMC's kp_zero/ki_zero/kd_zero.
+        // Only the nominal p/i/d below are read from the controller parameters. The values here
+        // were 3 / 0 / 0.001, copied from SDCard/ankleControllers/zeroTorque.csv (whose PID is now off);
+        // P loosened to 2 on 2026-10-28 (2 / 0 / 0.001), with PJMC.csv's kp_zero set to match. The d of
+        // 0.001 is deliberate, not a typo: it is the same in zeroTorque.csv and PJMC.csv. At 500 Hz it
+        // adds only 0.5x a one-sample jump in the torque reading to the command.
         // TODO (mirrors Spline's): read the ZeroTorque controller's parameters instead of hard-coding
         // them, so the transparency gains are tuned in exactly one place.
-        const float KP_ZERO = 3.0f;
+        const float KP_ZERO = 2.0f;
         const float KI_ZERO = 0.0f;
         const float KD_ZERO = 0.001f;
 
@@ -1436,20 +1461,23 @@ float SplineAlt::calc_motor_cmd()
         float ki_use = _controller_data->parameters[controller_defs::spline_alt::i_gain_idx];
         float kd_use = _controller_data->parameters[controller_defs::spline_alt::d_gain_idx];
 
-        // Conditions for "near zero", same bands as PJMC and Spline.
+        // Same scheduling as PJMC and Spline.
         // Note this is also what makes torque_scale = 0 a usable transparency mode: every node
-        // collapses to zero, so the scheduler holds the tuned zero-torque gains all stride.
+        // collapses to zero, so the scheduler holds the near-zero gains all stride (ramping up only
+        // on errors above 2 Nm).
+        // Near zero setpoint the gains ramp from the near-zero set to the nominal set as the error
+        // grows from 2 to 5 Nm (gain_schedule_weight). Until 2026-10-28 this was a hard switch at
+        // 3.5 Nm, which swing rattle crossed on 5-8 % of swing rows. Same change in PJMC.
         const float ZERO_SETPOINT_BAND_NM = 0.5f;
-        const float ZERO_ERROR_BAND_NM = 3.5f;
         const float torque_error = torque_cmd - _controller_data->filtered_torque_reading;
         const bool near_zero_setpoint = (fabsf(torque_cmd) <= ZERO_SETPOINT_BAND_NM);
-        const bool near_zero_error = (fabsf(torque_error) <= ZERO_ERROR_BAND_NM);
 
-        if (near_zero_setpoint && near_zero_error)
+        if (near_zero_setpoint)
         {
-            kp_use = KP_ZERO;
-            ki_use = KI_ZERO;
-            kd_use = KD_ZERO;
+            const float w = gain_schedule_weight(torque_error);
+            kp_use = KP_ZERO + w * (kp_use - KP_ZERO);
+            ki_use = KI_ZERO + w * (ki_use - KI_ZERO);
+            kd_use = KD_ZERO + w * (kd_use - KD_ZERO);
         }
         // End of gain scheduling
 
