@@ -15,5 +15,5 @@ Libraries/ArduinoBLE/extras/arduino-ble-parser.py
 Python_GUI/external_control/External Loop logs/
 
 #Everything in Test results (the folder name has a space, not an underscore)
-Test results/
+Random test and troubleshooting results/
 Participant experiments/
